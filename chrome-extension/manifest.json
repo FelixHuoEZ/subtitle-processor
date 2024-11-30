@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Windsurf Subtitle Helper",
+  "version": "1.0",
+  "description": "Extract subtitles from current page and send to Windsurf server",
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

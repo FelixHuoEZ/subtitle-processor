@@ -1,39 +1,88 @@
-version: '3'
+version: '3.8'
 
 services:
-  srt-viewer:
+  subtitle-processor:
     build: .
-    container_name: srt-viewer
-    restart: always
+    image: subtitle-processor:latest
+    container_name: subtitle-processor
+    restart: unless-stopped
     ports:
       - "5000:5000"
     volumes:
-      - ./app:/app
+      # - /share/docker/subtitle-processor/uploads:/app/uploads
+      # - /share/docker/subtitle-processor/videos:/app/videos
+      # - /share/docker/subtitle-processor/outputs:/app/outputs
+      # - /share/docker/subtitle-processor/config:/app/config
       - ./uploads:/app/uploads
+      - ./videos:/app/videos
       - ./outputs:/app/outputs
+      - ./config:/app/config
     environment:
+      - TZ=Asia/Shanghai
       - FLASK_APP=app.py
       - FLASK_ENV=development
-      - READWISE_API_TOKEN=${READWISE_API_TOKEN}
+      # 从配置文件读取API token
+      - READWISE_API_TOKEN_FILE=/app/config/readwise_token.txt
+      # 只对外部请求使用代理
+      # - NO_PROXY=transcribe-audio,localhost,127.0.0.1
+      # - ALL_PROXY=http://host.docker.internal:20172
+      # - HTTP_PROXY=http://host.docker.internal:20172
+      # - HTTPS_PROXY=http://host.docker.internal:20172
     networks:
       - srt-network
-    depends_on:
-      - funasronline
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
-  funasronline:
-    build:
-      context: .
-      dockerfile: Dockerfile.funasr
-    container_name: funasronline
-    restart: always
-    privileged: true
+  transcribe-audio:
+    build: ./transcribe-audio
+    image: transcribe-audio:latest
+    container_name: transcribe-audio
+    restart: unless-stopped
     ports:
       - "10095:10095"
     volumes:
-      - "./funasr-runtime-resources/models:/workspace/models"
-      - ./funasr-runtime-resources/ssl:/workspace/ssl
+      # - /share/docker/subtitle-processor/uploads:/app/uploads
+      # - /share/docker/subtitle-processor/videos:/app/videos
+      # - /share/docker/subtitle-processor/models:/app/models
+      # - /share/docker/subtitle-processor/outputs:/app/outputs
+      # - /share/docker/subtitle-processor/config:/app/config
+      - ./uploads:/app/uploads
+      - ./videos:/app/videos
+      - ./models:/app/models
+      - ./outputs:/app/outputs
+      - ./config:/app/config
+    environment:
+      - TZ=Asia/Shanghai
+      - MODEL_DIR=/app/models
+      - MODELSCOPE_CACHE=/app/models
+      - HF_HOME=/app/models
+      - TORCH_HOME=/app/models
+      - FUNASR_MODEL=paraformer-zh
+      - FUNASR_VAD_MODEL=fsmn-vad
+      - FUNASR_PUNC_MODEL=ct-punc
+      - FUNASR_SPK_MODEL=cam++
     networks:
       - srt-network
+
+  telegram-bot:
+    build: ./telegram-bot
+    image: telegram-bot:latest
+    container_name: telegram-bot
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - SUBTITLE_PROCESSOR_URL=http://subtitle-processor:5000
+      # - NO_PROXY=subtitle-processor,localhost,127.0.0.1
+      # - ALL_PROXY=http://host.docker.internal:20172
+      # - HTTP_PROXY=http://host.docker.internal:20172
+      # - HTTPS_PROXY=http://host.docker.internal:20172
+    networks:
+      - srt-network
+    depends_on:
+      - subtitle-processor
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 networks:
   srt-network:

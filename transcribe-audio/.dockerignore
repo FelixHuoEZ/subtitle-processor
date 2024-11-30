@@ -1,0 +1,9 @@
+models/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+.env
+*.log

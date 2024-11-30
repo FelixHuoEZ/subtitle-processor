@@ -12,6 +12,7 @@ import requests
 from yt_dlp import YoutubeDL
 import subprocess
 import re
+from flask_cors import CORS
 
 # 配置日志
 logging.basicConfig(
@@ -24,6 +25,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+# 启用CORS，允许所有域名访问
+CORS(app, resources={
+    r"/upload": {"origins": "*"},
+    r"/view/*": {"origins": "*"},
+    r"/process_youtube": {"origins": "*"}
+})
+
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max-limit
 app.config['UPLOAD_FOLDER'] = '/app/uploads'  # 上传文件存储路径
 app.config['OUTPUT_FOLDER'] = '/app/outputs'  # 输出文件存储路径
@@ -256,7 +264,7 @@ def download_youtube_subtitles(url):
                 # 检查是否有字幕
                 if not info.get('subtitles') and not info.get('automatic_captions'):
                     logger.warning("没有找到字幕")
-                    return None, None
+                    return None, info
                 
                 # 优先使用手动上传的字幕
                 subtitles = info.get('subtitles', {})
@@ -271,18 +279,77 @@ def download_youtube_subtitles(url):
                         for fmt in formats:
                             if fmt['ext'] == 'srt':
                                 logger.info(f"找到{lang}语言的SRT字幕")
-                                return fmt['url'], lang
+                                try:
+                                    # 下载字幕内容
+                                    subtitle_url = fmt['url']
+                                    logger.info(f"正在从URL下载字幕: {subtitle_url}")
+                                    response = requests.get(subtitle_url, timeout=30)
+                                    response.raise_for_status()  # 检查响应状态
+                                    
+                                    # 获取字幕内容的字节数据
+                                    content_bytes = response.content
+                                    
+                                    # 检查内容是否为空
+                                    if not content_bytes:
+                                        logger.warning(f"{lang}语言字幕内容为空，尝试下一个")
+                                        continue
+                                    
+                                    # 检测编码并解码
+                                    encoding = detect_file_encoding(content_bytes)
+                                    subtitle_content = content_bytes.decode(encoding)
+                                    
+                                    # 验证字幕内容是否有效
+                                    if not subtitle_content.strip() or '-->' not in subtitle_content:
+                                        logger.warning(f"{lang}语言字幕内容无效，尝试下一个")
+                                        continue
+                                    
+                                    logger.info(f"成功下载{lang}语言字幕，使用编码: {encoding}")
+                                    logger.debug(f"字幕内容预览: {subtitle_content[:200]}...")
+                                    return subtitle_content, info
+                                except Exception as e:
+                                    logger.error(f"下载{lang}语言字幕内容时出错: {str(e)}")
+                                    continue
+                        
                         # 如果没有srt格式，使用第一个可用格式
                         logger.info(f"找到{lang}语言的字幕，但不是SRT格式")
-                        return formats[0]['url'], lang
+                        try:
+                            subtitle_url = formats[0]['url']
+                            logger.info(f"正在从URL下载字幕: {subtitle_url}")
+                            response = requests.get(subtitle_url, timeout=30)
+                            response.raise_for_status()
+                            
+                            # 获取字幕内容的字节数据
+                            content_bytes = response.content
+                            
+                            # 检查内容是否为空
+                            if not content_bytes:
+                                logger.warning(f"{lang}语言字幕内容为空，尝试下一个")
+                                continue
+                            
+                            # 检测编码并解码
+                            encoding = detect_file_encoding(content_bytes)
+                            subtitle_content = content_bytes.decode(encoding)
+                            
+                            # 验证字幕内容是否有效
+                            if not subtitle_content.strip() or '-->' not in subtitle_content:
+                                logger.warning(f"{lang}语言字幕内容无效，尝试下一个")
+                                continue
+                            
+                            logger.info(f"成功下载{lang}语言字幕，使用编码: {encoding}")
+                            logger.debug(f"字幕内容预览: {subtitle_content[:200]}...")
+                            return subtitle_content, info
+                        except Exception as e:
+                            logger.error(f"下载{lang}语言字幕内容时出错: {str(e)}")
+                            continue
                 
-                logger.warning("未找到支持的字幕格式")
-                return None, None
+                logger.warning("未找到有效的字幕内容")
+                return None, info
                 
         except Exception as e:
             retry_count += 1
             error_msg = str(e)
             logger.error(f"下载YouTube字幕时出错 (尝试 {retry_count}/{max_retries}): {error_msg}")
+            logger.exception(e)  # 输出完整的错误堆栈
             
             if retry_count >= max_retries:
                 logger.error("达到最大重试次数，放弃下载")
@@ -331,54 +398,77 @@ def download_video(url):
 def transcribe_audio(audio_path):
     """使用FunASR转录音频"""
     try:
-        # 准备输出目录
-        output_dir = app.config['OUTPUT_FOLDER']
-        os.makedirs(output_dir, exist_ok=True)
+        # 使用transcribe-audio服务的内部网络地址
+        funasr_url = 'http://transcribe-audio:10095/recognize'
+        logger.info(f"发送请求到FunASR服务: {funasr_url}")
+        logger.info(f"音频文件路径: {audio_path}")
         
-        # 生成输出文件路径
-        base_name = os.path.splitext(os.path.basename(audio_path))[0]
-        output_file = os.path.join(output_dir, f"{base_name}.srt")
-        
-        # 调用FunASR服务
-        url = "http://funasronline:10095/funasr/v1/transcribe"
-        
-        with open(audio_path, 'rb') as f:
-            files = {
-                'audio': f
-            }
-            data = {
-                'mode': 'offline',
-                'lang': 'zh',
-                'hotwords': '',
-                'audio_format': 'wav',
-                'add_pun': True,
-                'add_pun_time': True,
-                'add_pun_duration': True,
-                'vad_size': 5,
-                'vad_threshold': 0.5
-            }
+        # 检查音频文件
+        if not os.path.exists(audio_path):
+            logger.error(f"音频文件不存在: {audio_path}")
+            return None
             
-            logger.info("开始发送音频到FunASR服务")
-            response = requests.post(url, files=files, data=data)
-            
-            if response.status_code != 200:
-                logger.error(f"FunASR服务返回错误: {response.status_code}")
-                logger.error(f"错误信息: {response.text}")
-                return None
+        file_size = os.path.getsize(audio_path)
+        logger.info(f"音频文件大小: {file_size} bytes")
+        
+        with open(audio_path, 'rb') as audio_file:
+            files = {'audio': audio_file}
+            try:
+                # 尝试DNS解析
+                import socket
+                try:
+                    transcribe_ip = socket.gethostbyname('transcribe-audio')
+                    logger.info(f"transcribe-audio DNS解析结果: {transcribe_ip}")
+                except socket.gaierror as e:
+                    logger.error(f"DNS解析失败: {str(e)}")
                 
-            result = response.json()
-            logger.info("成功获取转录结果")
-            
-            # 解析结果
-            if 'text' not in result:
-                logger.error("FunASR返回结果中没有text字段")
-                logger.debug(f"可用字段: {list(result.keys())}")
+                # 禁用代理，使用容器网络直接通信
+                local_proxies = {
+                    'http': None,
+                    'https': None
+                }
+                
+                # 添加超时设置
+                logger.info("开始发送请求...")
+                response = requests.post(
+                    funasr_url,
+                    files=files,
+                    proxies=local_proxies,
+                    timeout=300,
+                    verify=False  # 禁用SSL验证
+                )
+                logger.info(f"FunASR响应状态码: {response.status_code}")
+                logger.info(f"FunASR响应头: {response.headers}")
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    logger.info("成功获取转录结果")
+                    return result
+                else:
+                    logger.error(f"FunASR服务返回错误: {response.status_code}")
+                    logger.error(f"错误响应内容: {response.text}")
+                    # 尝试ping transcribe-audio
+                    try:
+                        import subprocess
+                        result = subprocess.run(['ping', 'transcribe-audio'], capture_output=True, text=True)
+                        logger.info(f"Ping结果: {result.stdout}")
+                    except Exception as e:
+                        logger.error(f"Ping失败: {str(e)}")
+                    return None
+                    
+            except requests.exceptions.ConnectionError as e:
+                logger.error(f"连接FunASR服务失败: {str(e)}")
                 return None
-            
-            return result
-            
+            except requests.exceptions.Timeout as e:
+                logger.error(f"FunASR服务请求超时: {str(e)}")
+                return None
+            except Exception as e:
+                logger.error(f"调用FunASR服务时发生错误: {str(e)}")
+                logger.error(f"错误类型: {type(e)}")
+                return None
     except Exception as e:
-        logger.error(f"转录音频时出错: {str(e)}")
+        logger.error(f"转录音频时发生错误: {str(e)}")
+        logger.error(f"错误类型: {type(e)}")
         return None
 
 def format_time(seconds):
@@ -442,11 +532,24 @@ def get_youtube_info(url):
 def save_to_readwise(title, content, url=None, published_date=None):
     """保存内容到Readwise，支持长文本分段"""
     try:
-        api_token = os.getenv('READWISE_API_TOKEN')
-        if not api_token:
-            logger.error("未设置READWISE_API_TOKEN环境变量")
+        # 从文件读取token
+        token_file = os.getenv('READWISE_API_TOKEN_FILE', '/app/config/readwise_token.txt')
+        if not os.path.exists(token_file):
+            logger.error(f"Readwise token文件不存在: {token_file}")
             return False
-
+            
+        with open(token_file, 'r') as f:
+            token = f.read().strip()
+            
+        if not token:
+            logger.error("Readwise token为空")
+            return False
+            
+        headers = {
+            'Authorization': f'Token {token}',
+            'Content-Type': 'application/json'
+        }
+        
         # 转换YouTube URL
         if url:
             url = convert_youtube_url(url)
@@ -531,10 +634,7 @@ def save_to_readwise(title, content, url=None, published_date=None):
 
             response = requests.post(
                 'https://readwise.io/api/v3/save/',
-                headers={
-                    'Authorization': f'Token {api_token}',
-                    'Content-Type': 'application/json'
-                },
+                headers=headers,
                 json=data
             )
 
@@ -779,8 +879,10 @@ FILES_LIST_TEMPLATE = '''
             .then(data => {
                 if (data.error) {
                     showError(data.error);
+                } else if (data.view_url) {
+                    window.location.href = data.view_url;
                 } else {
-                    window.location.href = data.url;
+                    showError('处理成功但未返回查看链接');
                 }
             })
             .catch(error => {
