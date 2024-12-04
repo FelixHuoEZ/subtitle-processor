@@ -29,6 +29,12 @@ A comprehensive subtitle processing service that automatically downloads, transc
   - Metadata tracking
   - Timeline visualization
 
+- **Readwise Integration**
+  - Automatic article creation from subtitles
+  - Rich text formatting support
+  - Seamless sync with Readwise Reader
+  - Smart content segmentation for long videos
+
 ### 🛠️ Technical Stack
 - Backend: Python Flask
 - Frontend: HTML/CSS/JavaScript
@@ -58,6 +64,12 @@ A comprehensive subtitle processing service that automatically downloads, transc
    - Access `http://localhost:5000`
    - Upload video files or URLs
    - View and search subtitles
+
+3. **Readwise Integration**
+   - Automatically creates articles in Readwise Reader
+   - Preserves video metadata (title, URL, publish date)
+   - Intelligently splits long content into readable segments
+   - Access transcripts alongside your other reading materials
 
 ### 📝 License
 MIT License
@@ -91,6 +103,12 @@ MIT License
   - 元数据跟踪
   - 时间轴可视化
 
+- **Readwise 集成**
+  - 自动从字幕创建文章
+  - 支持富文本格式
+  - 与 Readwise Reader 无缝同步
+  - 智能分段处理长视频内容
+
 ### 🛠️ 技术栈
 - 后端：Python Flask
 - 前端：HTML/CSS/JavaScript
@@ -120,6 +138,12 @@ MIT License
    - 访问 `http://localhost:5000`
    - 上传视频文件或 URL
    - 查看和搜索字幕
+
+3. **Readwise 集成**
+   - 自动在 Readwise Reader 中创建文章
+   - 保留视频元数据（标题、URL、发布日期）
+   - 智能分割长内容为易读片段
+   - 在其他阅读材料旁边访问转录文本
 
 ### 📝 许可证
 MIT 许可证
