@@ -1,18 +1,26 @@
-from flask import Flask, request, render_template_string, jsonify
 import os
-from datetime import datetime
-import uuid
-import codecs
-import logging
-import sys
-import binascii
-import chardet
 import json
+import logging
 import requests
-from yt_dlp import YoutubeDL
+import chardet
+import traceback
 import subprocess
 import re
+import yt_dlp
+import sys
+from flask import Flask, request, jsonify, send_file, render_template, render_template_string
 from flask_cors import CORS
+from datetime import datetime
+import pytz
+import uuid
+import codecs
+import binascii
+import ast
+import socket
+import time
+import math
+from pydub import AudioSegment
+import wave
 
 # 配置日志
 logging.basicConfig(
@@ -29,7 +37,8 @@ app = Flask(__name__)
 CORS(app, resources={
     r"/upload": {"origins": "*"},
     r"/view/*": {"origins": "*"},
-    r"/process_youtube": {"origins": "*"}
+    r"/process_youtube": {"origins": "*"},
+    r"/process": {"origins": "*"}
 })
 
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max-limit
@@ -49,18 +58,51 @@ if not os.path.exists(UPLOAD_FOLDER):
 FILES_INFO = 'uploads/files_info.json'
 if not os.path.exists(FILES_INFO):
     with open(FILES_INFO, 'w', encoding='utf-8') as f:
-        json.dump([], f, ensure_ascii=False)
+        json.dump({}, f, ensure_ascii=False)
 
-def load_files_info():
+def migrate_files_info():
+    """将文件信息从列表格式迁移到字典格式"""
     try:
         with open(FILES_INFO, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except:
-        return []
+            old_files_info = json.load(f)
+            
+        if isinstance(old_files_info, list):
+            new_files_info = {}
+            for file_info in old_files_info:
+                if 'id' in file_info:
+                    new_files_info[file_info['id']] = file_info
+            
+            with open(FILES_INFO, 'w', encoding='utf-8') as f:
+                json.dump(new_files_info, f, ensure_ascii=False, indent=2)
+                
+            logger.info("成功将文件信息从列表格式迁移到字典格式")
+            return new_files_info
+    except Exception as e:
+        logger.error(f"迁移文件信息时出错: {str(e)}")
+        return {}
+
+def load_files_info():
+    """加载文件信息"""
+    try:
+        with open(FILES_INFO, 'r', encoding='utf-8') as f:
+            files_info = json.load(f)
+            
+        # 如果是旧的列表格式，进行迁移
+        if isinstance(files_info, list):
+            files_info = migrate_files_info()
+            
+        return files_info
+    except Exception as e:
+        logger.error(f"加载文件信息时出错: {str(e)}")
+        return {}
 
 def save_files_info(files_info):
-    with open(FILES_INFO, 'w', encoding='utf-8') as f:
-        json.dump(files_info, f, ensure_ascii=False, indent=2)
+    """保存文件信息"""
+    try:
+        with open(FILES_INFO, 'w', encoding='utf-8') as f:
+            json.dump(files_info, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"保存文件信息时出错: {str(e)}")
 
 def detect_file_encoding(raw_bytes):
     """使用多种方法检测文件编码"""
@@ -240,126 +282,245 @@ def split_into_sentences(text):
     # 如果没有找到任何有效句子，返回原始文本
     return sentences if sentences else [text]
 
-def download_youtube_subtitles(url):
-    """从YouTube下载字幕文件，优先下载中文字幕，其次是英文字幕"""
-    max_retries = 3
-    retry_count = 0
+def download_youtube_subtitles(url, video_info=None):
+    """下载YouTube视频字幕
     
-    while retry_count < max_retries:
-        try:
+    Args:
+        url: YouTube视频URL
+        video_info: 预先获取的视频信息（可选）
+    
+    Returns:
+        tuple: (字幕内容, 视频信息)
+    """
+    try:
+        logger.info(f"开始下载YouTube字幕: {url}")
+        
+        # 如果没有提供视频信息，获取视频信息
+        if not video_info:
             ydl_opts = {
-                'skip_download': True,
-                'writesubtitles': True,
-                'writeautomaticsub': True,
-                'subtitleslangs': ['zh-Hans', 'zh-CN', 'zh', 'en'],
                 'quiet': True,
-                'socket_timeout': 30,  # 增加超时时间
-                'nocheckcertificate': True,  # 忽略SSL证书验证
+                'no_warnings': True,
             }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                video_info = ydl.extract_info(url, download=False)
+        
+        # 获取视频语言和字幕策略
+        language = get_video_language(video_info)
+        should_download, target_languages = get_subtitle_strategy(language, video_info)
+        
+        if not should_download:
+            logger.info(f"根据策略决定不下载字幕，视频语言: {language}")
+            return None, video_info
             
-            with YoutubeDL(ydl_opts) as ydl:
-                logger.info(f"尝试下载字幕 (第{retry_count + 1}次尝试)")
-                info = ydl.extract_info(url, download=False)
-                
-                # 检查是否有字幕
-                if not info.get('subtitles') and not info.get('automatic_captions'):
-                    logger.warning("没有找到字幕")
-                    return None, info
-                
-                # 优先使用手动上传的字幕
-                subtitles = info.get('subtitles', {})
-                if not subtitles:
-                    subtitles = info.get('automatic_captions', {})
-                
-                # 按优先级尝试不同语言
-                for lang in ['zh-Hans', 'zh-CN', 'zh', 'en']:
-                    if lang in subtitles:
-                        formats = subtitles[lang]
-                        # 优先使用srt格式
-                        for fmt in formats:
-                            if fmt['ext'] == 'srt':
-                                logger.info(f"找到{lang}语言的SRT字幕")
-                                try:
-                                    # 下载字幕内容
-                                    subtitle_url = fmt['url']
-                                    logger.info(f"正在从URL下载字幕: {subtitle_url}")
-                                    response = requests.get(subtitle_url, timeout=30)
-                                    response.raise_for_status()  # 检查响应状态
-                                    
-                                    # 获取字幕内容的字节数据
-                                    content_bytes = response.content
-                                    
-                                    # 检查内容是否为空
-                                    if not content_bytes:
-                                        logger.warning(f"{lang}语言字幕内容为空，尝试下一个")
-                                        continue
-                                    
-                                    # 检测编码并解码
-                                    encoding = detect_file_encoding(content_bytes)
-                                    subtitle_content = content_bytes.decode(encoding)
-                                    
-                                    # 验证字幕内容是否有效
-                                    if not subtitle_content.strip() or '-->' not in subtitle_content:
-                                        logger.warning(f"{lang}语言字幕内容无效，尝试下一个")
-                                        continue
-                                    
-                                    logger.info(f"成功下载{lang}语言字幕，使用编码: {encoding}")
-                                    logger.debug(f"字幕内容预览: {subtitle_content[:200]}...")
-                                    return subtitle_content, info
-                                except Exception as e:
-                                    logger.error(f"下载{lang}语言字幕内容时出错: {str(e)}")
-                                    continue
-                        
-                        # 如果没有srt格式，使用第一个可用格式
-                        logger.info(f"找到{lang}语言的字幕，但不是SRT格式")
-                        try:
-                            subtitle_url = formats[0]['url']
-                            logger.info(f"正在从URL下载字幕: {subtitle_url}")
-                            response = requests.get(subtitle_url, timeout=30)
-                            response.raise_for_status()
-                            
-                            # 获取字幕内容的字节数据
-                            content_bytes = response.content
-                            
-                            # 检查内容是否为空
-                            if not content_bytes:
-                                logger.warning(f"{lang}语言字幕内容为空，尝试下一个")
-                                continue
-                            
-                            # 检测编码并解码
-                            encoding = detect_file_encoding(content_bytes)
-                            subtitle_content = content_bytes.decode(encoding)
-                            
-                            # 验证字幕内容是否有效
-                            if not subtitle_content.strip() or '-->' not in subtitle_content:
-                                logger.warning(f"{lang}语言字幕内容无效，尝试下一个")
-                                continue
-                            
-                            logger.info(f"成功下载{lang}语言字幕，使用编码: {encoding}")
-                            logger.debug(f"字幕内容预览: {subtitle_content[:200]}...")
-                            return subtitle_content, info
-                        except Exception as e:
-                            logger.error(f"下载{lang}语言字幕内容时出错: {str(e)}")
-                            continue
-                
-                logger.warning("未找到有效的字幕内容")
-                return None, info
-                
-        except Exception as e:
-            retry_count += 1
-            error_msg = str(e)
-            logger.error(f"下载YouTube字幕时出错 (尝试 {retry_count}/{max_retries}): {error_msg}")
-            logger.exception(e)  # 输出完整的错误堆栈
+        logger.info(f"视频语言: {language}, 目标字幕语言: {target_languages}")
+        
+        # 尝试下载字幕
+        for target_lang in target_languages:
+            # 首先尝试下载手动字幕
+            if video_info.get('subtitles'):
+                manual_subs = video_info['subtitles']
+                for lang, sub_info in manual_subs.items():
+                    if lang.startswith(target_lang):
+                        for fmt in sub_info:
+                            if fmt.get('ext') in ['vtt', 'srt', 'json3']:
+                                subtitle_url = fmt['url']
+                                content = download_subtitle_content(subtitle_url)
+                                if content:
+                                    logger.info(f"成功下载手动字幕，语言: {lang}")
+                                    return content, video_info
             
-            if retry_count >= max_retries:
-                logger.error("达到最大重试次数，放弃下载")
-                return None, None
-            
-            # 在重试之前等待一段时间
-            import time
-            time.sleep(2 * retry_count)  # 递增等待时间
+            # 如果是英文视频且没有手动字幕，尝试下载自动字幕
+            if language == 'en' and video_info.get('automatic_captions'):
+                auto_subs = video_info['automatic_captions']
+                for lang, sub_info in auto_subs.items():
+                    if lang.startswith(target_lang):
+                        for fmt in sub_info:
+                            if fmt.get('ext') in ['vtt', 'srt', 'json3']:
+                                subtitle_url = fmt['url']
+                                content = download_subtitle_content(subtitle_url)
+                                if content:
+                                    logger.info(f"成功下载自动字幕，语言: {lang}")
+                                    return content, video_info
+        
+        logger.info("未找到合适的字幕")
+        return None, video_info
+        
+    except Exception as e:
+        logger.error(f"下载YouTube字幕时出错: {str(e)}")
+        return None, video_info
+
+def download_subtitles(url, platform, video_info=None):
+    """统一的字幕下载入口
     
-    return None, None
+    Args:
+        url: 视频URL
+        platform: 平台（'youtube' 或 'bilibili'）
+        video_info: 预先获取的视频信息（可选）
+    
+    Returns:
+        tuple: (字幕内容, 视频信息)
+    """
+    try:
+        if platform == 'youtube':
+            return download_youtube_subtitles(url, video_info)
+        elif platform == 'bilibili':
+            return download_bilibili_subtitles(url, video_info)
+        else:
+            logger.error(f"不支持的平台: {platform}")
+            return None, None
+    except Exception as e:
+        logger.error(f"下载字幕时出错: {str(e)}")
+        return None, None
+
+def download_subtitle_content(subtitle_url):
+    """下载并处理字幕内容"""
+    # 优先使用srt格式
+    try:
+        # 下载字幕内容
+        logger.info(f"正在从URL下载字幕: {subtitle_url}")
+        response = requests.get(subtitle_url, timeout=30)
+        response.raise_for_status()
+        
+        # 获取字幕内容的字节数据
+        content_bytes = response.content
+        
+        # 检查内容是否为空
+        if not content_bytes:
+            logger.warning("字幕内容为空")
+            return None
+        
+        # 检测编码并解码
+        encoding = detect_file_encoding(content_bytes)
+        subtitle_content = content_bytes.decode(encoding)
+        
+        # 清理字幕内容
+        subtitle_content = clean_subtitle_content(subtitle_content)
+        
+        # 如果不是SRT格式，尝试转换
+        if subtitle_url.endswith('.vtt'):
+            logger.info("将VTT格式转换为SRT格式")
+            subtitle_content = convert_to_srt(subtitle_content, 'vtt')
+        
+        # 验证字幕内容
+        is_valid, message = validate_subtitle_content(subtitle_content)
+        if not is_valid:
+            logger.warning(f"字幕内容无效: {message}")
+            return None
+        
+        logger.info("成功下载并处理字幕")
+        logger.debug(f"字幕内容预览: {subtitle_content[:200]}...")
+        return subtitle_content
+        
+    except Exception as e:
+        logger.error(f"处理字幕时出错: {str(e)}")
+        return None
+
+def clean_subtitle_content(content):
+    """清理字幕内容，去除无用的标记和空行"""
+    # 移除 BOM
+    content = content.replace('\ufeff', '')
+    
+    # 移除 HTML 标签
+    content = re.sub(r'<[^>]+>', '', content)
+    
+    # 移除多余的空行
+    lines = [line.strip() for line in content.splitlines()]
+    lines = [line for line in lines if line]
+    
+    # 移除字幕中的样式标记 (比如 {\\an8} 这样的标记)
+    lines = [re.sub(r'\{\\[^}]+\}', '', line) for line in lines]
+    
+    return '\n'.join(lines)
+
+def convert_to_srt(content, input_format):
+    """将其他格式的字幕转换为SRT格式"""
+    if input_format == 'vtt':
+        # 移除 WEBVTT 头部
+        content = re.sub(r'^WEBVTT\n', '', content)
+        # 移除 VTT 特有的样式信息
+        content = re.sub(r'STYLE\n.*?\n\n', '', content, flags=re.DOTALL)
+        # 转换时间戳格式 (如果需要)
+        content = re.sub(r'(\d{2}):(\d{2}):(\d{2})\.(\d{3})', r'\1:\2:\3,\4', content)
+        return content
+    elif input_format == 'json3':
+        try:
+            # 解析JSON内容
+            data = json.loads(content)
+            if not isinstance(data, dict) or 'events' not in data:
+                logger.error("无效的json3格式：缺少events字段")
+                return None
+            
+            events = data['events']
+            if not events:
+                logger.error("无效的json3格式：events为空")
+                return None
+            
+            # 转换为SRT格式
+            srt_lines = []
+            for i, event in enumerate(events, 1):
+                # 检查必要的字段
+                if 'tStartMs' not in event or 'dDurationMs' not in event or 'segs' not in event:
+                    continue
+                
+                # 获取开始时间和持续时间
+                start_ms = event['tStartMs']
+                duration_ms = event['dDurationMs']
+                end_ms = start_ms + duration_ms
+                
+                # 转换为SRT时间格式
+                start_time = format_time(start_ms / 1000)
+                end_time = format_time(end_ms / 1000)
+                
+                # 获取文本内容
+                text = ''.join(seg.get('utf8', '') for seg in event['segs'] if 'utf8' in seg)
+                if not text.strip():
+                    continue
+                
+                # 添加SRT条目
+                srt_lines.extend([
+                    str(i),
+                    f"{start_time} --> {end_time}",
+                    text.strip(),
+                    ""
+                ])
+            
+            if not srt_lines:
+                logger.error("转换后的SRT内容为空")
+                return None
+            
+            return "\n".join(srt_lines)
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON解析错误: {str(e)}")
+            return None
+        except Exception as e:
+            logger.error(f"转换json3格式时出错: {str(e)}")
+            return None
+    
+    logger.error(f"不支持的字幕格式: {input_format}")
+    return None
+
+def validate_subtitle_content(content):
+    """验证字幕内容是否有效"""
+    # 检查基本内容
+    if not content or not content.strip():
+        return False, "字幕内容为空"
+    
+    # 检查是否包含时间戳
+    if '-->' not in content:
+        return False, "未找到时间戳"
+    
+    # 检查时间戳格式
+    timestamp_pattern = r'\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}'
+    if not re.search(timestamp_pattern, content):
+        return False, "时间戳格式无效"
+    
+    # 检查是否有实际的文本内容
+    text_lines = [line.strip() for line in content.split('\n') if line.strip() and '-->' not in line and not line.strip().isdigit()]
+    if not text_lines:
+        return False, "没有有效的字幕文本"
+    
+    return True, "字幕内容有效"
 
 def download_video(url):
     """下载视频并提取音频"""
@@ -380,7 +541,7 @@ def download_video(url):
         }
         
         # 下载视频并提取音频
-        with YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             video_id = info['id']
             audio_path = os.path.join(temp_dir, f"{video_id}.wav")
@@ -395,80 +556,154 @@ def download_video(url):
         logger.error(f"下载视频时出错: {str(e)}")
         return None
 
+def split_audio(audio_path, max_duration=600, max_size=100*1024*1024):
+    """将音频文件分割成更小的片段
+    
+    Args:
+        audio_path: 音频文件路径
+        max_duration: 每个片段的最大时长（秒）
+        max_size: 每个片段的最大大小（字节）
+    
+    Returns:
+        分割后的音频文件路径列表
+    """
+    try:
+        import wave
+        import math
+        from pydub import AudioSegment
+        
+        # 获取音频文件信息
+        audio = AudioSegment.from_wav(audio_path)
+        duration_ms = len(audio)
+        file_size = os.path.getsize(audio_path)
+        
+        # 计算需要分割的片段数
+        num_segments = max(
+            math.ceil(duration_ms / (max_duration * 1000)),  # 基于时长
+            math.ceil(file_size / max_size)  # 基于文件大小
+        )
+        
+        if num_segments <= 1:
+            return [audio_path]
+        
+        # 计算每个片段的时长
+        segment_duration = duration_ms / num_segments
+        
+        # 分割音频
+        output_paths = []
+        for i in range(num_segments):
+            start_ms = int(i * segment_duration)
+            end_ms = int((i + 1) * segment_duration)
+            
+            # 提取片段
+            segment = audio[start_ms:end_ms]
+            
+            # 生成输出路径
+            base_path = os.path.splitext(audio_path)[0]
+            output_path = f"{base_path}_part{i+1}.wav"
+            
+            # 导出片段
+            segment.export(output_path, format="wav")
+            output_paths.append(output_path)
+            
+            logger.info(f"生成音频片段 {i+1}/{num_segments}: {output_path}")
+        
+        return output_paths
+        
+    except Exception as e:
+        logger.error(f"分割音频文件时出错: {str(e)}")
+        return [audio_path]
+
 def transcribe_audio(audio_path):
     """使用FunASR转录音频"""
     try:
-        # 使用transcribe-audio服务的内部网络地址
-        funasr_url = 'http://transcribe-audio:10095/recognize'
-        logger.info(f"发送请求到FunASR服务: {funasr_url}")
-        logger.info(f"音频文件路径: {audio_path}")
-        
-        # 检查音频文件
-        if not os.path.exists(audio_path):
-            logger.error(f"音频文件不存在: {audio_path}")
-            return None
-            
+        # 检查音频文件大小
         file_size = os.path.getsize(audio_path)
         logger.info(f"音频文件大小: {file_size} bytes")
         
-        with open(audio_path, 'rb') as audio_file:
-            files = {'audio': audio_file}
+        # 如果文件太大，先分割
+        if file_size > 100*1024*1024:  # 100MB
+            logger.info("音频文件过大，进行分割处理")
+            audio_segments = split_audio(audio_path)
+        else:
+            audio_segments = [audio_path]
+        
+        all_results = []
+        
+        # 处理每个音频片段
+        for i, segment_path in enumerate(audio_segments, 1):
+            logger.info(f"处理音频片段 {i}/{len(audio_segments)}: {segment_path}")
+            
+            # 准备请求
+            url = 'http://transcribe-audio:10095/recognize'
+            
+            # 解析域名
+            import socket
             try:
-                # 尝试DNS解析
-                import socket
-                try:
-                    transcribe_ip = socket.gethostbyname('transcribe-audio')
-                    logger.info(f"transcribe-audio DNS解析结果: {transcribe_ip}")
-                except socket.gaierror as e:
-                    logger.error(f"DNS解析失败: {str(e)}")
-                
-                # 禁用代理，使用容器网络直接通信
-                local_proxies = {
-                    'http': None,
-                    'https': None
-                }
-                
-                # 添加超时设置
-                logger.info("开始发送请求...")
-                response = requests.post(
-                    funasr_url,
-                    files=files,
-                    proxies=local_proxies,
-                    timeout=300,
-                    verify=False  # 禁用SSL验证
-                )
-                logger.info(f"FunASR响应状态码: {response.status_code}")
-                logger.info(f"FunASR响应头: {response.headers}")
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    logger.info("成功获取转录结果")
-                    return result
-                else:
-                    logger.error(f"FunASR服务返回错误: {response.status_code}")
-                    logger.error(f"错误响应内容: {response.text}")
-                    # 尝试ping transcribe-audio
-                    try:
-                        import subprocess
-                        result = subprocess.run(['ping', 'transcribe-audio'], capture_output=True, text=True)
-                        logger.info(f"Ping结果: {result.stdout}")
-                    except Exception as e:
-                        logger.error(f"Ping失败: {str(e)}")
-                    return None
-                    
-            except requests.exceptions.ConnectionError as e:
-                logger.error(f"连接FunASR服务失败: {str(e)}")
-                return None
-            except requests.exceptions.Timeout as e:
-                logger.error(f"FunASR服务请求超时: {str(e)}")
-                return None
+                ip = socket.gethostbyname('transcribe-audio')
+                logger.info(f"transcribe-audio DNS解析结果: {ip}")
             except Exception as e:
-                logger.error(f"调用FunASR服务时发生错误: {str(e)}")
-                logger.error(f"错误类型: {type(e)}")
-                return None
+                logger.error(f"DNS解析失败: {str(e)}")
+            
+            logger.info("开始发送请求...")
+            
+            # 发送文件
+            with open(segment_path, 'rb') as f:
+                files = {'audio': f}
+                response = requests.post(url, files=files)
+            
+            logger.info(f"FunASR响应状态码: {response.status_code}")
+            logger.info(f"FunASR响应头: {dict(response.headers)}")
+            
+            if response.status_code != 200:
+                logger.error(f"FunASR服务返回错误: {response.status_code}")
+                logger.error(f"错误响应内容: {response.text}")
+                continue
+            
+            try:
+                result = response.json()
+                all_results.append(result)
+            except Exception as e:
+                logger.error(f"解析JSON响应时出错: {str(e)}")
+                continue
+        
+        # 合并所有结果
+        if not all_results:
+            return None
+            
+        # 如果只有一个结果，直接返回
+        if len(all_results) == 1:
+            return all_results[0]
+        
+        # 合并多个结果
+        merged_result = {
+            'text': '',
+            'timestamp': []
+        }
+        
+        last_end_time = 0
+        for result in all_results:
+            if isinstance(result, dict):
+                # 合并文本
+                if 'text' in result:
+                    merged_result['text'] += result['text']
+                
+                # 合并时间戳
+                if 'timestamp' in result and isinstance(result['timestamp'], list):
+                    # 调整时间戳
+                    adjusted_timestamps = []
+                    for start, end in result['timestamp']:
+                        adjusted_timestamps.append([start + last_end_time, end + last_end_time])
+                    merged_result['timestamp'].extend(adjusted_timestamps)
+                    
+                    # 更新最后的结束时间
+                    if adjusted_timestamps:
+                        last_end_time = adjusted_timestamps[-1][1]
+        
+        return merged_result
+            
     except Exception as e:
-        logger.error(f"转录音频时发生错误: {str(e)}")
-        logger.error(f"错误类型: {type(e)}")
+        logger.error(f"音频转录时出错: {str(e)}")
         return None
 
 def format_time(seconds):
@@ -512,7 +747,7 @@ def get_youtube_info(url):
             'no_warnings': True,
             'extract_flat': False  # 需要完整的元数据
         }
-        with YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             # 获取发布日期并转换为ISO 8601格式
             upload_date = info.get('upload_date')  # 格式：YYYYMMDD
@@ -528,6 +763,122 @@ def get_youtube_info(url):
     except Exception as e:
         logger.error(f"获取YouTube信息时出错: {str(e)}")
         return {'title': None, 'published_date': None}
+
+def get_video_info(url, platform):
+    """获取视频信息"""
+    try:
+        if platform == 'youtube':
+            return get_youtube_info(url)
+        elif platform == 'bilibili':
+            return get_bilibili_info(url)
+        else:
+            raise ValueError(f"不支持的平台: {platform}")
+    except Exception as e:
+        logger.error(f"获取视频信息失败: {str(e)}")
+        raise
+
+def get_youtube_info(url):
+    """获取YouTube视频信息"""
+    try:
+        with yt_dlp.YoutubeDL({
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True
+        }) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return {
+                'title': info.get('title'),
+                'language': get_video_language(info),
+                'duration': info.get('duration'),
+                'upload_date': info.get('upload_date'),
+                'uploader': info.get('uploader'),
+                'view_count': info.get('view_count'),
+                'platform': 'youtube'
+            }
+    except Exception as e:
+        logger.error(f"获取YouTube视频信息失败: {str(e)}")
+        raise
+
+def get_bilibili_info(url):
+    """获取Bilibili视频信息"""
+    try:
+        with yt_dlp.YoutubeDL({
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True
+        }) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return {
+                'title': info.get('title'),
+                'language': 'zh',  # Bilibili默认为中文
+                'duration': info.get('duration'),
+                'upload_date': info.get('upload_date'),
+                'uploader': info.get('uploader'),
+                'view_count': info.get('view_count'),
+                'platform': 'bilibili'
+            }
+    except Exception as e:
+        logger.error(f"获取Bilibili视频信息失败: {str(e)}")
+        raise
+
+def download_subtitles(url, platform, video_info):
+    """下载字幕"""
+    try:
+        if platform == 'youtube':
+            return download_youtube_subtitles(url, video_info)
+        elif platform == 'bilibili':
+            return download_bilibili_subtitles(url, video_info)
+        else:
+            raise ValueError(f"不支持的平台: {platform}")
+    except Exception as e:
+        logger.error(f"下载字幕失败: {str(e)}")
+        raise
+
+def download_bilibili_subtitles(url, video_info):
+    """下载Bilibili字幕"""
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'writesubtitles': True,
+            'writeautomaticsub': True,
+            'subtitleslangs': ['zh-CN', 'zh-Hans', 'zh'],  # Bilibili主要是中文字幕
+            'skip_download': True,
+            'format': 'best',
+            # 添加重试和超时设置
+            'retries': 10,
+            'fragment_retries': 10,
+            'socket_timeout': 30,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            # 检查是否有字幕
+            if not info.get('subtitles') and not info.get('automatic_captions'):
+                logger.info("未找到字幕")
+                return None
+            
+            # 优先使用手动上传的字幕
+            subtitles = info.get('subtitles', {})
+            if not subtitles:
+                subtitles = info.get('automatic_captions', {})
+            
+            # 按优先级尝试不同的中文字幕
+            for lang in ['zh-CN', 'zh-Hans', 'zh']:
+                if lang in subtitles:
+                    subtitle_info = subtitles[lang]
+                    for fmt in subtitle_info:
+                        if fmt.get('ext') in ['vtt', 'srt', 'json3']:
+                            subtitle_url = fmt['url']
+                            return download_subtitle_content(subtitle_url)
+            
+            logger.info("未找到合适格式的字幕")
+            return None
+            
+    except Exception as e:
+        logger.error(f"下载Bilibili字幕失败: {str(e)}")
+        raise
 
 def save_to_readwise(title, content, url=None, published_date=None):
     """保存内容到Readwise，支持长文本分段"""
@@ -756,7 +1107,7 @@ HTML_TEMPLATE = '''
         {% for sub in subtitles %}
         <div class="subtitle">
             {% if show_timeline %}
-            <div class="time">{{ "%.3f"|format(sub.start) }} - {{ "%.3f"|format(sub.start + sub.duration) }}</div>
+            <div class="time">{{ "%.3f"|format(sub.start) }} - {{ "%.3f"|format(sub.end) }}</div>
             {% endif %}
             <div class="text">{{ sub.text }}</div>
         </div>
@@ -973,7 +1324,7 @@ def upload_file():
             # 更新文件信息
             file_id = str(uuid.uuid4())
             files_info = load_files_info()
-            files_info.append({
+            files_info[file_id] = {
                 'id': file_id,
                 'filename': file.filename,
                 'path': filepath,
@@ -981,7 +1332,7 @@ def upload_file():
                 'upload_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'show_timeline': show_timeline,
                 'subtitles': subtitles
-            })
+            }
             save_files_info(files_info)
             
             return jsonify({
@@ -994,20 +1345,73 @@ def upload_file():
         logger.error(f"处理文件时发生错误: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+def parse_time_str(time_str):
+    """解析SRT时间戳为秒数"""
+    try:
+        hours, minutes, seconds = time_str.replace(',', '.').split(':')
+        return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
+    except Exception as e:
+        logger.error(f"解析时间戳失败: {time_str}, 错误: {str(e)}")
+        return 0.0
+
 @app.route('/view/<file_id>')
 def view_file(file_id):
     """查看字幕文件内容"""
     try:
         files_info = load_files_info()
-        for file_info in files_info:
-            if file_info['id'] == file_id:
-                return render_template_string(
-                    HTML_TEMPLATE,
-                    filename=file_info['filename'],
-                    subtitles=file_info['subtitles'],
-                    show_timeline=file_info['show_timeline']
-                )
-        return "File not found", 404
+        if file_id not in files_info:
+            return "文件不存在", 404
+            
+        file_info = files_info[file_id]
+        if not os.path.exists(file_info['path']):
+            return "文件不存在", 404
+            
+        # 读取字幕文件内容
+        with open(file_info['path'], 'r', encoding='utf-8') as f:
+            srt_content = f.read()
+            
+        # 解析SRT内容为字幕列表
+        subtitles = []
+        current_subtitle = {}
+        for line in srt_content.strip().split('\n'):
+            line = line.strip()
+            if not line:  # 空行表示一个字幕结束
+                if current_subtitle and 'id' in current_subtitle and 'time' in current_subtitle and 'text' in current_subtitle:
+                    # 解析时间轴
+                    time_parts = current_subtitle['time'].split(' --> ')
+                    if len(time_parts) == 2:
+                        start_time = parse_time_str(time_parts[0])
+                        end_time = parse_time_str(time_parts[1])
+                        current_subtitle['start'] = start_time
+                        current_subtitle['end'] = end_time
+                    subtitles.append(current_subtitle)
+                current_subtitle = {}
+            elif not current_subtitle:  # 字幕序号
+                current_subtitle = {'id': line}
+            elif 'time' not in current_subtitle:  # 时间轴
+                current_subtitle['time'] = line
+            elif 'text' not in current_subtitle:  # 字幕文本
+                current_subtitle['text'] = line
+            else:  # 多行字幕文本
+                current_subtitle['text'] += '\n' + line
+                
+        # 添加最后一个字幕
+        if current_subtitle and 'id' in current_subtitle and 'time' in current_subtitle and 'text' in current_subtitle:
+            time_parts = current_subtitle['time'].split(' --> ')
+            if len(time_parts) == 2:
+                start_time = parse_time_str(time_parts[0])
+                end_time = parse_time_str(time_parts[1])
+                current_subtitle['start'] = start_time
+                current_subtitle['end'] = end_time
+            subtitles.append(current_subtitle)
+            
+        return render_template_string(
+            HTML_TEMPLATE,
+            filename=file_info['filename'],
+            subtitles=subtitles,
+            show_timeline=file_info.get('show_timeline', True)
+        )
+        
     except Exception as e:
         logger.error(f"查看文件时出错: {str(e)}")
         return str(e), 500
@@ -1016,8 +1420,9 @@ def view_file(file_id):
 def view_files():
     """查看所有字幕文件列表"""
     files_info = load_files_info()
-    files_info.sort(key=lambda x: x['upload_time'], reverse=True)
-    return render_template_string(FILES_LIST_TEMPLATE, files=files_info)
+    files_info_list = list(files_info.values())
+    files_info_list.sort(key=lambda x: x['upload_time'], reverse=True)
+    return render_template_string(FILES_LIST_TEMPLATE, files=files_info_list)
 
 @app.route('/')
 def index():
@@ -1061,11 +1466,16 @@ def process_youtube():
                 srt_content += f"{i}\n{start_time} --> {end_time}\n{subtitle['text']}\n\n"
             
             # 保存SRT文件
-            output_filename = os.path.join(app.config['OUTPUT_FOLDER'], f"{os.path.splitext(os.path.basename(audio_path))[0]}.srt")
-            with open(output_filename, 'w', encoding='utf-8') as f:
+            title = video_info.get('title', '') if video_info else ''
+            if not title:
+                title = f"video_transcript_{os.path.splitext(os.path.basename(audio_path))[0]}"
+                
+            output_filename = f"{title}.srt"
+            output_filepath = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
+            with open(output_filepath, 'w', encoding='utf-8') as f:
                 f.write(srt_content)
             
-            logger.info(f"转录结果已保存到: {output_filename}")
+            logger.info(f"转录结果已保存到: {output_filepath}")
             
             # 删除临时音频文件
             try:
@@ -1073,7 +1483,45 @@ def process_youtube():
                 logger.info(f"已删除临时文件: {audio_path}")
             except Exception as e:
                 logger.warning(f"删除临时文件失败: {str(e)}")
-        
+                
+            # 生成文件信息并保存
+            file_id = str(uuid.uuid4())
+            file_info = {
+                'id': file_id,
+                'filename': output_filename,
+                'path': output_filepath,
+                'url': f'/view/{file_id}',
+                'upload_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'show_timeline': True,
+                'source': 'transcription',
+                'video_info': video_info
+            }
+            files_info = load_files_info()
+            files_info[file_id] = file_info
+            save_files_info(files_info)
+            
+            # 发送到Readwise
+            try:
+                if video_info:
+                    save_to_readwise(
+                        title=video_info.get('title', 'Video Transcript'),
+                        content=srt_content,
+                        url=url,
+                        published_date=video_info.get('published_date')
+                    )
+                    logger.info("成功发送转录内容到Readwise")
+            except Exception as e:
+                logger.error(f"发送转录内容到Readwise失败: {str(e)}")
+                
+            return jsonify({
+                'success': True,
+                'video_info': video_info,
+                'subtitle_content': srt_content,
+                'filename': file_info['filename'],
+                'view_url': file_info['url'],
+                'source': 'transcription'
+            })
+            
         # 获取视频信息
         if not video_info:
             video_info = get_youtube_info(url)
@@ -1093,8 +1541,8 @@ def process_youtube():
                     current_subtitle = {}
             elif '-->' in line:  # 时间戳行
                 start, end = line.split(' --> ')
-                current_subtitle['start'] = parse_time(start)
-                current_subtitle['duration'] = parse_time(end) - parse_time(start)
+                current_subtitle['start'] = parse_time_str(start)
+                current_subtitle['duration'] = parse_time_str(end) - parse_time_str(start)
             elif current_subtitle.get('start') is not None:  # 文本行
                 current_subtitle['text'] = line
         
@@ -1103,16 +1551,20 @@ def process_youtube():
             subtitles_list.append(current_subtitle)
         
         # 保存文件信息
+        title = video_info.get('title', '') if video_info else ''
+        if not title:
+            title = f"youtube_video_{os.path.splitext(os.path.basename(url))[0]}"
+                
         file_info = {
             'id': file_id,
-            'filename': f"{video_info.get('title', 'youtube_video')}.srt",
-            'path': output_filename if 'output_filename' in locals() else None,
+            'filename': f"{title}.srt",
+            'path': None,
             'url': f'/view/{file_id}',
             'upload_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'show_timeline': True,
             'subtitles': subtitles_list
         }
-        files_info.append(file_info)
+        files_info[file_id] = file_info
         save_files_info(files_info)
         
         # 发送到Readwise
@@ -1144,6 +1596,246 @@ def process_youtube():
         logger.error(f"处理YouTube URL时出错: {str(e)}")
         logger.exception(e)  # 输出完整的错误堆栈
         return jsonify({"error": str(e), "success": False}), 500
+
+@app.route('/process', methods=['POST'])
+def process_video():
+    """处理视频URL"""
+    try:
+        data = request.get_json()
+        url = data.get('url')
+        platform = data.get('platform')
+        video_id = data.get('video_id')
+        
+        if not url or not platform or not video_id:
+            return jsonify({'error': '缺少必要参数'}), 400
+        
+        # 获取视频信息
+        video_info = get_video_info(url, platform)
+        
+        # 下载字幕
+        subtitle_result = download_subtitles(url, platform, video_info)
+        subtitle_content, video_info = subtitle_result if isinstance(subtitle_result, tuple) else (subtitle_result, video_info)
+        
+        if not subtitle_content:
+            # 如果没有字幕，尝试下载视频并转录
+            logger.info("未找到字幕，尝试下载视频并转录...")
+            audio_path = download_video(url)
+            if not audio_path:
+                return jsonify({"error": "下载视频失败"}, {"success": False}), 500
+                
+            # 使用FunASR转录
+            result = transcribe_audio(audio_path)
+            if not result:
+                return jsonify({"error": "转录失败"}, {"success": False}), 500
+                
+            # 解析转录结果生成字幕
+            subtitles = parse_srt(result)
+            if not subtitles:
+                return jsonify({"error": "解析转录结果失败"}, {"success": False}), 500
+                
+            # 生成SRT格式内容
+            srt_content = ""
+            for i, subtitle in enumerate(subtitles, 1):
+                start_time = format_time(subtitle['start'])
+                end_time = format_time(subtitle['start'] + subtitle['duration'])
+                srt_content += f"{i}\n{start_time} --> {end_time}\n{subtitle['text']}\n\n"
+            
+            # 保存字幕文件
+            title = video_info.get('title', '') if video_info else ''
+            if not title:
+                title = f"video_transcript_{video_id}"
+                
+            output_filename = f"{title}.srt"
+            output_filepath = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
+            with open(output_filepath, 'w', encoding='utf-8') as f:
+                f.write(srt_content)
+            
+            logger.info(f"转录结果已保存到: {output_filepath}")
+            
+            # 删除临时音频文件
+            try:
+                os.remove(audio_path)
+                logger.info(f"已删除临时文件: {audio_path}")
+            except Exception as e:
+                logger.warning(f"删除临时文件失败: {str(e)}")
+                
+            # 生成文件信息并保存
+            file_id = str(uuid.uuid4())
+            file_info = {
+                'id': file_id,
+                'filename': output_filename,
+                'path': output_filepath,
+                'url': f'/view/{file_id}',
+                'upload_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'show_timeline': True,
+                'source': 'transcription',
+                'video_info': video_info
+            }
+            files_info = load_files_info()
+            files_info[file_id] = file_info
+            save_files_info(files_info)
+            
+            # 发送到Readwise
+            try:
+                if video_info:
+                    save_to_readwise(
+                        title=video_info.get('title', 'Video Transcript'),
+                        content=srt_content,
+                        url=url,
+                        published_date=video_info.get('published_date')
+                    )
+                    logger.info("成功发送转录内容到Readwise")
+            except Exception as e:
+                logger.error(f"发送转录内容到Readwise失败: {str(e)}")
+                
+            return jsonify({
+                'success': True,
+                'video_info': video_info,
+                'subtitle_content': srt_content,
+                'filename': file_info['filename'],
+                'view_url': file_info['url'],
+                'source': 'transcription'
+            })
+            
+        # 如果有字幕，根据平台确定字幕格式并转换
+        if platform == 'youtube':
+            srt_content = convert_to_srt(subtitle_content, 'json3')
+        elif platform == 'bilibili':
+            srt_content = convert_to_srt(subtitle_content, 'json3')
+        else:
+            return jsonify({'error': '不支持的平台'}), 400
+            
+        if not srt_content:
+            return jsonify({'error': '字幕转换失败'}), 400
+        
+        # 保存字幕文件
+        title = video_info.get('title', '') if video_info else ''
+        if not title:
+            title = f"{video_id}"
+                
+        output_filename = f"{title}.srt"
+        output_filepath = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
+        with open(output_filepath, 'w', encoding='utf-8') as f:
+            f.write(srt_content)
+        
+        # 生成文件信息并保存
+        file_id = str(uuid.uuid4())
+        file_info = {
+            'id': file_id,
+            'filename': output_filename,
+            'path': output_filepath,
+            'url': f'/view/{file_id}',
+            'upload_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'show_timeline': True,
+            'source': 'subtitle',
+            'video_info': video_info
+        }
+        files_info = load_files_info()
+        files_info[file_id] = file_info
+        save_files_info(files_info)
+        
+        # 返回结果
+        return jsonify({
+            'success': True,
+            'video_info': video_info,
+            'subtitle_content': srt_content,
+            'filename': file_info['filename'],
+            'view_url': file_info['url'],
+            'source': 'subtitle'
+        })
+        
+    except Exception as e:
+        logger.error(f"处理视频时出错: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+def get_video_language(info):
+    """获取视频的语言信息
+    
+    优先级：
+    1. 从标题判断语言
+    2. 从手动上传的字幕判断
+    3. 从自动字幕判断
+    4. 从视频语言字段获取
+    
+    返回：
+        str: 'zh' 表示中文, 'en' 表示英文, None 表示其他语言
+    """
+    try:
+        language = None
+        
+        # 1. 从标题判断语言
+        if info.get('title'):
+            title = info['title']
+            # 检测标题是否包含中文字符
+            if any('\u4e00' <= char <= '\u9fff' for char in title):
+                return 'zh'
+            # 如果标题全是英文字符和标点符号，判定为英文
+            elif all(ord(char) < 128 for char in title):
+                return 'en'
+        
+        # 2. 从手动上传的字幕判断
+        if info.get('subtitles'):
+            manual_subs = info['subtitles']
+            # 优先检查中文字幕
+            if any(lang.startswith('zh') for lang in manual_subs.keys()):
+                return 'zh'
+            # 其次检查英文字幕
+            elif any(lang.startswith('en') for lang in manual_subs.keys()):
+                return 'en'
+        
+        # 3. 从自动字幕判断
+        if info.get('automatic_captions'):
+            auto_subs = info['automatic_captions']
+            # 优先检查中文自动字幕
+            if any(lang.startswith('zh') for lang in auto_subs.keys()):
+                return 'zh'
+            # 其次检查英文自动字幕
+            elif any(lang.startswith('en') for lang in auto_subs.keys()):
+                return 'en'
+        
+        # 4. 从视频语言字段获取
+        if info.get('language'):
+            lang = info['language'].lower()
+            if lang.startswith('zh'):
+                return 'zh'
+            elif lang.startswith('en'):
+                return 'en'
+        
+        # 如果无法确定语言，返回 None
+        return None
+            
+    except Exception as e:
+        logger.error(f"获取视频语言时出错: {str(e)}")
+        return None
+
+def get_subtitle_strategy(language, info):
+    """根据视频语言确定字幕下载策略
+    
+    Args：
+        language: 视频语言 ('zh', 'en', 或 None)
+        info: 视频信息字典
+    
+    Returns：
+        tuple: (是否下载字幕, 优先下载的语言列表)
+    """
+    if language == 'zh':
+        # 中文视频：只下载手动上传的字幕
+        if info.get('subtitles') and any(lang.startswith('zh') for lang in info['subtitles'].keys()):
+            return True, ['zh']
+        return False, []
+        
+    elif language == 'en':
+        # 英文视频：优先手动字幕，其次自动字幕
+        has_manual = info.get('subtitles') and any(lang.startswith('en') for lang in info['subtitles'].keys())
+        has_auto = info.get('automatic_captions') and any(lang.startswith('en') for lang in info['automatic_captions'].keys())
+        
+        if has_manual or has_auto:
+            return True, ['en']
+        return False, []
+        
+    else:
+        # 其他语言：暂不处理
+        return False, []
 
 if __name__ == '__main__':
     logger.info("启动Flask服务器")

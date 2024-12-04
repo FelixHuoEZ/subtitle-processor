@@ -3,7 +3,7 @@ import logging
 import requests
 import telegram
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackContext
 from telegram.error import Conflict, NetworkError, TelegramError
 import urllib3
 import httpx
@@ -14,6 +14,7 @@ import signal
 import time
 import datetime
 import pytz
+import re
 
 # 配置日志
 logging.basicConfig(
@@ -86,100 +87,192 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         '2. 使用命令 /process <YouTube URL>'
     )
 
-async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理YouTube URL"""
-    try:
-        # 获取URL
-        if context.args:
-            # 从命令参数获取URL
-            url = context.args[0]
-        else:
-            # 从消息文本获取URL
-            url = update.message.text.strip()
-        
-        logger.debug(f"收到URL: {url}")
-        
-        if not ('youtube.com' in url or 'youtu.be' in url):
-            await update.message.reply_text('请发送有效的YouTube视频链接！')
-            return
-
-        # 发送处理中的消息
-        processing_message = await update.message.reply_text('正在处理视频，请稍候...')
-
-        # 配置requests会话
-        session = requests.Session()
-        
-        # 对内部服务不使用代理
-        if 'subtitle-processor' in SUBTITLE_PROCESSOR_URL:
-            logger.debug("内部服务请求，不使用代理")
-            session.proxies = {}  # 清空代理设置
-        else:
-            if PROXY:
-                logger.debug(f"外部服务请求，使用代理: {PROXY}")
-                session.proxies = {
-                    'http': PROXY,
-                    'https': PROXY
-                }
-                session.verify = False
-
-        request_url = f'{SUBTITLE_PROCESSOR_URL}/process_youtube'
-        request_data = {'url': url}
-        
-        logger.debug(f"发送请求到: {request_url}")
-        logger.debug(f"请求数据: {request_data}")
-        logger.debug(f"代理配置: {session.proxies}")
-
-        # 发送请求到字幕处理服务
-        try:
-            response = session.post(
-                request_url,
-                json=request_data,
-                timeout=300  # 5分钟超时
-            )
-            
-            logger.debug(f"收到响应: 状态码={response.status_code}")
-            logger.debug(f"响应内容: {response.text[:500]}...")  # 只记录前500个字符
-            
-            if response.status_code == 200:
-                result = response.json()
-                logger.debug(f"解析的JSON响应: {result}")
-                
-                # 发送成功消息和字幕文件链接
-                success_message = (
-                    f'处理完成！\n'
-                    f'视频标题: {result.get("title", "未知")}\n'
-                )
-                
-                # 添加查看链接
-                view_url = result.get('view_url')
-                if view_url:
-                    # 使用配置的URL
-                    full_url = f'{SUBTITLE_PROCESSOR_URL}{view_url}'
-                    success_message += f'查看字幕: {full_url}\n'
-                
-                await processing_message.edit_text(success_message)
-            else:
-                error_msg = f'处理失败 (HTTP {response.status_code})'
+def normalize_url(url):
+    """标准化视频URL
+    
+    支持的格式：
+    YouTube:
+    - https://www.youtube.com/watch?v=VIDEO_ID
+    - https://youtu.be/VIDEO_ID
+    - https://youtube.com/shorts/VIDEO_ID
+    - https://m.youtube.com/watch?v=VIDEO_ID
+    - https://youtube.com/v/VIDEO_ID
+    - https://youtube.com/embed/VIDEO_ID
+    
+    Bilibili:
+    - https://www.bilibili.com/video/BV1xx411c7mD
+    - https://b23.tv/xxxxx
+    - https://www.bilibili.com/video/av170001
+    - https://m.bilibili.com/video/BV1xx411c7mD
+    """
+    import re
+    
+    # 清理URL
+    url = url.strip()
+    
+    # YouTube URL处理
+    youtube_patterns = [
+        r'(?:https?:\/\/)?(?:www\.|m\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]+)',
+        r'(?:https?:\/\/)?youtu\.be\/([a-zA-Z0-9_-]+)',
+        r'(?:https?:\/\/)?(?:www\.|m\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]+)',
+        r'(?:https?:\/\/)?(?:www\.|m\.)?youtube\.com\/v\/([a-zA-Z0-9_-]+)',
+        r'(?:https?:\/\/)?(?:www\.|m\.)?youtube\.com\/embed\/([a-zA-Z0-9_-]+)'
+    ]
+    
+    for pattern in youtube_patterns:
+        match = re.search(pattern, url)
+        if match:
+            video_id = match.group(1)
+            return f'https://www.youtube.com/watch?v={video_id}', 'youtube'
+    
+    # Bilibili URL处理
+    bilibili_patterns = [
+        # BV号格式
+        r'(?:https?:\/\/)?(?:www\.|m\.)?bilibili\.com\/video\/(BV[a-zA-Z0-9]+)',
+        # av号格式
+        r'(?:https?:\/\/)?(?:www\.|m\.)?bilibili\.com\/video\/av(\d+)',
+        # 短链接格式
+        r'(?:https?:\/\/)?b23\.tv\/([a-zA-Z0-9]+)'
+    ]
+    
+    for pattern in bilibili_patterns:
+        match = re.search(pattern, url)
+        if match:
+            video_id = match.group(1)
+            # 如果是短链接，需要处理重定向
+            if 'b23.tv' in url:
                 try:
-                    error_details = response.json()
-                    if 'error' in error_details:
-                        error_msg += f": {error_details['error']}"
+                    import requests
+                    response = requests.head(url, allow_redirects=True)
+                    if response.status_code == 200:
+                        final_url = response.url
+                        # 递归处理重定向后的URL
+                        return normalize_url(final_url)
                 except:
-                    error_msg += f": {response.text}"
-                logger.error(f"处理失败: {error_msg}")
-                await processing_message.edit_text(error_msg)
+                    pass
+            
+            # 如果是av号，转换为标准格式
+            if video_id.startswith('av'):
+                video_id = video_id[2:]
+            if video_id.isdigit():
+                return f'https://www.bilibili.com/video/av{video_id}', 'bilibili'
+            else:
+                return f'https://www.bilibili.com/video/{video_id}', 'bilibili'
+    
+    return None, None
 
-        except requests.exceptions.RequestException as e:
-            error_msg = f"请求失败: {str(e)}"
-            logger.error(error_msg)
-            logger.error(traceback.format_exc())
-            await processing_message.edit_text(error_msg)
+def extract_video_id(url, platform):
+    """从标准化的URL中提取视频ID"""
+    if platform == 'youtube':
+        match = re.search(r'watch\?v=([a-zA-Z0-9_-]+)', url)
+        if match:
+            return match.group(1)
+    elif platform == 'bilibili':
+        # BV号格式
+        match = re.search(r'\/video\/(BV[a-zA-Z0-9]+)', url)
+        if match:
+            return match.group(1)
+        # av号格式
+        match = re.search(r'\/video\/av(\d+)', url)
+        if match:
+            return match.group(1)
+    return None
 
+async def send_subtitle_file(update: Update, context: ContextTypes.DEFAULT_TYPE, result: dict) -> None:
+    """发送字幕文件到Telegram
+    
+    Args:
+        update: Telegram更新对象
+        context: 回调上下文
+        result: 字幕处理结果，包含字幕内容和视频信息
+    """
+    try:
+        # 获取字幕内容和文件名
+        subtitle_content = result.get('subtitle_content', '')
+        video_info = result.get('video_info', {})
+        
+        # 使用视频标题作为文件名
+        title = video_info.get('title', '') if video_info else ''
+        if not title and 'filename' in result:
+            title = os.path.splitext(result['filename'])[0]
+        if not title:
+            title = 'subtitle'
+        filename = f"{title}.srt"
+        
+        # 创建临时文件
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.srt', delete=False) as temp_file:
+            temp_file.write(subtitle_content)
+            temp_path = temp_file.name
+        
+        # 发送字幕文件
+        with open(temp_path, 'rb') as f:
+            await update.message.reply_document(
+                document=f,
+                filename=filename,
+                caption=f"✅ 字幕已生成 ({result.get('source', 'unknown')})"
+            )
+        
+        # 删除临时文件
+        import os
+        try:
+            os.remove(temp_path)
+        except Exception as e:
+            logger.warning(f"删除临时文件失败: {str(e)}")
+            
     except Exception as e:
-        error_msg = f"处理URL时发生错误: {str(e)}"
-        logger.error(error_msg)
-        logger.error(traceback.format_exc())
-        await update.message.reply_text(error_msg)
+        logger.error(f"发送字幕文件时出错: {str(e)}")
+        await update.message.reply_text("❌ 发送字幕文件时出错，请稍后重试。")
+
+async def process_url(update: Update, context: CallbackContext) -> None:
+    """处理用户发送的视频URL"""
+    try:
+        # 获取消息文本
+        message_text = update.message.text.strip()
+        
+        # 标准化URL
+        normalized_url, platform = normalize_url(message_text)
+        if not normalized_url:
+            await update.message.reply_text("❌ 无效的视频URL。请发送YouTube或Bilibili视频链接。")
+            return
+        
+        # 提取视频ID
+        video_id = extract_video_id(normalized_url, platform)
+        if not video_id:
+            await update.message.reply_text("❌ 无法解析视频ID。请检查URL格式。")
+            return
+        
+        # 发送处理中的消息
+        processing_message = await update.message.reply_text("⏳ 正在处理视频，请稍候...")
+        
+        # 准备请求数据
+        data = {
+            'url': normalized_url,
+            'platform': platform,
+            'video_id': video_id
+        }
+        
+        # 发送请求到字幕处理服务
+        subtitle_processor_url = os.getenv('SUBTITLE_PROCESSOR_URL', 'http://subtitle-processor:5000')
+        response = requests.post(f"{subtitle_processor_url}/process", json=data)
+        
+        if response.status_code == 200:
+            result = response.json()
+            
+            # 检查是否有字幕内容
+            if result.get('subtitle_content'):
+                # 发送字幕文件
+                await send_subtitle_file(update, context, result)
+                await processing_message.edit_text("✅ 字幕处理完成！")
+            else:
+                await processing_message.edit_text("❌ 未找到可用的字幕。")
+        else:
+            error_message = response.json().get('error', '未知错误')
+            await processing_message.edit_text(f"❌ 处理失败：{error_message}")
+            
+    except Exception as e:
+        logger.error(f"处理URL时出错: {str(e)}")
+        await update.message.reply_text("❌ 处理视频时出错，请稍后重试。")
 
 def signal_handler(signum, frame):
     """处理进程信号"""
