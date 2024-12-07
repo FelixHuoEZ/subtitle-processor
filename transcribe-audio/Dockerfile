@@ -1,17 +1,17 @@
 FROM python:3.9-slim
 
-# 配置apt镜像源
-RUN echo "deb https://mirrors.aliyun.com/debian/ bullseye main contrib non-free" > /etc/apt/sources.list && \
-    echo "deb https://mirrors.aliyun.com/debian-security bullseye-security main contrib non-free" >> /etc/apt/sources.list && \
-    echo "deb https://mirrors.aliyun.com/debian/ bullseye-updates main contrib non-free" >> /etc/apt/sources.list
-
 # 安装系统依赖
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
     build-essential \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    || (sleep 2 && apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    git \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*)
 
 # 设置工作目录
 WORKDIR /app
@@ -19,9 +19,10 @@ WORKDIR /app
 # 首先只复制requirements.txt
 COPY requirements.txt .
 
-# 使用阿里云PyPI镜像安装Python依赖
+# 安装Python依赖
 RUN pip install -i https://mirrors.aliyun.com/pypi/simple/ --no-cache-dir -r requirements.txt && \
-    pip install -i https://mirrors.aliyun.com/pypi/simple/ --no-cache-dir torch==2.0.1 torchaudio && \
+    pip install -i https://mirrors.aliyun.com/pypi/simple/ --no-cache-dir torch torchaudio && \
+    pip install -i https://mirrors.aliyun.com/pypi/simple/ --no-cache-dir onnx onnxconverter-common && \
     pip install -i https://mirrors.aliyun.com/pypi/simple/ --no-cache-dir "funasr @ git+https://github.com/alibaba-damo-academy/FunASR.git"
 
 # 复制应用程序文件

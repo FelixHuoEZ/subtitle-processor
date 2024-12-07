@@ -1722,7 +1722,7 @@ def process_video():
             if not title:
                 title = f"video_transcript_{video_id}"
                 
-            output_filename = f"{title}.srt"
+            output_filename = sanitize_filename(f"{title}.srt")
             output_filepath = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
             with open(output_filepath, 'w', encoding='utf-8') as f:
                 f.write(srt_content)
@@ -1792,7 +1792,7 @@ def process_video():
         if not title:
             title = f"{video_id}"
                 
-        output_filename = f"{title}.srt"
+        output_filename = sanitize_filename(f"{title}.srt")
         output_filepath = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
         with open(output_filepath, 'w', encoding='utf-8') as f:
             f.write(srt_content)
@@ -1915,6 +1915,32 @@ def get_subtitle_strategy(language, info):
     else:
         # 其他语言：暂不处理
         return False, []
+
+def sanitize_filename(filename, max_length=200):
+    """
+    清理并限制文件名长度
+    :param filename: 原始文件名
+    :param max_length: 最大长度（包括扩展名）
+    :return: 处理后的文件名
+    """
+    # 移除不合法的文件名字符
+    invalid_chars = '<>:"/\\|?*'
+    for char in invalid_chars:
+        filename = filename.replace(char, '')
+    
+    # 获取扩展名
+    name, ext = os.path.splitext(filename)
+    
+    # 计算主文件名的最大长度（考虑扩展名长度）
+    max_name_length = max_length - len(ext)
+    
+    # 如果文件名过长，截断它
+    if len(name) > max_name_length:
+        # 保留文件名开头和结尾，中间用...替代
+        keep_length = (max_name_length - 3) // 2
+        name = name[:keep_length] + '...' + name[-keep_length:]
+    
+    return name + ext
 
 if __name__ == '__main__':
     logger.info("启动Flask服务器")

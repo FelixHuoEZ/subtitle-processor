@@ -38,6 +38,13 @@ services:
     image: transcribe-audio:latest
     container_name: transcribe-audio
     restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     ports:
       - "10095:10095"
     volumes:

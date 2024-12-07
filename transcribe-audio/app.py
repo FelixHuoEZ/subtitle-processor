@@ -197,6 +197,13 @@ def ensure_models():
 # 初始化FunASR模型
 logger.info("正在加载FunASR模型...")
 try:
+    # 检测GPU是否可用
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"检测到可用设备: {device}")
+    if device == "cuda":
+        logger.info(f"GPU信息: {torch.cuda.get_device_name(0)}")
+        logger.info(f"CUDA版本: {torch.version.cuda}")
+    
     # 确保模型存在
     model_dir, model_names = ensure_models()
     
@@ -204,36 +211,36 @@ try:
         # 尝试使用指定的模型
         model = AutoModel(
             model=model_names["main"],
-            device="cpu",
+            device=device,  # 使用检测到的设备
             model_dir=model_dir,
             vad_model=model_names["vad"],
             vad_kwargs={"max_single_segment_time": 60000},
             punc_model=model_names["punc"],
             spk_model=model_names["spk"],
-            batch_size=1,
+            batch_size=1 if device == "cpu" else 4,  # GPU时使用更大的batch_size
             vad_model_dir=model_dir,
             disable_update=True,
             use_local=True
         )
-        logger.info(f"成功加载所有模型")
+        logger.info(f"成功加载所有模型到{device}设备")
     except Exception as e:
         # 如果指定模型失败，使用默认模型
         logger.warning(f"加载指定模型失败: {str(e)}")
         logger.info("尝试使用默认模型配置")
         model = AutoModel(
             model="paraformer-zh",
-            device="cpu",
+            device=device,  # 使用检测到的设备
             model_dir=model_dir,
             vad_model="fsmn-vad",
             vad_kwargs={"max_single_segment_time": 60000},
             punc_model="ct-punc",
             spk_model="cam++",
-            batch_size=1,
+            batch_size=1 if device == "cpu" else 4,  # GPU时使用更大的batch_size
             vad_model_dir=model_dir,
             disable_update=True,
             use_local=True
         )
-        logger.info("成功加载默认模型配置")
+        logger.info(f"成功加载默认模型配置到{device}设备")
     
     # 验证模型加载
     logger.info("验证模型加载状态...")
