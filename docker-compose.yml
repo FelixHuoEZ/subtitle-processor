@@ -6,6 +6,13 @@ services:
     image: subtitle-processor:latest
     container_name: subtitle-processor
     restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     ports:
       - "5000:5000"
     volumes:
@@ -17,6 +24,7 @@ services:
       - ./videos:/app/videos
       - ./outputs:/app/outputs
       - ./config:/app/config
+      - ./models:/app/models
     environment:
       - TZ=Asia/Shanghai
       - FLASK_APP=app.py
@@ -34,32 +42,19 @@ services:
       - "host.docker.internal:host-gateway"
 
   transcribe-audio:
-    build: ./transcribe-audio # 直接运行、不构建的时候，注释掉
+    build: 
+      context: ./transcribe-audio
+      dockerfile: Dockerfile
     image: transcribe-audio:latest
     container_name: transcribe-audio
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     ports:
       - "10095:10095"
     volumes:
-      # - /share/docker/subtitle-processor/uploads:/app/uploads
-      # - /share/docker/subtitle-processor/videos:/app/videos
-      # - /share/docker/subtitle-processor/models:/app/models
-      # - /share/docker/subtitle-processor/outputs:/app/outputs
-      # - /share/docker/subtitle-processor/config:/app/config
-      - ./uploads:/app/uploads
-      - ./videos:/app/videos
+      - ./transcribe-audio:/app
       - ./models:/app/models
-      - ./outputs:/app/outputs
-      - ./config:/app/config
     environment:
-      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
       - MODEL_DIR=/app/models
       - MODELSCOPE_CACHE=/app/models
       - HF_HOME=/app/models
@@ -68,11 +63,25 @@ services:
       - FUNASR_VAD_MODEL=fsmn-vad
       - FUNASR_PUNC_MODEL=ct-punc
       - FUNASR_SPK_MODEL=cam++
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - srt-network
 
   telegram-bot:
-    build: ./telegram-bot # 直接运行、不构建的时候，注释掉
+    build:  # 直接运行、不构建的时候，注释掉
+      context: ./telegram-bot
+      dockerfile: Dockerfile
     image: telegram-bot:latest
     container_name: telegram-bot
     restart: unless-stopped

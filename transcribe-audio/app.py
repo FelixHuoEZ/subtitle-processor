@@ -12,6 +12,7 @@ import tempfile
 from modelscope import snapshot_download
 from pathlib import Path
 import shutil
+from datetime import datetime
 
 # FunASR 模型列表
 FUNASR_MODELS = [
@@ -22,17 +23,30 @@ FUNASR_MODELS = [
 
 # 配置日志
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
     handlers=[
         logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger(__name__)
+
+# 创建logger
+logger = logging.getLogger("transcribe-audio")
+logger.setLevel(logging.INFO)
+
+# 确保其他库的日志级别不会太详细
+logging.getLogger("modelscope").setLevel(logging.WARNING)
+logging.getLogger("funasr").setLevel(logging.WARNING)
+logging.getLogger("jieba").setLevel(logging.WARNING)
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max-limit
 app.config['UPLOAD_FOLDER'] = '/app/uploads'
+
+# 全局模型变量
+model = None
 
 # 设置请求超时时间（5分钟）
 app.config['TIMEOUT'] = 300
@@ -195,64 +209,104 @@ def ensure_models():
     return model_dir, {k: v["name"] for k, v in model_configs.items()}
 
 # 初始化FunASR模型
-logger.info("正在加载FunASR模型...")
-try:
-    # 检测GPU是否可用
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info(f"检测到可用设备: {device}")
-    if device == "cuda":
-        logger.info(f"GPU信息: {torch.cuda.get_device_name(0)}")
-        logger.info(f"CUDA版本: {torch.version.cuda}")
-    
-    # 确保模型存在
-    model_dir, model_names = ensure_models()
+def init_model():
+    global model  # 声明使用全局变量
+    print("="*50)
+    print("开始初始化FunASR模型...")
+    print("正在检测GPU状态...")
     
     try:
-        # 尝试使用指定的模型
-        model = AutoModel(
-            model=model_names["main"],
-            device=device,  # 使用检测到的设备
-            model_dir=model_dir,
-            vad_model=model_names["vad"],
-            vad_kwargs={"max_single_segment_time": 60000},
-            punc_model=model_names["punc"],
-            spk_model=model_names["spk"],
-            batch_size=1 if device == "cpu" else 4,  # GPU时使用更大的batch_size
-            vad_model_dir=model_dir,
-            disable_update=True,
-            use_local=True
-        )
-        logger.info(f"成功加载所有模型到{device}设备")
+        # 检测GPU是否可用
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print("\n" + "="*20 + " GPU检测信息 " + "="*20)
+        print(f"CUDA是否可用: {torch.cuda.is_available()}")
+        print(f"PyTorch版本: {torch.__version__}")
+        
+        if device == "cuda":
+            gpu_count = torch.cuda.device_count()
+            print(f"可用GPU数量: {gpu_count}")
+            for i in range(gpu_count):
+                print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
+                print(f"GPU {i} 总内存: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.1f} GB")
+                print(f"GPU {i} CUDA版本: {torch.version.cuda}")
+                if hasattr(torch.backends.cudnn, 'version'):
+                    print(f"GPU {i} cuDNN版本: {torch.backends.cudnn.version()}")
+        else:
+            print("警告: 未检测到可用的GPU，将使用CPU进行推理")
+        
+        print("\n" + "="*20 + " 模型加载开始 " + "="*20)
+        
+        # 确保模型存在
+        model_dir, model_names = ensure_models()
+        
+        try:
+            # 尝试使用指定的模型
+            model = AutoModel(
+                model=model_names["main"],
+                device=device,  # 使用检测到的设备
+                model_dir=model_dir,
+                vad_model=model_names["vad"],
+                vad_kwargs={"max_single_segment_time": 60000},
+                punc_model=model_names["punc"],
+                spk_model=model_names["spk"],
+                batch_size=1 if device == "cpu" else 4,  # GPU时使用更大的batch_size
+                vad_model_dir=model_dir,
+                disable_update=True,
+                use_local=True,
+                punc_model_dir=model_dir,
+                spk_model_dir=model_dir
+            )
+            print(f"FunASR模型加载完成，使用设备: {device}")
+            print(f"主模型: {model_names['main']}")
+            print(f"VAD模型: {model_names['vad']}")
+            print(f"标点模型: {model_names['punc']}")
+            print(f"说话人模型: {model_names['spk']}")
+            print(f"批处理大小: {1 if device == 'cpu' else 4}")
+            
+        except Exception as e:
+            print(f"警告: 加载指定模型失败: {str(e)}")
+            print("尝试使用默认模型配置")
+            
+            # 使用默认模型
+            model = AutoModel(
+                model="paraformer-zh",
+                device=device,  # 使用检测到的设备
+                model_dir=model_dir,
+                vad_model="fsmn-vad",
+                vad_kwargs={"max_single_segment_time": 60000},
+                punc_model="ct-punc",
+                spk_model="cam++",
+                batch_size=1 if device == "cpu" else 4,  # GPU时使用更大的batch_size
+                vad_model_dir=model_dir,
+                disable_update=True,
+                use_local=True,
+                punc_model_dir=model_dir,
+                spk_model_dir=model_dir
+            )
+            print(f"FunASR模型加载完成，使用设备: {device}")
+            print(f"主模型: paraformer-zh")
+            print(f"VAD模型: fsmn-vad")
+            print(f"标点模型: ct-punc")
+            print(f"说话人模型: cam++")
+            print(f"批处理大小: {1 if device == 'cpu' else 4}")
+        
+        # 验证模型加载
+        print("验证模型加载状态...")
+        test_audio = np.zeros(16000, dtype=np.float32)  # 1秒的静音用于测试
+        test_result = model.generate(input=test_audio, sample_rate=16000)
+        print(f"模型验证结果: {test_result}")
+        print("FunASR模型加载完成")
+        
+        return model
+        
     except Exception as e:
-        # 如果指定模型失败，使用默认模型
-        logger.warning(f"加载指定模型失败: {str(e)}")
-        logger.info("尝试使用默认模型配置")
-        model = AutoModel(
-            model="paraformer-zh",
-            device=device,  # 使用检测到的设备
-            model_dir=model_dir,
-            vad_model="fsmn-vad",
-            vad_kwargs={"max_single_segment_time": 60000},
-            punc_model="ct-punc",
-            spk_model="cam++",
-            batch_size=1 if device == "cpu" else 4,  # GPU时使用更大的batch_size
-            vad_model_dir=model_dir,
-            disable_update=True,
-            use_local=True
-        )
-        logger.info(f"成功加载默认模型配置到{device}设备")
-    
-    # 验证模型加载
-    logger.info("验证模型加载状态...")
-    test_audio = np.zeros(16000, dtype=np.float32)  # 1秒的静音用于测试
-    test_result = model.generate(input=test_audio, sample_rate=16000)
-    logger.info(f"模型验证结果: {test_result}")
-    logger.info("FunASR模型加载完成")
-except Exception as e:
-    logger.error(f"加载FunASR模型失败: {str(e)}")
-    import traceback
-    logger.error(traceback.format_exc())  # 打印完整的错误堆栈
-    sys.exit(1)
+        print(f"错误: 加载FunASR模型失败: {str(e)}")
+        import traceback
+        print(traceback.format_exc())  # 打印完整的错误堆栈
+        sys.exit(1)
+
+# 初始化模型
+model = init_model()
 
 @app.route('/health')
 def health_check():
@@ -508,7 +562,21 @@ def recognize_audio():
                 logger.error(f"清理临时文件失败: {str(e)}")
 
 if __name__ == '__main__':
-    # 确保上传目录存在
-    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    logger.info("启动FunASR服务...")
-    app.run(host='0.0.0.0', port=10095, threaded=True)
+    try:
+        # 确保上传目录存在
+        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+        
+        print("\n" + "="*20 + " FunASR服务启动 " + "="*20)
+        print(f"服务启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"监听地址: 0.0.0.0:{10095}")
+        print(f"上传目录: {app.config['UPLOAD_FOLDER']}")
+        print(f"模型目录: {os.getenv('MODEL_DIR', '/app/models')}")
+        print("="*56 + "\n")
+        
+        # 启动Flask应用
+        app.run(host='0.0.0.0', port=10095, threaded=True)
+    except Exception as e:
+        print(f"错误: 启动FunASR服务失败: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+        sys.exit(1)
