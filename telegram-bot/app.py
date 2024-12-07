@@ -24,9 +24,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 获取环境变量
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-SUBTITLE_PROCESSOR_URL = os.getenv('SUBTITLE_PROCESSOR_URL', 'http://subtitle-processor:5000')
+TELEGRAM_TOKEN_FILE = os.getenv('TELEGRAM_TOKEN_FILE')
+TELEGRAM_TOKEN = None
 
+if TELEGRAM_TOKEN_FILE and os.path.exists(TELEGRAM_TOKEN_FILE):
+    try:
+        with open(TELEGRAM_TOKEN_FILE, 'r') as f:
+            TELEGRAM_TOKEN = f.read().strip()
+        logger.info("成功从文件读取Telegram Token")
+    except Exception as e:
+        logger.error(f"读取Telegram Token文件失败: {str(e)}")
+else:
+    # 兼容旧的环境变量方式
+    TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+
+SUBTITLE_PROCESSOR_URL = os.getenv('SUBTITLE_PROCESSOR_URL', 'http://subtitle-processor:5000')
 logger.info(f"使用的SUBTITLE_PROCESSOR_URL: {SUBTITLE_PROCESSOR_URL}")
 
 # 配置代理
@@ -282,7 +294,7 @@ def signal_handler(signum, frame):
 def main():
     """启动bot"""
     if not TELEGRAM_TOKEN:
-        logger.error("请设置TELEGRAM_TOKEN环境变量！")
+        logger.error("请设置TELEGRAM_TOKEN环境变量或配置文件！")
         return
 
     # 注册信号处理器

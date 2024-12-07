@@ -880,7 +880,7 @@ def download_bilibili_subtitles(url, video_info):
         logger.error(f"下载Bilibili字幕失败: {str(e)}")
         raise
 
-def save_to_readwise(title, content, url=None, published_date=None):
+def save_to_readwise(title, content, url=None, published_date=None, author=None):
     """保存内容到Readwise，支持长文本分段"""
     try:
         # 从文件读取token
@@ -978,6 +978,10 @@ def save_to_readwise(title, content, url=None, published_date=None):
             # 添加发布日期（如果有）
             if published_date:
                 data["published_date"] = published_date
+
+            # 添加作者信息（如果有）
+            if author:
+                data["author"] = author
 
             # 记录请求数据
             logger.info("发送到Readwise的数据:")
@@ -1445,18 +1449,18 @@ def process_youtube():
         if not srt_content:
             # 如果没有字幕，尝试下载视频并转录
             audio_path = download_video(url)
-            if not audio_path:
-                return jsonify({"error": "Failed to download video", "success": False}), 500
+            if not audio_path or not os.path.exists(audio_path):
+                return jsonify({"error": "无法下载视频或提取音频", "success": False}), 500
                 
             # 使用FunASR转录
             result = transcribe_audio(audio_path)
             if not result:
-                return jsonify({"error": "Failed to transcribe audio", "success": False}), 500
+                return jsonify({"error": "转录失败", "success": False}), 500
                 
             # 解析转录结果生成字幕
             subtitles = parse_srt(result)
             if not subtitles:
-                return jsonify({"error": "Failed to parse subtitles", "success": False}), 500
+                return jsonify({"error": "解析转录结果失败", "success": False}), 500
                 
             # 生成SRT格式内容
             srt_content = ""
@@ -1507,7 +1511,8 @@ def process_youtube():
                         title=video_info.get('title', 'Video Transcript'),
                         content=srt_content,
                         url=url,
-                        published_date=video_info.get('published_date')
+                        published_date=video_info.get('published_date'),
+                        author=video_info.get('uploader')
                     )
                     logger.info("成功发送转录内容到Readwise")
             except Exception as e:
@@ -1574,7 +1579,8 @@ def process_youtube():
                     title=video_info.get('title', 'YouTube Video Transcript'),
                     content='\n'.join(s['text'] for s in subtitles_list),
                     url=url,
-                    published_date=video_info.get('published_date')
+                    published_date=video_info.get('published_date'),
+                    author=video_info.get('uploader')
                 )
                 logger.info("成功发送到Readwise")
         except Exception as e:
@@ -1682,7 +1688,8 @@ def process_video():
                         title=video_info.get('title', 'Video Transcript'),
                         content=srt_content,
                         url=url,
-                        published_date=video_info.get('published_date')
+                        published_date=video_info.get('published_date'),
+                        author=video_info.get('uploader')
                     )
                     logger.info("成功发送转录内容到Readwise")
             except Exception as e:

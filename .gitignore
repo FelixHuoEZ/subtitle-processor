@@ -1,0 +1,36 @@
+# 配置文件
+config/telegram_token.txt
+config/readwise_token.txt
+
+# 数据目录
+uploads/
+videos/
+models/
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 环境文件
+.env
+.venv
+env/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 生成的镜像文件
+*.tar
+
+
+# 单元测试文件和脚本
+build_images.ps1
+test_subtitles.py

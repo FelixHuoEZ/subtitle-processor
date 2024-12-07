@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   subtitle-processor:
-    build: .
+    build: . # 直接运行、不构建的时候，注释掉
     image: subtitle-processor:latest
     container_name: subtitle-processor
     restart: unless-stopped
@@ -34,7 +34,7 @@ services:
       - "host.docker.internal:host-gateway"
 
   transcribe-audio:
-    build: ./transcribe-audio
+    build: ./transcribe-audio # 直接运行、不构建的时候，注释掉
     image: transcribe-audio:latest
     container_name: transcribe-audio
     restart: unless-stopped
@@ -65,18 +65,22 @@ services:
       - srt-network
 
   telegram-bot:
-    build: ./telegram-bot
+    build: ./telegram-bot # 直接运行、不构建的时候，注释掉
     image: telegram-bot:latest
     container_name: telegram-bot
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
-      - TELEGRAM_TOKEN=TELEGRAM_TOKEN_PLACEHOLDER
+      - TELEGRAM_TOKEN_FILE=/app/config/telegram_token.txt
       - SUBTITLE_PROCESSOR_URL=http://subtitle-processor:5000
+      - SERVER_DOMAIN=http://localhost:5000
       # - NO_PROXY=subtitle-processor,localhost,127.0.0.1
       # - ALL_PROXY=http://host.docker.internal:20172
       # - HTTP_PROXY=http://host.docker.internal:20172
       # - HTTPS_PROXY=http://host.docker.internal:20172
+    volumes:
+      - ./config:/app/config
+      # - /share/docker/subtitle-processor/config:/app/config
     networks:
       - srt-network
     depends_on:
