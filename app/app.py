@@ -880,7 +880,7 @@ def download_bilibili_subtitles(url, video_info):
         logger.error(f"下载Bilibili字幕失败: {str(e)}")
         raise
 
-def save_to_readwise(title, content, url=None, published_date=None, author=None, location='new'):
+def save_to_readwise(title, content, url=None, published_date=None, author=None, location='new', tags=None):
     """保存内容到Readwise，支持长文本分段"""
     try:
         # 验证location参数
@@ -978,7 +978,7 @@ def save_to_readwise(title, content, url=None, published_date=None, author=None,
                 "category": "article",
                 "should_clean_html": True,
                 "saved_using": "YouTube Subtitles Tool",
-                "tags": [],
+                "tags": tags or [],
                 "location": location
             }
 
@@ -1208,6 +1208,18 @@ FILES_LIST_TEMPLATE = '''
         .youtube-form button:hover {
             background-color: #0052a3;
         }
+        .tags-input {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .tags-help {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 10px;
+        }
         #progress {
             display: none;
             margin-top: 10px;
@@ -1228,9 +1240,17 @@ FILES_LIST_TEMPLATE = '''
         function submitYouTubeUrl() {
             var url = document.getElementById('youtube-url').value;
             var location = document.getElementById('save-location').value;
+            var tags = document.getElementById('tags').value;
             if (!url) {
                 showError('请输入YouTube URL');
                 return false;
+            }
+            
+            // 处理tags
+            var tagsList = [];
+            if (tags) {
+                // 支持中英文逗号
+                tagsList = tags.split(/[,，]/).map(tag => tag.trim()).filter(tag => tag);
             }
             
             // 显示进度
@@ -1238,12 +1258,21 @@ FILES_LIST_TEMPLATE = '''
             document.getElementById('progress').innerText = '正在处理...';
             document.getElementById('error-message').style.display = 'none';
             
-            fetch('/process_youtube', {
+            // 获取video_id
+            var videoId = extractVideoId(url);
+            
+            fetch('/process', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({url: url, location: location})
+                body: JSON.stringify({
+                    url: url,
+                    platform: 'youtube',
+                    location: location,
+                    video_id: videoId,
+                    tags: tagsList
+                })
             })
             .then(response => response.json())
             .then(data => {
@@ -1262,6 +1291,18 @@ FILES_LIST_TEMPLATE = '''
             return false;
         }
         
+        function extractVideoId(url) {
+            var match = url.match(/[?&]v=([^&]+)/);
+            if (match) {
+                return match[1];
+            }
+            match = url.match(/youtu\.be\/([^?]+)/);
+            if (match) {
+                return match[1];
+            }
+            return null;
+        }
+        
         function showError(message) {
             var errorDiv = document.getElementById('error-message');
             errorDiv.innerText = message;
@@ -1275,14 +1316,15 @@ FILES_LIST_TEMPLATE = '''
         <h1>字幕文件列表</h1>
         
         <form class="youtube-form" onsubmit="return submitYouTubeUrl()">
-            <h3>处理YouTube视频字幕</h3>
             <input type="text" id="youtube-url" placeholder="输入YouTube视频URL">
-            <select id="save-location" style="width: 100%; padding: 8px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px;">
-                <option value="new">保存到"新内容"</option>
-                <option value="archive">保存到"已归档"</option>
-                <option value="later">保存到"稍后阅读"</option>
-                <option value="feed">保存到"Feed"</option>
+            <select id="save-location">
+                <option value="new">New</option>
+                <option value="later">Later</option>
+                <option value="archive">Archive</option>
+                <option value="feed">Feed</option>
             </select>
+            <input type="text" id="tags" class="tags-input" placeholder="输入标签，用逗号分隔">
+            <div class="tags-help">标签示例：youtube字幕,学习笔记,英语学习</div>
             <button type="submit">处理</button>
             <div id="progress"></div>
             <div id="error-message" class="error-message"></div>
@@ -1635,6 +1677,11 @@ def process_video():
         url = data.get('url')
         platform = data.get('platform')
         video_id = data.get('video_id')
+        tags = data.get('tags', [])  # 获取tags参数，默认为空列表
+        location = data.get('location', 'new')
+        
+        # Log the request with location and tags
+        logger.info(f'处理{platform}URL: {url}, location: {location}, tags: {tags}')
         
         if not url or not platform or not video_id:
             return jsonify({'error': '缺少必要参数'}), 400
@@ -1713,7 +1760,8 @@ def process_video():
                         content=srt_content,
                         url=url,
                         published_date=video_info.get('published_date'),
-                        author=video_info.get('uploader')
+                        author=video_info.get('uploader'),
+                        tags=tags  # 传递tags参数
                     )
                     logger.info("成功发送转录内容到Readwise")
             except Exception as e:
@@ -1850,7 +1898,7 @@ def get_subtitle_strategy(language, info):
         tuple: (是否下载字幕, 优先下载的语言列表)
     """
     if language == 'zh':
-        # 中文视频：只下载手动上传的字幕
+        # 中文视频：只下载手动字幕
         if info.get('subtitles') and any(lang.startswith('zh') for lang in info['subtitles'].keys()):
             return True, ['zh']
         return False, []

@@ -64,6 +64,8 @@ VALID_LOCATIONS = {
     '4': 'feed'
 }
 
+TAGS_HELP_MESSAGE = "请输入标签，多个标签用逗号分隔（例如：'youtube字幕,学习笔记,英语学习'）。\n输入 /skip 跳过添加标签。"
+
 # 用户状态存储
 user_states = {}
 
@@ -260,174 +262,127 @@ async def send_subtitle_file(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 async def ask_location(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
     """询问用户选择location"""
-    message = (
-        "请选择保存位置 (10秒后默认选择'new'):\n"
-        "1. new (新文章)\n"
-        "2. later (稍后阅读)\n"
-        "3. archive (存档)\n"
-        "4. feed (订阅源)\n"
-        "\n可以输入数字(1-4)或直接输入位置名称"
-    )
-    sent_message = await update.message.reply_text(message)
+    user_id = update.effective_user.id
     
     # 保存用户状态
-    user_states[update.effective_user.id] = {
+    user_states[user_id] = {
+        'state': 'waiting_for_location',
         'url': url,
-        'waiting_for_location': True,
-        'start_time': time.time(),
-        'message_id': sent_message.message_id
+        'last_interaction': datetime.datetime.now(pytz.UTC)
     }
     
-    # 设置10秒后的默认选择
+    # 发送选择提示
+    message = await update.message.reply_text(
+        "请选择保存位置：\n"
+        "1. 新内容 (New)\n"
+        "2. 稍后阅读 (Later)\n"
+        "3. 已归档 (Archive)\n"
+        "4. Feed"
+    )
+    
+    # 保存提示消息ID以便后续删除
+    user_states[user_id]['message_id'] = message.message_id
+    
+    # 设置超时
     context.job_queue.run_once(
         location_timeout,
-        10,
-        data={
-            'user_id': update.effective_user.id,
-            'chat_id': update.effective_chat.id,
-            'message_id': sent_message.message_id,
-            'url': url
-        }
+        180,  # 3分钟超时
+        data={'user_id': user_id, 'chat_id': update.effective_chat.id},
+        name='location_timeout'
     )
 
-async def location_timeout(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def location_timeout(context: CallbackContext) -> None:
     """处理location选择超时"""
-    job = context.job
-    data = job.data
-    user_id = data['user_id']
-    chat_id = data['chat_id']
-    
     try:
-        # 检查用户是否还在等待选择
-        user_state = user_states.get(user_id)
-        if user_state and user_state['waiting_for_location']:
-            # 使用默认location处理URL
-            try:
-                await process_url_with_location(
-                    user_id,
-                    chat_id,
-                    data['url'],
-                    'new',
-                    context
-                )
-            except Exception as e:
-                logger.error(f"处理URL时出错: {str(e)}")
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="❌ 处理URL时出错，请稍后重试。"
-                )
-            
-            try:
-                # 尝试更新原消息
-                await context.bot.edit_message_text(
-                    "已使用默认位置(new)处理您的请求",
-                    chat_id=chat_id,
-                    message_id=data['message_id']
-                )
-            except telegram.error.BadRequest:
-                # 如果编辑失败，发送新消息
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="已使用默认位置(new)处理您的请求"
-                )
+        user_id = context.job.data['user_id']
+        chat_id = context.job.data['chat_id']
+        
+        if user_id in user_states and user_states[user_id].get('state') == 'waiting_for_location':
+            # 发送超时消息
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⌛ 选择超时，请重新发送视频链接"
+            )
             
             # 清理用户状态
             if user_id in user_states:
                 del user_states[user_id]
     except Exception as e:
         logger.error(f"处理location超时时出错: {str(e)}")
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="❌ 处理请求时出错，请重新发送URL。"
-            )
-        except:
-            pass
 
-async def process_url_with_location(user_id: int, chat_id: int, url: str, location: str, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """使用指定的location处理URL"""
-    try:
-        # 标准化URL
-        normalized_url, platform = normalize_url(url)
-        if not normalized_url:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="❌ 无效的URL格式"
-            )
-            return
+async def ask_tags(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, location: str) -> None:
+    """询问用户输入tags"""
+    user_id = update.effective_user.id
+    user_states[user_id] = {
+        'state': 'waiting_for_tags',
+        'url': url,
+        'location': location,
+        'last_interaction': datetime.datetime.now(pytz.UTC)
+    }
+    
+    await update.message.reply_text(TAGS_HELP_MESSAGE)
+    
+    # 设置超时
+    context.job_queue.run_once(
+        tags_timeout,
+        180,  # 3分钟超时
+        data={'user_id': user_id, 'chat_id': update.effective_chat.id},
+        name=f'tags_timeout_{user_id}'
+    )
 
-        # 发送处理中的消息
-        processing_message = await context.bot.send_message(
-            chat_id=chat_id,
-            text="⏳ 正在处理您的请求..."
-        )
-
-        # 准备请求数据
-        data = {
-            'url': normalized_url,
-            'platform': platform,
-            'location': location
-        }
-
-        # 发送请求到字幕处理服务
-        try:
-            response = requests.post(
-                f"{SUBTITLE_PROCESSOR_URL}/process_youtube",
-                json=data,
-                timeout=300  # 5分钟超时
-            )
-            response.raise_for_status()
-            result = response.json()
-
-            # 更新处理中的消息
-            await context.bot.edit_message_text(
-                "✅ 视频处理完成，正在发送字幕文件...",
-                chat_id=chat_id,
-                message_id=processing_message.message_id
-            )
-
-            # 创建一个虚拟的Update对象来传递chat_id
-            class DummyChat:
-                def __init__(self, chat_id):
-                    self.id = chat_id
-
-            class DummyUpdate:
-                def __init__(self, chat_id):
-                    self.effective_chat = DummyChat(chat_id)
-
-            dummy_update = DummyUpdate(chat_id)
-            
-            # 发送字幕文件
-            await send_subtitle_file(dummy_update, context, result)
-
-        except requests.exceptions.RequestException as e:
-            error_message = f"处理请求时出错: {str(e)}"
-            logger.error(error_message)
-            await context.bot.edit_message_text(
-                f"❌ {error_message}",
-                chat_id=chat_id,
-                message_id=processing_message.message_id
-            )
-            return
-
-    except Exception as e:
-        error_message = f"处理URL时出错: {str(e)}"
-        logger.error(error_message)
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"❌ {error_message}"
-            )
-        except:
-            pass
+async def tags_timeout(context: CallbackContext) -> None:
+    """处理tags输入超时"""
+    user_id = context.job.data['user_id']
+    chat_id = context.job.data['chat_id']
+    
+    if user_id in user_states and user_states[user_id].get('state') == 'waiting_for_tags':
+        # 使用默认的空tags继续处理
+        url = user_states[user_id]['url']
+        location = user_states[user_id]['location']
+        await process_url_with_location(user_id, chat_id, url, location, context, [])
+        
+        # 清理状态
+        if user_id in user_states:
+            del user_states[user_id]
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理用户消息"""
     user_id = update.effective_user.id
     user_state = user_states.get(user_id)
 
+    # 如果用户正在等待输入tags
+    if user_state and user_state.get('state') == 'waiting_for_tags':
+        if update.message.text.lower() == '/skip':
+            # 用户选择跳过添加tags
+            await process_url_with_location(
+                user_id,
+                update.effective_chat.id,
+                user_state['url'],
+                user_state['location'],
+                context,
+                []  # 明确传递空列表
+            )
+        else:
+            # 处理用户输入的tags，支持中英文逗号
+            text = update.message.text.strip()
+            # 先将中文逗号替换为英文逗号，然后分割
+            tags = [tag.strip() for tag in text.replace('，', ',').split(',') if tag.strip()]
+            await process_url_with_location(
+                user_id,
+                update.effective_chat.id,
+                user_state['url'],
+                user_state['location'],
+                context,
+                tags
+            )
+        
+        # 清理用户状态
+        if user_id in user_states:
+            del user_states[user_id]
+        return
+
     # 如果用户正在等待选择location
-    if user_state and user_state.get('waiting_for_location'):
+    if user_state and user_state.get('state') == 'waiting_for_location':
         location_input = update.message.text.lower().strip()
         
         # 检查输入是否有效
@@ -441,15 +396,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             return
 
-        # 处理URL
-        await process_url_with_location(
-            user_id,
-            update.effective_chat.id,
-            user_state['url'],
-            location,
-            context
-        )
-        
         # 删除选择提示消息
         try:
             await context.bot.delete_message(
@@ -458,10 +404,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
         except Exception:
             pass
-        
-        # 清理用户状态
-        if user_id in user_states:
-            del user_states[user_id]
+
+        # 询问用户输入tags
+        await ask_tags(update, context, user_state['url'], location)
         return
 
     # 检查是否是视频URL
@@ -521,6 +466,101 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"处理URL时出错: {str(e)}")
         await update.message.reply_text("❌ 处理视频时出错，请稍后重试。")
+
+async def process_url_with_location(user_id: int, chat_id: int, url: str, location: str, context: ContextTypes.DEFAULT_TYPE, tags: list = None) -> None:
+    """使用指定的location处理URL"""
+    try:
+        # 标准化URL
+        normalized_url, platform = normalize_url(url)
+        if not normalized_url:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ 无效的URL格式"
+            )
+            return
+
+        # 获取video_id
+        video_id = extract_video_id(normalized_url, platform)
+        if not video_id:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ 无法提取视频ID"
+            )
+            return
+
+        # 记录处理信息
+        tags_info = f", tags: {tags}" if tags else ""
+        logger.info(f"处理{platform}URL: {normalized_url}, location: {location}{tags_info}")
+
+        # 发送处理中的消息
+        processing_message = await context.bot.send_message(
+            chat_id=chat_id,
+            text="⏳ 正在处理您的请求..."
+        )
+
+        # 准备请求数据
+        data = {
+            'url': normalized_url,
+            'platform': platform,
+            'location': location,
+            'video_id': video_id
+        }
+        
+        # 如果有tags，添加到请求数据中
+        if tags:
+            data['tags'] = tags
+
+        # 发送请求到字幕处理服务
+        try:
+            response = requests.post(
+                f"{SUBTITLE_PROCESSOR_URL}/process",
+                json=data,
+                timeout=300  # 5分钟超时
+            )
+            response.raise_for_status()
+            result = response.json()
+
+            # 更新处理中的消息
+            await context.bot.edit_message_text(
+                "✅ 视频处理完成，正在发送字幕文件...",
+                chat_id=chat_id,
+                message_id=processing_message.message_id
+            )
+
+            # 创建一个虚拟的Update对象来传递chat_id
+            class DummyChat:
+                def __init__(self, chat_id):
+                    self.id = chat_id
+
+            class DummyUpdate:
+                def __init__(self, chat_id):
+                    self.effective_chat = DummyChat(chat_id)
+
+            dummy_update = DummyUpdate(chat_id)
+            
+            # 发送字幕文件
+            await send_subtitle_file(dummy_update, context, result)
+
+        except requests.exceptions.RequestException as e:
+            error_message = f"处理请求时出错: {str(e)}"
+            logger.error(error_message)
+            await context.bot.edit_message_text(
+                f"❌ {error_message}",
+                chat_id=chat_id,
+                message_id=processing_message.message_id
+            )
+            return
+
+    except Exception as e:
+        error_message = f"处理URL时出错: {str(e)}"
+        logger.error(error_message)
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ {error_message}"
+            )
+        except:
+            pass
 
 def signal_handler(signum, frame):
     """处理进程信号"""
