@@ -34,3 +34,4 @@ Thumbs.db
 # 单元测试文件和脚本
 build_images.ps1
 test_subtitles.py
+tests/

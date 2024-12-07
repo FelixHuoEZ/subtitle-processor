@@ -880,9 +880,15 @@ def download_bilibili_subtitles(url, video_info):
         logger.error(f"下载Bilibili字幕失败: {str(e)}")
         raise
 
-def save_to_readwise(title, content, url=None, published_date=None, author=None):
+def save_to_readwise(title, content, url=None, published_date=None, author=None, location='new'):
     """保存内容到Readwise，支持长文本分段"""
     try:
+        # 验证location参数
+        valid_locations = ['new', 'later', 'archive', 'feed']
+        if location not in valid_locations:
+            logger.warning(f"无效的location值: {location}，使用默认值'new'")
+            location = 'new'
+        
         # 从文件读取token
         token_file = os.getenv('READWISE_API_TOKEN_FILE', '/app/config/readwise_token.txt')
         if not os.path.exists(token_file):
@@ -972,7 +978,8 @@ def save_to_readwise(title, content, url=None, published_date=None, author=None)
                 "category": "article",
                 "should_clean_html": True,
                 "saved_using": "YouTube Subtitles Tool",
-                "tags": ["youtube", "subtitles", "transcription"]
+                "tags": [],
+                "location": location
             }
 
             # 添加发布日期（如果有）
@@ -1183,6 +1190,13 @@ FILES_LIST_TEMPLATE = '''
             border: 1px solid #ddd;
             border-radius: 4px;
         }
+        .youtube-form select {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
         .youtube-form button {
             background-color: #0066cc;
             color: white;
@@ -1213,6 +1227,7 @@ FILES_LIST_TEMPLATE = '''
     <script>
         function submitYouTubeUrl() {
             var url = document.getElementById('youtube-url').value;
+            var location = document.getElementById('save-location').value;
             if (!url) {
                 showError('请输入YouTube URL');
                 return false;
@@ -1228,7 +1243,7 @@ FILES_LIST_TEMPLATE = '''
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({url: url})
+                body: JSON.stringify({url: url, location: location})
             })
             .then(response => response.json())
             .then(data => {
@@ -1262,6 +1277,12 @@ FILES_LIST_TEMPLATE = '''
         <form class="youtube-form" onsubmit="return submitYouTubeUrl()">
             <h3>处理YouTube视频字幕</h3>
             <input type="text" id="youtube-url" placeholder="输入YouTube视频URL">
+            <select id="save-location" style="width: 100%; padding: 8px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px;">
+                <option value="new">保存到"新内容"</option>
+                <option value="archive">保存到"已归档"</option>
+                <option value="later">保存到"稍后阅读"</option>
+                <option value="feed">保存到"Feed"</option>
+            </select>
             <button type="submit">处理</button>
             <div id="progress"></div>
             <div id="error-message" class="error-message"></div>
@@ -1442,7 +1463,8 @@ def process_youtube():
             return jsonify({"error": "Missing URL parameter", "success": False}), 400
             
         url = data['url']
-        logger.info(f"处理YouTube URL: {url}")
+        location = data.get('location', 'new')  # 获取location参数，默认为'new'
+        logger.info(f"处理YouTube URL: {url}, location: {location}")
         
         # 下载字幕
         srt_content, video_info = download_youtube_subtitles(url)
@@ -1512,7 +1534,8 @@ def process_youtube():
                         content=srt_content,
                         url=url,
                         published_date=video_info.get('published_date'),
-                        author=video_info.get('uploader')
+                        author=video_info.get('uploader'),
+                        location=location
                     )
                     logger.info("成功发送转录内容到Readwise")
             except Exception as e:
@@ -1580,7 +1603,8 @@ def process_youtube():
                     content='\n'.join(s['text'] for s in subtitles_list),
                     url=url,
                     published_date=video_info.get('published_date'),
-                    author=video_info.get('uploader')
+                    author=video_info.get('uploader'),
+                    location=location
                 )
                 logger.info("成功发送到Readwise")
         except Exception as e:

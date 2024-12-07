@@ -1,19 +1,22 @@
 document.addEventListener('DOMContentLoaded', function() {
   // 加载保存的设置
-  chrome.storage.sync.get(['serverUrl', 'readwiseToken'], function(items) {
+  chrome.storage.sync.get(['serverUrl', 'readwiseToken', 'saveLocation'], function(items) {
     document.getElementById('serverUrl').value = items.serverUrl || '';
     document.getElementById('readwiseToken').value = items.readwiseToken || '';
+    document.getElementById('saveLocation').value = items.saveLocation || 'new';
   });
 
   // 保存设置按钮点击事件
   document.getElementById('saveSettings').addEventListener('click', function() {
     const serverUrl = document.getElementById('serverUrl').value.trim();
     const readwiseToken = document.getElementById('readwiseToken').value.trim();
+    const saveLocation = document.getElementById('saveLocation').value;
     
     // 保存设置到Chrome存储
     chrome.storage.sync.set({
       serverUrl: serverUrl,
-      readwiseToken: readwiseToken
+      readwiseToken: readwiseToken,
+      saveLocation: saveLocation
     }, function() {
       const status = document.getElementById('status');
       status.textContent = '设置已保存！';
@@ -29,7 +32,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const status = document.getElementById('status');
     
     // 获取设置
-    chrome.storage.sync.get(['serverUrl', 'readwiseToken'], function(items) {
+    chrome.storage.sync.get(['serverUrl', 'readwiseToken', 'saveLocation'], function(items) {
       if (!items.serverUrl || !items.readwiseToken) {
         status.textContent = '请先设置服务器地址和Readwise Token！';
         status.className = 'error';
@@ -48,7 +51,8 @@ document.addEventListener('DOMContentLoaded', function() {
           },
           body: JSON.stringify({
             url: currentUrl,
-            readwise_token: items.readwiseToken
+            readwise_token: items.readwiseToken,
+            location: items.saveLocation || 'new'
           })
         })
         .then(response => response.json())

@@ -54,6 +54,15 @@
     <label for="readwiseToken">Readwise Token:</label>
     <input type="text" id="readwiseToken" placeholder="输入你的Readwise Token">
   </div>
+  <div class="form-group">
+    <label for="saveLocation">保存位置:</label>
+    <select id="saveLocation" style="width: 100%; padding: 5px; box-sizing: border-box;">
+      <option value="new">新内容</option>
+      <option value="archive">已归档</option>
+      <option value="later">稍后阅读</option>
+      <option value="feed">Feed</option>
+    </select>
+  </div>
   <button id="saveSettings">保存设置</button>
   <button id="extractUrl">提取当前页面</button>
   <div id="status"></div>
