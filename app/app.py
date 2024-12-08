@@ -55,9 +55,14 @@ class ColoredFormatter(logging.Formatter):
 # 创建logger
 logger = logging.getLogger('subtitle-processor')
 logger.setLevel(logging.DEBUG)  # 设置为DEBUG级别以捕获所有日志
+logger.propagate = True  # 确保日志可以传播
+
+# 先移除所有已存在的处理器
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
 
 # 创建控制台处理器
-console_handler = logging.StreamHandler()
+console_handler = logging.StreamHandler(sys.stdout)  # 明确指定输出到 stdout
 console_handler.setLevel(logging.DEBUG)  # 控制台显示所有级别
 console_handler.setFormatter(ColoredFormatter())
 
@@ -464,12 +469,12 @@ def generate_srt_timestamps(sentences, total_duration=None):
         
         # 只显示前10个和后10个时间戳的生成
         total_sentences = len(sentences)
-        for i, sentence in enumerate(sentences):
+        for i, sentence in enumerate(sentences, 1):
             duration = (len(sentence) / total_chars) * total_duration
             end_time = min(current_time + duration, total_duration)
             
             if i < 10 or i >= total_sentences - 10:
-                logger.debug(f"生成字幕[{i+1}/{total_sentences}]: {current_time:.1f}s - {sentence[:50]}...")
+                logger.debug(f"生成字幕[{i}/{total_sentences}]: {current_time:.1f}s - {sentence[:50]}...")
             elif i == 10:
                 logger.debug("...")
             
@@ -488,7 +493,7 @@ def generate_srt_timestamps(sentences, total_duration=None):
         logger.error(f"生成时间戳时出错: {str(e)}")
         return []
 
-def download_youtube_subtitles(url, video_info=None):
+def download_youtube_subtitles(url, video_info=None, lang_priority=None):
     """下载YouTube视频字幕"""
     try:
         # 创建临时目录
@@ -500,50 +505,89 @@ def download_youtube_subtitles(url, video_info=None):
             ydl_opts = {
                 'quiet': True,
                 'no_warnings': True,
-                'extract_flat': False
+                'extract_flat': False,
+                'writesubtitles': True,
+                'writeautomaticsub': True,
+                'subtitleslangs': lang_priority or ['zh-Hans', 'zh-Hant', 'zh', 'en'],
+                'skip_download': True,
+                'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+                'subtitlesformat': 'srt/ass/vtt/best'
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 video_info = ydl.extract_info(url, download=False)
-                logger.info(f"获取到的视频信息: {json.dumps({k: v for k, v in video_info.items() if k in ['title', 'uploader', 'upload_date']}, ensure_ascii=False)}")
+                logger.info(f"获取到的视频信息: {json.dumps({k: v for k, v in video_info.items() if k in ['title', 'uploader', 'upload_date', 'subtitles', 'automatic_captions']}, ensure_ascii=False)}")
         
-        # 执行下载命令
-        cmd = ['yt-dlp', 
-               '--write-sub', '--write-auto-sub',  # 下载字幕
-               '--sub-lang', 'zh-Hans,zh-Hant,zh,en',  # 支持更多语言选项
-               '--skip-download',  # 不下载视频
-               '--convert-subs', 'srt',  # 转换为srt格式
-               '--sub-format', 'srt/ass/vtt/best',  # 支持多种字幕格式
-               '-o', os.path.join(temp_dir, '%(title)s.%(ext)s'),
-               url]
+        # 使用提供的语言优先级或默认值
+        if lang_priority:
+            logger.info(f"使用指定的语言优先级: {lang_priority}")
+        else:
+            lang_priority = ['zh-Hans', 'zh-Hant', 'zh', 'en']
+            logger.info(f"使用默认语言优先级: {lang_priority}")
         
-        logger.info(f"执行命令: {' '.join(cmd)}")
-        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        stdout, stderr = process.communicate()
+        # 检查是否有手动上传的字幕
+        subtitles = video_info.get('subtitles', {})
+        logger.info(f"手动上传的字幕: {list(subtitles.keys())}")
         
-        # 记录完整的输出用于调试
-        if stdout:
-            logger.info("命令标准输出:\n" + stdout)
-        if stderr:
-            logger.warning("命令错误输出:\n" + stderr)
+        # 检查是否有自动生成的字幕
+        auto_captions = video_info.get('automatic_captions', {})
+        logger.info(f"自动生成的字幕: {list(auto_captions.keys())}")
         
-        # 检查临时目录中的文件
-        files = os.listdir(temp_dir)
-        logger.info(f"临时目录中的文件: {files}")
+        # 优先使用手动上传的字幕
+        subtitle_url = None
+        subtitle_lang = None
         
-        # 查找字幕文件
-        subtitle_files = [f for f in files if f.endswith('.srt')]
-        if not subtitle_files:
-            logger.error("未找到字幕文件")
+        # 先检查手动上传的字幕
+        for lang in lang_priority:
+            if lang in subtitles:
+                formats = subtitles[lang]
+                # 优先选择srt格式
+                for fmt in formats:
+                    if fmt.get('ext') == 'srt':
+                        subtitle_url = fmt['url']
+                        subtitle_lang = lang
+                        logger.info(f"找到手动上传的{lang}字幕，格式为srt")
+                        break
+                # 如果没有srt格式，使用第一个可用格式
+                if not subtitle_url and formats:
+                    subtitle_url = formats[0]['url']
+                    subtitle_lang = lang
+                    logger.info(f"找到手动上传的{lang}字幕，格式为{formats[0].get('ext')}")
+                if subtitle_url:
+                    break
+        
+        # 如果没有找到手动上传的字幕，检查自动生成的字幕
+        if not subtitle_url:
+            for lang in lang_priority:
+                if lang in auto_captions:
+                    formats = auto_captions[lang]
+                    # 优先选择srt格式
+                    for fmt in formats:
+                        if fmt.get('ext') == 'srt':
+                            subtitle_url = fmt['url']
+                            subtitle_lang = lang
+                            logger.info(f"找到自动生成的{lang}字幕，格式为srt")
+                            break
+                    # 如果没有srt格式，使用第一个可用格式
+                    if not subtitle_url and formats:
+                        subtitle_url = formats[0]['url']
+                        subtitle_lang = lang
+                        logger.info(f"找到自动生成的{lang}字幕，格式为{formats[0].get('ext')}")
+                    if subtitle_url:
+                        break
+        
+        if not subtitle_url:
+            logger.info("未找到首选语言的字幕文件")
             return None, video_info
-            
-        # 读取第一个字幕文件
-        subtitle_file = os.path.join(temp_dir, subtitle_files[0])
-        logger.info(f"找到字幕文件: {subtitle_file}")
         
-        with open(subtitle_file, 'rb') as f:
-            content = f.read()
-            
+        # 下载字幕
+        logger.info(f"开始下载字幕: {subtitle_url}")
+        response = requests.get(subtitle_url)
+        if response.status_code != 200:
+            logger.error(f"下载字幕失败: {response.status_code}")
+            return None, video_info
+        
         # 检测并处理文件编码
+        content = response.content
         encoding = detect_file_encoding(content)
         logger.info(f"检测到字幕文件编码: {encoding}")
         
@@ -1143,7 +1187,12 @@ def get_youtube_info(url):
             video_info = {
                 'title': info.get('title', ''),
                 'published_date': published_date,
-                'uploader': info.get('uploader', '')
+                'uploader': info.get('uploader', ''),
+                # 添加字幕和语言相关的信息
+                'subtitles': info.get('subtitles', {}),  # 手动上传的字幕
+                'automatic_captions': info.get('automatic_captions', {}),  # 自动生成的字幕
+                'language': info.get('language'),  # 视频语言
+                'description': info.get('description', '')  # 视频描述，可能包含语言信息
             }
             
             # 记录完整的返回信息
@@ -2038,34 +2087,64 @@ def process_youtube():
         location = data.get('location', 'new')  # 获取location参数，默认为'new'
         tags_str = data.get('tags', '')
         tags = [tag.strip() for tag in tags_str.split(',')] if tags_str else []
-        logger.info(f"处理YouTube URL: %s, location: %s, tags: %s", 
-                   url, location, json.dumps(tags, ensure_ascii=False))
+        logger.info(f"处理YouTube URL: {url}, location: {location}, tags: {tags}")
         
         # 先获取视频信息
         video_info = get_youtube_info(url)
-        logger.info(f"获取到的视频信息: %s", 
-                   json.dumps(video_info, indent=2, ensure_ascii=False))
+        logger.info(f"获取到的视频信息: {json.dumps(video_info, indent=2, ensure_ascii=False)}")
         
         if not video_info or not video_info.get('title'):
             logger.error("无法获取视频信息")
             return jsonify({"error": "Failed to get video info", "success": False}), 400
             
-        # 下载字幕
-        srt_content = None
+        # 检测视频语言
+        logger.info("准备调用 get_video_language 函数...")
         try:
-            srt_content, video_info = download_youtube_subtitles(url, video_info)
-            if srt_content:
-                # 验证字幕内容
-                is_valid, error_msg = validate_subtitle_content(srt_content)
-                if not is_valid:
-                    logger.error(f"字幕内容验证失败: {error_msg}")
-                    srt_content = None
-                else:
-                    # 清理字幕内容
-                    srt_content = clean_subtitle_content(srt_content)
+            language = get_video_language(video_info)
+            logger.info(f"get_video_language 返回结果: {language}")
         except Exception as e:
-            logger.error(f"下载字幕失败: {str(e)}")
-            srt_content = None
+            logger.error(f"get_video_language 函数出错: {str(e)}")
+            logger.error(traceback.format_exc())
+            language = None
+        
+        # 确定字幕策略
+        should_download, lang_priority = get_subtitle_strategy(language, video_info)
+        logger.info(f"字幕策略: should_download={should_download}, lang_priority={lang_priority}")
+            
+        # 下载字幕或转录
+        srt_content = None
+        if should_download:
+            try:
+                srt_content, video_info = download_youtube_subtitles(url, video_info, lang_priority)
+                if srt_content:
+                    # 验证字幕内容
+                    is_valid, error_msg = validate_subtitle_content(srt_content)
+                    if not is_valid:
+                        logger.error(f"字幕内容验证失败: {error_msg}")
+                        srt_content = None
+                    else:
+                        # 清理字幕内容
+                        srt_content = clean_subtitle_content(srt_content)
+            except Exception as e:
+                logger.error(f"下载字幕失败: {str(e)}")
+                srt_content = None
+        
+        # 如果是中文视频且没有获取到字幕，尝试转录
+        if not srt_content and language == 'zh':
+            try:
+                logger.info("开始转录视频音频...")
+                # 下载视频音频
+                audio_path = download_video(url)
+                # 转录音频
+                srt_content = transcribe_audio(audio_path)
+                # 清理临时文件
+                os.remove(audio_path)
+                if srt_content:
+                    srt_content = clean_subtitle_content(srt_content, is_funasr=True)
+                    logger.info("转录完成并清理完成")
+            except Exception as e:
+                logger.error(f"转录失败: {str(e)}")
+                logger.exception("详细错误信息:")
         
         # 解析字幕内容为列表格式
         subtitles = parse_srt_content(srt_content)
@@ -2194,8 +2273,22 @@ def process_video():
         # 获取视频信息
         video_info = get_video_info(url, platform)
         
+        # 检测视频语言
+        logger.info("准备调用 get_video_language 函数...")
+        try:
+            language = get_video_language(video_info)
+            logger.info(f"get_video_language 返回结果: {language}")
+        except Exception as e:
+            logger.error(f"get_video_language 函数出错: {str(e)}")
+            logger.error(traceback.format_exc())
+            language = None
+            
+        # 确定字幕策略
+        should_download, lang_priority = get_subtitle_strategy(language, video_info)
+        logger.info(f"字幕策略: should_download={should_download}, lang_priority={lang_priority}")
+        
         # 下载字幕
-        subtitle_result = download_subtitles(url, platform, video_info)
+        subtitle_result = download_subtitles(url, platform, video_info) if should_download else None
         subtitle_content, video_info = subtitle_result if isinstance(subtitle_result, tuple) else (subtitle_result, video_info)
         
         if not subtitle_content:
@@ -2225,7 +2318,7 @@ def process_video():
             # 保存字幕文件
             title = video_info.get('title', '') if video_info else ''
             if not title:
-                title = f"video_transcript_{video_id}"
+                title = f"{video_id}"
                 
             output_filename = sanitize_filename(f"{title}.srt")
             output_filepath = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
@@ -2401,51 +2494,94 @@ def get_video_language(info):
         str: 'zh' 表示中文, 'en' 表示英文, None 表示其他语言
     """
     try:
-        language = None
+        logger.info(f"开始进行视频语言检测，输入信息: {json.dumps(info, indent=2, ensure_ascii=False)}")
         
         # 1. 从标题判断语言
         if info.get('title'):
             title = info['title']
+            logger.info(f"正在分析标题: {title}")
+            
             # 检测标题是否包含中文字符
-            if any('\u4e00' <= char <= '\u9fff' for char in title):
+            has_chinese = any('\u4e00' <= char <= '\u9fff' for char in title)
+            has_english = all(ord(char) < 128 for char in title)
+            
+            logger.info(f"标题特征: 包含中文={has_chinese}, 全英文={has_english}")
+            
+            if has_chinese:
+                result = "✓ 通过标题检测：标题包含中文字符，判定为中文视频"
+                logger.info(result)
                 return 'zh'
-            # 如果标题全是英文字符和标点符号，判定为英文
-            elif all(ord(char) < 128 for char in title):
+            elif has_english:
+                result = "✓ 通过标题检测：标题全为英文字符，判定为英文视频"
+                logger.info(result)
                 return 'en'
+            logger.info("标题语言无法确定，继续检查其他来源")
+        else:
+            logger.info("未找到视频标题，跳过标题语言检测")
         
         # 2. 从手动上传的字幕判断
         if info.get('subtitles'):
             manual_subs = info['subtitles']
+            available_langs = list(manual_subs.keys())
+            logger.info(f"发现手动上传的字幕，可用语言: {available_langs}")
+            
             # 优先检查中文字幕
-            if any(lang.startswith('zh') for lang in manual_subs.keys()):
+            if any(lang.startswith('zh') for lang in available_langs):
+                result = "✓ 通过手动字幕检测：找到中文字幕，判定为中文视频"
+                logger.info(result)
                 return 'zh'
             # 其次检查英文字幕
-            elif any(lang.startswith('en') for lang in manual_subs.keys()):
+            elif any(lang.startswith('en') for lang in available_langs):
+                result = "✓ 通过手动字幕检测：找到英文字幕，判定为英文视频"
+                logger.info(result)
                 return 'en'
+            logger.info("未找到中文或英文的手动字幕，继续检查其他来源")
+        else:
+            logger.info("未找到手动上传的字幕，跳过手动字幕语言检测")
         
         # 3. 从自动字幕判断
         if info.get('automatic_captions'):
             auto_subs = info['automatic_captions']
-            # 优先检查中文自动字幕
-            if any(lang.startswith('zh') for lang in auto_subs.keys()):
+            available_langs = list(auto_subs.keys())
+            logger.info(f"发现自动生成的字幕，可用语言: {available_langs}")
+            
+            # 优先检查中文字幕
+            if any(lang.startswith('zh') for lang in available_langs):
+                result = "✓ 通过自动字幕检测：找到中文字幕，判定为中文视频"
+                logger.info(result)
                 return 'zh'
-            # 其次检查英文自动字幕
-            elif any(lang.startswith('en') for lang in auto_subs.keys()):
+            # 其次检查英文字幕
+            elif any(lang.startswith('en') for lang in available_langs):
+                result = "✓ 通过自动字幕检测：找到英文字幕，判定为英文视频"
+                logger.info(result)
                 return 'en'
+            logger.info("未找到中文或英文的自动字幕，继续检查其他来源")
+        else:
+            logger.info("未找到自动生成的字幕，跳过自动字幕语言检测")
         
         # 4. 从视频语言字段获取
         if info.get('language'):
-            lang = info['language'].lower()
+            lang = info['language']
+            logger.info(f"从视频信息中获取到语言字段: {lang}")
+            
             if lang.startswith('zh'):
+                result = "✓ 通过视频语言字段检测：语言为中文"
+                logger.info(result)
                 return 'zh'
             elif lang.startswith('en'):
+                result = "✓ 通过视频语言字段检测：语言为英文"
+                logger.info(result)
                 return 'en'
+            logger.info(f"视频语言字段为 {lang}，无法确定是中文还是英文")
+        else:
+            logger.info("未找到视频语言字段")
         
-        # 如果无法确定语言，返回 None
+        logger.warning("无法通过任何方式确定视频语言，返回 None")
         return None
-            
+        
     except Exception as e:
-        logger.error(f"获取视频语言时出错: {str(e)}")
+        logger.error(f"语言检测过程出错: {str(e)}")
+        logger.error(traceback.format_exc())
         return None
 
 def get_subtitle_strategy(language, info):
@@ -2461,8 +2597,8 @@ def get_subtitle_strategy(language, info):
     if language == 'zh':
         # 中文视频：只下载手动字幕
         if info.get('subtitles') and any(lang.startswith('zh') for lang in info['subtitles'].keys()):
-            return True, ['zh']
-        return False, []
+            return True, ['zh-Hans', 'zh-Hant', 'zh']
+        return False, []  # 返回False表示需要转录
         
     elif language == 'en':
         # 英文视频：优先手动字幕，其次自动字幕
