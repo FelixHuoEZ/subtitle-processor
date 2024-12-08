@@ -630,22 +630,16 @@ def transcribe_audio(audio_path):
         
         all_results = []
         
+        # 获取可用的转录服务器
+        server_url = get_available_transcribe_server()
+        logger.info(f"使用转录服务器: {server_url}")
+        
         # 处理每个音频片段
         for i, segment_path in enumerate(audio_segments, 1):
             logger.info(f"处理音频片段 {i}/{len(audio_segments)}: {segment_path}")
             
             # 准备请求
-            url = 'http://transcribe-audio:10095/recognize'
-            
-            # 解析域名
-            import socket
-            try:
-                ip = socket.gethostbyname('transcribe-audio')
-                logger.info(f"transcribe-audio DNS解析结果: {ip}")
-            except Exception as e:
-                logger.error(f"DNS解析失败: {str(e)}")
-            
-            logger.info("开始发送请求...")
+            url = f"{server_url}/recognize"
             
             # 发送文件
             with open(segment_path, 'rb') as f:
@@ -1074,7 +1068,7 @@ HTML_TEMPLATE = '''
             margin-bottom: 20px;
             padding: 10px;
             border: 1px solid #ddd;
-            border-radius: 4px;
+            border-radius: 5px;
         }
         .search-box input {
             width: 100%;
@@ -1343,6 +1337,97 @@ FILES_LIST_TEMPLATE = '''
 </html>
 '''
 
+import json
+import os
+
+def load_transcribe_servers():
+    """加载转录服务器配置"""
+    config_path = os.getenv('TRANSCRIBE_CONFIG', '/app/config/transcribe_servers.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+            logger.info(f"已加载转录服务器配置: {len(config['servers'])} 个服务器")
+            return config['servers']
+    except Exception as e:
+        logger.error(f"加载转录服务器配置失败: {str(e)}")
+        # 使用默认配置
+        return [
+            {
+                "name": "local",
+                "url": os.getenv('LOCAL_TRANSCRIBE_URL', 'http://localhost:10095'),
+                "priority": 1
+            },
+            {
+                "name": "nas",
+                "url": os.getenv('NAS_TRANSCRIBE_URL', 'http://nas:10095'),
+                "priority": 2
+            }
+        ]
+
+def get_available_transcribe_server():
+    """获取可用的转录服务器"""
+    servers = load_transcribe_servers()
+    available_servers = []
+    
+    print("\n=== 开始检查转录服务器 ===")
+    print(f"发现 {len(servers)} 个配置的服务器")
+    
+    for server in servers:
+        print(f"\n正在检查服务器: {server['name']} ({server['url']})")
+        try:
+            response = requests.get(f"{server['url']}/health", timeout=5)
+            if response.status_code == 200:
+                server_info = response.json()
+                # 将服务器状态信息添加到配置中
+                server.update(server_info)
+                available_servers.append(server)
+                print(f"✓ 服务器可用")
+                print(f"  - 设备类型: {server_info.get('device', 'unknown')}")
+                print(f"  - GPU状态: {'可用' if server_info.get('gpu_available', False) else '不可用'}")
+        except Exception as e:
+            print(f"✗ 服务器不可用: {str(e)}")
+    
+    if not available_servers:
+        print("\n❌ 错误: 没有可用的转录服务器")
+        raise Exception("没有可用的转录服务器")
+    
+    # 按优先级排序，优先使用GPU服务器
+    available_servers.sort(key=lambda x: (
+        x['priority'],  # 首先按配置的优先级排序
+        0 if x.get('gpu_available', False) else 1  # 其次优先选择有GPU的服务器
+    ))
+    
+    selected_server = available_servers[0]
+    print("\n=== 服务器选择结果 ===")
+    print(f"已选择: {selected_server['name']} ({selected_server['url']})")
+    print(f"  - 优先级: {selected_server['priority']}")
+    print(f"  - 设备类型: {selected_server.get('device', 'unknown')}")
+    print(f"  - GPU状态: {'可用' if selected_server.get('gpu_available', False) else '不可用'}")
+    print("==================\n")
+    
+    return selected_server['url']
+
+def sanitize_filename(filename):
+    """清理文件名，移除不安全字符"""
+    # 替换Windows下的非法字符
+    illegal_chars = r'[<>:"/\\|?*]'
+    # 移除控制字符
+    control_chars = ''.join(map(chr, list(range(0, 32)) + list(range(127, 160))))
+    
+    # 创建翻译表
+    trans = str.maketrans('', '', control_chars)
+    
+    # 处理文件名
+    clean_name = re.sub(illegal_chars, '_', filename)  # 替换非法字符为下划线
+    clean_name = clean_name.translate(trans)  # 移除控制字符
+    clean_name = clean_name.strip()  # 移除首尾空白
+    
+    # 如果文件名为空，使用默认名称
+    if not clean_name:
+        clean_name = 'unnamed_file'
+        
+    return clean_name
+
 @app.route('/upload', methods=['POST'])
 def upload_file():
     """处理文件上传"""
@@ -1538,7 +1623,7 @@ def process_youtube():
             if not title:
                 title = f"video_transcript_{os.path.splitext(os.path.basename(audio_path))[0]}"
                 
-            output_filename = f"{title}.srt"
+            output_filename = sanitize_filename(f"{title}.srt")
             output_filepath = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
             with open(output_filepath, 'w', encoding='utf-8') as f:
                 f.write(srt_content)
@@ -1625,14 +1710,21 @@ def process_youtube():
         if not title:
             title = f"youtube_video_{os.path.splitext(os.path.basename(url))[0]}"
                 
+        output_filename = sanitize_filename(f"{title}.srt")
+        output_filepath = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
+        with open(output_filepath, 'w', encoding='utf-8') as f:
+            f.write(srt_content)
+        
+        # 生成文件信息并保存
         file_info = {
             'id': file_id,
-            'filename': f"{title}.srt",
-            'path': None,
+            'filename': output_filename,
+            'path': output_filepath,
             'url': f'/view/{file_id}',
             'upload_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'show_timeline': True,
-            'subtitles': subtitles_list
+            'source': 'subtitle',
+            'video_info': video_info
         }
         files_info[file_id] = file_info
         save_files_info(files_info)
@@ -1915,32 +2007,6 @@ def get_subtitle_strategy(language, info):
     else:
         # 其他语言：暂不处理
         return False, []
-
-def sanitize_filename(filename, max_length=200):
-    """
-    清理并限制文件名长度
-    :param filename: 原始文件名
-    :param max_length: 最大长度（包括扩展名）
-    :return: 处理后的文件名
-    """
-    # 移除不合法的文件名字符
-    invalid_chars = '<>:"/\\|?*'
-    for char in invalid_chars:
-        filename = filename.replace(char, '')
-    
-    # 获取扩展名
-    name, ext = os.path.splitext(filename)
-    
-    # 计算主文件名的最大长度（考虑扩展名长度）
-    max_name_length = max_length - len(ext)
-    
-    # 如果文件名过长，截断它
-    if len(name) > max_name_length:
-        # 保留文件名开头和结尾，中间用...替代
-        keep_length = (max_name_length - 3) // 2
-        name = name[:keep_length] + '...' + name[-keep_length:]
-    
-    return name + ext
 
 if __name__ == '__main__':
     logger.info("启动Flask服务器")

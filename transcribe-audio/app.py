@@ -33,13 +33,15 @@ logging.basicConfig(
 
 # 创建logger
 logger = logging.getLogger("transcribe-audio")
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.WARNING)  # 将日志级别从INFO改为WARNING
 
 # 确保其他库的日志级别不会太详细
-logging.getLogger("modelscope").setLevel(logging.WARNING)
-logging.getLogger("funasr").setLevel(logging.WARNING)
-logging.getLogger("jieba").setLevel(logging.WARNING)
+logging.getLogger("modelscope").setLevel(logging.ERROR)
+logging.getLogger("funasr").setLevel(logging.ERROR)
+logging.getLogger("jieba").setLevel(logging.ERROR)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("filelock").setLevel(logging.WARNING)
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max-limit
@@ -311,7 +313,27 @@ model = init_model()
 @app.route('/health')
 def health_check():
     """健康检查接口"""
-    return jsonify({"status": "healthy"})
+    device_info = {
+        "status": "healthy",
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "gpu_available": torch.cuda.is_available(),
+        "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+        "gpu_names": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())] if torch.cuda.is_available() else [],
+        "timestamp": datetime.now().isoformat()
+    }
+    return jsonify(device_info)
+
+@app.route('/device')
+def device_info():
+    """设备信息接口"""
+    device_info = {
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "gpu_available": torch.cuda.is_available(),
+        "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+        "gpu_names": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())] if torch.cuda.is_available() else [],
+        "timestamp": datetime.now().isoformat()
+    }
+    return jsonify(device_info)
 
 def convert_audio_to_wav(input_path, target_sample_rate=16000):
     """将音频转换为WAV格式并重采样"""
@@ -417,54 +439,54 @@ def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000):
         
         # 如果音频太短，直接处理整个音频
         if total_len < chunk_size:
-            logger.info(f"音频长度较短({total_len/sample_rate:.2f}秒)，直接处理整个音频")
             try:
                 with torch.no_grad():
+                    # print(f"\n处理短音频 (长度: {total_len/sample_rate:.2f}秒)")
                     result = model.generate(input=audio_data, sample_rate=sample_rate)
-                    logger.info(f"短音频识别结果: {result}")
                     processed_result = process_recognition_result(result)
                     if processed_result:
                         results.append(processed_result)
             except Exception as e:
-                logger.error(f"处理短音频时出错: {str(e)}")
+                print(f"处理短音频时出错: {str(e)}")
         else:
             # 分块处理长音频
             overlap = int(0.5 * sample_rate)  # 0.5秒重叠
+            total_chunks = (total_len + chunk_size - 1)//chunk_size
+            print(f"\n开始处理音频，总共 {total_chunks} 个块")
+            
             for i in range(0, total_len, chunk_size - overlap):
                 chunk = audio_data[i:min(i+chunk_size, total_len)]
                 chunk_num = i//chunk_size + 1
-                total_chunks = (total_len + chunk_size - 1)//chunk_size
                 
                 # 检查音频块的有效性
                 chunk_max = np.max(np.abs(chunk))
                 chunk_energy = np.mean(chunk**2)
-                logger.info(f"块 {chunk_num} 信息: 最大振幅={chunk_max:.6f}, 能量={chunk_energy:.6f}")
+                
+                # print(f"\n处理音频块 {chunk_num}/{total_chunks}")
+                # print(f"块信息: 最大振幅={chunk_max:.6f}, 能量={chunk_energy:.6f}")
                 
                 # 使用能量和振幅双重判断是否为静音
                 if chunk_max < 1e-3 or chunk_energy < 1e-6:
-                    logger.warning(f"块 {chunk_num} 可能是静音，跳过处理")
+                    # print("跳过静音块")
                     continue
-                
-                logger.info(f"处理音频块 {chunk_num}/{total_chunks} (长度: {len(chunk)/sample_rate:.2f}秒)")
                 
                 try:
                     with torch.no_grad():
                         result = model.generate(input=chunk, sample_rate=sample_rate)
-                        logger.info(f"块 {chunk_num} 识别结果: {result}")
                         processed_result = process_recognition_result(result)
                         if processed_result:
                             results.append(processed_result)
+                            # print(f"识别结果: {processed_result}")
                 except Exception as e:
-                    logger.error(f"处理音频块 {chunk_num} 时出错: {str(e)}")
+                    print(f"处理音频块 {chunk_num} 时出错: {str(e)}")
                     continue
         
         final_result = " ".join(results)
-        logger.info(f"完整识别结果: {final_result}")
-        
+        print("\n音频处理完成！")
         return final_result
         
     except Exception as e:
-        logger.error(f"音频处理失败: {str(e)}")
+        print(f"音频处理失败: {str(e)}")
         raise
 
 @app.route('/recognize', methods=['POST'])
@@ -495,11 +517,9 @@ def recognize_audio():
             # 转换音频格式
             wav_path = convert_audio_to_wav(orig_audio_path)
             temp_files.append(wav_path)
-            logger.info(f"音频已转换为WAV格式: {wav_path}")
             
             # 读取转换后的音频文件
             audio_data, sample_rate = sf.read(wav_path)
-            logger.info(f"音频采样率: {sample_rate}Hz, 数据长度: {len(audio_data)}, 数据类型: {audio_data.dtype}")
             
             # 检查音频数据是否为空或无效
             if len(audio_data) == 0:
@@ -521,7 +541,6 @@ def recognize_audio():
                 try:
                     with torch.no_grad():
                         result = model.generate(input=audio_data, sample_rate=sample_rate)
-                        logger.info(f"整体识别结果: {result}")
                         result = process_recognition_result(result)
                 except Exception as e:
                     logger.error(f"整体识别失败: {str(e)}")
@@ -536,11 +555,9 @@ def recognize_audio():
                     "original_filename": original_filename,
                     "file_size_kb": file_size/1024,
                     "duration_seconds": len(audio_data)/sample_rate,
-                    "sample_rate": sample_rate,
-                    "max_amplitude": float(np.max(np.abs(audio_data)))
+                    "sample_rate": sample_rate
                 }
             }
-            logger.info(f"返回结果: {json.dumps(response_data, ensure_ascii=False)}")
             return jsonify(response_data)
             
         except Exception as e:
@@ -557,7 +574,6 @@ def recognize_audio():
             try:
                 if os.path.exists(temp_file):
                     os.remove(temp_file)
-                    logger.info(f"已清理临时文件: {temp_file}")
             except Exception as e:
                 logger.error(f"清理临时文件失败: {str(e)}")
 

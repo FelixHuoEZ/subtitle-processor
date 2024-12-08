@@ -2,7 +2,8 @@ version: '3.8'
 
 services:
   subtitle-processor:
-    build: . # 直接运行、不构建的时候，注释掉
+    build:  # 直接运行、不构建的时候，注释掉
+      context: .
     image: subtitle-processor:latest
     container_name: subtitle-processor
     restart: unless-stopped
@@ -27,6 +28,7 @@ services:
       - ./models:/app/models
     environment:
       - TZ=Asia/Shanghai
+      - TRANSCRIBE_CONFIG=/app/config/transcribe_servers.json
       - FLASK_APP=app.py
       - FLASK_ENV=development
       # 从配置文件读取API token
@@ -42,19 +44,36 @@ services:
       - "host.docker.internal:host-gateway"
 
   transcribe-audio:
-    build: 
+    build:  # 直接运行、不构建的时候，注释掉
       context: ./transcribe-audio
       dockerfile: Dockerfile
     image: transcribe-audio:latest
     container_name: transcribe-audio
     restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     ports:
       - "10095:10095"
     volumes:
-      - ./transcribe-audio:/app
+      # - /share/docker/subtitle-processor/uploads:/app/uploads
+      # - /share/docker/subtitle-processor/videos:/app/videos
+      # - /share/docker/subtitle-processor/models:/app/models
+      # - /share/docker/subtitle-processor/outputs:/app/outputs
+      # - /share/docker/subtitle-processor/config:/app/config
+      - ./uploads:/app/uploads
+      - ./videos:/app/videos
       - ./models:/app/models
+      - ./outputs:/app/outputs
+      - ./config:/app/config
     environment:
-      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Shanghai
+      - FLASK_APP=app.py
+      - FLASK_ENV=development
       - MODEL_DIR=/app/models
       - MODELSCOPE_CACHE=/app/models
       - HF_HOME=/app/models
@@ -63,13 +82,6 @@ services:
       - FUNASR_VAD_MODEL=fsmn-vad
       - FUNASR_PUNC_MODEL=ct-punc
       - FUNASR_SPK_MODEL=cam++
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     logging:
       driver: json-file
       options:

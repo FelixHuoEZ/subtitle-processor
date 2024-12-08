@@ -1,6 +1,7 @@
 # 配置文件
 config/telegram_token.txt
 config/readwise_token.txt
+config/transcribe_servers.json
 
 # 数据目录
 uploads/
@@ -35,3 +36,5 @@ Thumbs.db
 build_images.ps1
 test_subtitles.py
 tests/
+logseq-plugin-whisper-subtitles/
+logseq-whisper-subtitles-server/
