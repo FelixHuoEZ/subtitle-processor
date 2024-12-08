@@ -8,6 +8,8 @@ import subprocess
 import re
 import yt_dlp
 import sys
+import tempfile
+import shutil
 from flask import Flask, request, jsonify, send_file, render_template, render_template_string
 from flask_cors import CORS
 from datetime import datetime
@@ -22,17 +24,56 @@ import math
 from pydub import AudioSegment
 import wave
 
-# 配置日志
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
+# 配置日志格式和级别
+class ColoredFormatter(logging.Formatter):
+    """自定义的日志格式化器，添加颜色"""
+    
+    # 颜色代码
+    grey = "\x1b[38;21m"
+    blue = "\x1b[36m"
+    yellow = "\x1b[33;21m"
+    red = "\x1b[31;21m"
+    bold_red = "\x1b[31;1m"
+    reset = "\x1b[0m"
+    
+    # 日志格式
+    format_str = '%(asctime)s - %(levelname)s - %(message)s'
+    
+    FORMATS = {
+        logging.DEBUG: blue + format_str + reset,
+        logging.INFO: grey + format_str + reset,
+        logging.WARNING: yellow + format_str + reset,
+        logging.ERROR: red + format_str + reset,
+        logging.CRITICAL: bold_red + format_str + reset
+    }
 
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno)
+        formatter = logging.Formatter(log_fmt, datefmt='%Y-%m-%d %H:%M:%S')
+        return formatter.format(record)
+
+# 创建logger
+logger = logging.getLogger('subtitle-processor')
+logger.setLevel(logging.DEBUG)  # 设置为DEBUG级别以捕获所有日志
+
+# 创建控制台处理器
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)  # 控制台显示所有级别
+console_handler.setFormatter(ColoredFormatter())
+
+# 创建文件处理器
+file_handler = logging.FileHandler('subtitle_processor.log')
+file_handler.setLevel(logging.INFO)  # 文件只记录INFO及以上级别
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+# 添加处理器到logger
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
+
+# 创建Flask应用
 app = Flask(__name__)
+CORS(app)
+
 # 启用CORS，允许所有域名访问
 CORS(app, resources={
     r"/upload": {"origins": "*"},
@@ -126,228 +167,408 @@ def parse_srt(result):
     """解析FunASR的结果为SRT格式"""
     try:
         logger.info("开始解析字幕内容")
+        logger.debug(f"输入结果类型: {type(result)}")
+        logger.debug(f"输入结果内容: {result}")
         
-        # 获取text内容
+        text_content = None
+        timestamps = None
+        duration = None
+        
+        # 如果结果是字符串，尝试解析为字典
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+                logger.debug("成功将字符串解析为字典")
+            except json.JSONDecodeError:
+                logger.debug("输入是纯文本，直接使用")
+                text_content = result
+        
+        # 从字典中提取信息
         if isinstance(result, dict):
-            text_content = None
-            timestamps = None
+            # 获取音频时长
+            if 'audio_info' in result and 'duration_seconds' in result['audio_info']:
+                duration = result['audio_info']['duration_seconds']
+                logger.debug(f"获取到音频时长: {duration}秒")
             
-            # 尝试获取text内容
+            # 获取文本内容
             if 'text' in result:
                 if isinstance(result['text'], str):
-                    try:
-                        # 尝试解析字符串形式的字典
-                        import ast
-                        text_dict = ast.literal_eval(result['text'])
-                        if isinstance(text_dict, dict) and 'text' in text_dict:
-                            text_content = text_dict['text']
-                        else:
-                            text_content = result['text']
-                    except:
-                        text_content = result['text']
-                else:
                     text_content = result['text']
+                    logger.debug(f"获取到文本内容: {text_content[:200]}...")
+                else:
+                    logger.error(f"text字段不是字符串类型: {type(result['text'])}")
+                    return None
             
-            # 尝试获取timestamp
+            # 获取时间戳
             if 'timestamp' in result:
                 timestamps = result['timestamp']
                 if isinstance(timestamps, str):
                     try:
-                        timestamps = ast.literal_eval(timestamps)
-                    except:
+                        timestamps = json.loads(timestamps)
+                        logger.debug("成功解析时间戳字符串")
+                    except json.JSONDecodeError:
+                        logger.warning("时间戳解析失败，将不使用时间戳")
                         timestamps = None
-            
-            if not text_content:
-                logger.error("未找到有效的文本内容")
-                return None
-            
-            # 如果有有效的时间戳，使用时间戳生成字幕
-            if isinstance(timestamps, list) and len(timestamps) > 0:
-                subtitles = []
-                current_text = []
-                current_start = timestamps[0][0]
-                current_end = timestamps[0][1]
                 
-                for i, (start, end) in enumerate(timestamps):
-                    # 将毫秒转换为秒
-                    start_sec = start / 1000.0
-                    end_sec = end / 1000.0
-                    
-                    # 获取当前时间段的文本
-                    if i < len(text_content):
-                        char = text_content[i]
-                        current_text.append(char)
-                        
-                        # 判断是否需要结束当前字幕
-                        is_sentence_end = char in '.。!！?？;；'
-                        is_too_long = len(''.join(current_text)) >= 25
-                        is_long_pause = i < len(timestamps) - 1 and timestamps[i+1][0] - end > 800
-                        is_natural_break = char in '，,、' and len(''.join(current_text)) >= 10
-                        
-                        if is_sentence_end or is_too_long or is_long_pause or is_natural_break:
-                            if current_text:  # 确保有文本内容
-                                subtitle = {
-                                    'start': current_start / 1000.0,
-                                    'duration': (end - current_start) / 1000.0,
-                                    'text': ''.join(current_text).strip()
-                                }
-                                subtitles.append(subtitle)
-                                current_text = []
-                                if i < len(timestamps) - 1:
-                                    current_start = timestamps[i+1][0]
-                
-                # 处理最后剩余的文本
-                if current_text:
-                    subtitle = {
-                        'start': current_start / 1000.0,
-                        'duration': (timestamps[-1][1] - current_start) / 1000.0,
-                        'text': ''.join(current_text).strip()
-                    }
-                    subtitles.append(subtitle)
-                
-                logger.info(f"使用时间戳生成了 {len(subtitles)} 条字幕")
-                return subtitles
-            
-            # 如果没有时间戳或解析失败，使用默认的分割方法
-            sentences = split_into_sentences(text_content)
+                if timestamps:
+                    logger.debug(f"时间戳数量: {len(timestamps)}")
+        
+        if not text_content:
+            logger.error("未找到有效的文本内容")
+            return None
+        
+        # 分割文本为句子
+        sentences = split_into_sentences(text_content)
+        
+        # 如果有时间戳，使用时间戳生成字幕
+        if timestamps and isinstance(timestamps, list) and len(timestamps) > 0:
+            logger.info("使用时间戳生成字幕")
             subtitles = []
+            current_text = []
+            current_start = timestamps[0][0]
             
-            total_duration = 5.0 * len(sentences)  # 估计总时长
-            current_time = 0.0
+            for i, (start, end) in enumerate(timestamps):
+                if i < len(text_content):
+                    char = text_content[i]
+                    current_text.append(char)
+                    
+                    # 判断是否需要结束当前字幕
+                    is_sentence_end = char in '.。!！?？;；'
+                    is_too_long = len(''.join(current_text)) >= 25
+                    is_long_pause = i < len(timestamps) - 1 and timestamps[i+1][0] - end > 800
+                    is_natural_break = char in '，,、' and len(''.join(current_text)) >= 15
+                    is_last_char = i == len(text_content) - 1
+                    
+                    if is_sentence_end or is_too_long or is_long_pause or is_natural_break or is_last_char:
+                        if current_text:
+                            subtitle = {
+                                'start': current_start / 1000.0,
+                                'duration': (end - current_start) / 1000.0,
+                                'text': ''.join(current_text).strip()
+                            }
+                            subtitles.append(subtitle)
+                            logger.debug(f"添加字幕: {subtitle}")
+                            current_text = []
+                            if i < len(timestamps) - 1:
+                                current_start = timestamps[i+1][0]
             
-            for sentence in sentences:
-                # 根据句子长度动态计算持续时间
-                duration = max(2.0, min(5.0, len(sentence) * 0.25))
-                
+            # 处理最后剩余的文本
+            if current_text:
                 subtitle = {
-                    'start': current_time,
-                    'duration': duration,
-                    'text': sentence.strip()
+                    'start': current_start / 1000.0,
+                    'duration': (timestamps[-1][1] - current_start) / 1000.0,
+                    'text': ''.join(current_text).strip()
                 }
                 subtitles.append(subtitle)
-                current_time += duration
+                logger.debug(f"添加最后的字幕: {subtitle}")
             
-            logger.info(f"使用默认分割方法生成了 {len(subtitles)} 条字幕")
-            # 只显示前两条和最后两条字幕作为示例
-            if subtitles:
-                logger.debug("生成的SRT内容示例:")
-                for i, sub in enumerate(subtitles[:2], 1):
-                    logger.debug(f"{i}\n{format_time(sub['start'])} --> {format_time(sub['start'] + sub['duration'])}\n{sub['text']}\n")
-                if len(subtitles) > 4:
-                    logger.debug("...... 中间内容省略 ......")
-                for i, sub in enumerate(subtitles[-2:], len(subtitles)-1):
-                    logger.debug(f"{i}\n{format_time(sub['start'])} --> {format_time(sub['start'] + sub['duration'])}\n{sub['text']}\n")
+            logger.info(f"使用时间戳生成了 {len(subtitles)} 条字幕")
             return subtitles
         
-        logger.error("结果格式不正确")
-        return None
-        
+        # 如果没有时间戳，使用估算的时间戳
+        logger.info("使用估算的时间戳生成字幕")
+        return generate_srt_timestamps(sentences, duration)
+    
     except Exception as e:
         logger.error(f"解析字幕时出错: {str(e)}")
+        logger.error(f"错误的输入内容: {result}")
         return None
+
+def parse_srt_content(srt_content):
+    """解析SRT格式字幕内容
+    
+    Args:
+        srt_content (str): SRT格式的字幕内容
+        
+    Returns:
+        list: 解析后的字幕列表，每个字幕包含id、start、end、duration和text字段
+        
+    Raises:
+        ValueError: 当字幕内容格式无效时
+    """
+    if not srt_content or not isinstance(srt_content, str):
+        logger.error("无效的字幕内容")
+        return []
+        
+    subtitles_list = []
+    current_subtitle = {}
+    expected_id = 1
+    
+    try:
+        lines = srt_content.strip().split('\n')
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # 跳过空行
+            if not line:
+                i += 1
+                continue
+            
+            try:
+                # 字幕序号
+                subtitle_id = int(line)
+                if subtitle_id != expected_id:
+                    logger.warning(f"字幕序号不连续: 期望 {expected_id}, 实际 {subtitle_id}")
+                
+                current_subtitle = {'id': subtitle_id}
+                i += 1
+                
+                # 时间轴
+                if i >= len(lines):
+                    raise ValueError("字幕格式错误：缺少时间戳行")
+                    
+                time_line = lines[i].strip()
+                if '-->' not in time_line:
+                    raise ValueError(f"无效的时间戳格式: {time_line}")
+                    
+                try:
+                    start_time, end_time = time_line.split(' --> ')
+                    current_subtitle['start'] = parse_time_str(start_time.strip())
+                    current_subtitle['end'] = parse_time_str(end_time.strip())
+                    
+                    if current_subtitle['start'] is None or current_subtitle['end'] is None:
+                        raise ValueError("无效的时间戳值")
+                    if current_subtitle['start'] >= current_subtitle['end']:
+                        raise ValueError("结束时间早于开始时间")
+                        
+                    current_subtitle['duration'] = current_subtitle['end'] - current_subtitle['start']
+                except Exception as e:
+                    logger.error(f"解析时间戳出错: {str(e)}, 行内容: {time_line}")
+                    raise ValueError(f"时间戳解析失败: {str(e)}")
+                
+                i += 1
+                
+                # 字幕文本
+                text_lines = []
+                while i < len(lines) and lines[i].strip():
+                    text_lines.append(lines[i].strip())
+                    i += 1
+                
+                if not text_lines:
+                    logger.warning(f"字幕 {subtitle_id} 没有文本内容")
+                    continue
+                    
+                current_subtitle['text'] = ' '.join(text_lines)  # 使用空格合并多行
+                if len(current_subtitle['text']) > 0:
+                    subtitles_list.append(current_subtitle)
+                    expected_id += 1
+                
+            except ValueError as e:
+                logger.error(f"解析字幕行时出错: {str(e)}, 行内容: {line}")
+                # 尝试跳到下一个字幕块
+                while i < len(lines) and lines[i].strip():
+                    i += 1
+                i += 1
+                expected_id += 1
+                continue
+    
+    except Exception as e:
+        logger.error(f"解析SRT内容时出错: {str(e)}")
+        logger.error(f"SRT内容前100个字符: {srt_content[:100]}")
+        logger.exception("详细错误信息:")
+    
+    if not subtitles_list:
+        logger.warning("没有解析出任何有效字幕")
+    
+    return subtitles_list
+
+def parse_time_str(time_str):
+    """解析SRT时间字符串为秒数"""
+    try:
+        # 处理毫秒
+        if ',' in time_str:
+            time_str = time_str.replace(',', '.')
+        
+        # 分离时、分、秒
+        hours, minutes, seconds = time_str.split(':')
+        total_seconds = float(hours) * 3600 + float(minutes) * 60 + float(seconds)
+        return total_seconds
+        
+    except Exception as e:
+        logger.error(f"解析时间字符串出错: {str(e)}, 时间字符串: {time_str}")
+        return 0.0
 
 def split_into_sentences(text):
     """将文本分割成句子"""
-    # 定义句子结束的标点符号
-    sentence_ends = '.。!！?？;；'
-    natural_breaks = '，,、'
-    
-    # 如果文本很短，直接返回
-    if len(text) < 15:  # 减小最小长度阈值
-        return [text]
-    
-    sentences = []
-    current_sentence = []
-    
-    for i, char in enumerate(text):
-        current_sentence.append(char)
-        current_text = ''.join(current_sentence)
-        
-        # 判断是否需要在这里分割句子
-        is_sentence_end = char in sentence_ends
-        is_natural_break = char in natural_breaks and len(current_text) >= 15
-        is_too_long = len(current_text) >= 25
-        is_last_char = i == len(text) - 1
-        
-        if is_sentence_end or is_natural_break or is_too_long or is_last_char:
-            if len(current_text.strip()) >= 2:  # 确保句子至少有2个字符
-                sentences.append(current_text)
-                current_sentence = []
-                continue
+    try:
+        if not text:
+            logger.error("输入文本为空")
+            return []
             
-    # 处理最后剩余的文本
-    if current_sentence and len(''.join(current_sentence).strip()) >= 2:
-        sentences.append(''.join(current_sentence))
-    
-    # 如果没有找到任何有效句子，返回原始文本
-    return sentences if sentences else [text]
+        # 分割句子的标点符号
+        sentence_endings = r'[。！？!?]+'
+        
+        # 按标点符号分割
+        sentences = []
+        current_sentence = ""
+        
+        for char in text:
+            current_sentence += char
+            
+            # 如果遇到句子结束标点，且当前句子不为空
+            if re.search(sentence_endings, char) and current_sentence.strip():
+                sentences.append(current_sentence.strip())
+                current_sentence = ""
+                
+        # 处理最后一个句子
+        if current_sentence.strip():
+            sentences.append(current_sentence.strip())
+            
+        # 过滤掉太短的句子
+        sentences = [s for s in sentences if len(s) > 1]
+        
+        # 记录处理结果
+        total_sentences = len(sentences)
+        logger.info(f"分割完成，共 {total_sentences} 个句子")
+        
+        # 只显示前10行和后10行的句子
+        if total_sentences > 20:
+            for i, sentence in enumerate(sentences[:10]):
+                logger.debug(f"句子[{i+1}]: {sentence[:50]}...")
+            logger.debug("...")
+            for i, sentence in enumerate(sentences[-10:]):
+                logger.debug(f"句子[{total_sentences-10+i+1}]: {sentence[:50]}...")
+        else:
+            for i, sentence in enumerate(sentences):
+                logger.debug(f"句子[{i+1}]: {sentence[:50]}...")
+        
+        return sentences
+            
+    except Exception as e:
+        logger.error(f"分割句子时出错: {str(e)}")
+        return []
+
+def generate_srt_timestamps(sentences, total_duration=None):
+    """为句子生成时间戳"""
+    try:
+        if not sentences:
+            logger.error("没有句子需要生成时间戳")
+            return []
+            
+        logger.info("开始生成时间戳")
+        
+        # 如果没有提供总时长，使用估算值
+        if not total_duration:
+            # 假设每个字符0.3秒
+            total_duration = sum(len(s) * 0.3 for s in sentences)
+            logger.info("使用估算的时间戳生成字幕")
+            
+        logger.debug(f"总时长: {total_duration}秒")
+        logger.debug(f"句子数量: {len(sentences)}")
+        
+        # 计算每个句子的时长
+        total_chars = sum(len(s) for s in sentences)
+        timestamps = []
+        current_time = 0
+        
+        # 只显示前10个和后10个时间戳的生成
+        total_sentences = len(sentences)
+        for i, sentence in enumerate(sentences):
+            duration = (len(sentence) / total_chars) * total_duration
+            end_time = min(current_time + duration, total_duration)
+            
+            if i < 10 or i >= total_sentences - 10:
+                logger.debug(f"生成字幕[{i+1}/{total_sentences}]: {current_time:.1f}s - {sentence[:50]}...")
+            elif i == 10:
+                logger.debug("...")
+            
+            timestamps.append({
+                'start': current_time,
+                'end': end_time,
+                'duration': duration,  # 添加duration字段
+                'text': sentence
+            })
+            
+            current_time = end_time
+            
+        return timestamps
+            
+    except Exception as e:
+        logger.error(f"生成时间戳时出错: {str(e)}")
+        return []
 
 def download_youtube_subtitles(url, video_info=None):
-    """下载YouTube视频字幕
-    
-    Args:
-        url: YouTube视频URL
-        video_info: 预先获取的视频信息（可选）
-    
-    Returns:
-        tuple: (字幕内容, 视频信息)
-    """
+    """下载YouTube视频字幕"""
     try:
-        logger.info(f"开始下载YouTube字幕: {url}")
+        # 创建临时目录
+        temp_dir = tempfile.mkdtemp()
+        logger.info(f"创建临时目录: {temp_dir}")
         
-        # 如果没有提供视频信息，获取视频信息
+        # 如果没有提供video_info，获取视频信息
         if not video_info:
             ydl_opts = {
                 'quiet': True,
                 'no_warnings': True,
+                'extract_flat': False
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 video_info = ydl.extract_info(url, download=False)
+                logger.info(f"获取到的视频信息: {json.dumps({k: v for k, v in video_info.items() if k in ['title', 'uploader', 'upload_date']}, ensure_ascii=False)}")
         
-        # 获取视频语言和字幕策略
-        language = get_video_language(video_info)
-        should_download, target_languages = get_subtitle_strategy(language, video_info)
+        # 执行下载命令
+        cmd = ['yt-dlp', 
+               '--write-sub', '--write-auto-sub',  # 下载字幕
+               '--sub-lang', 'zh-Hans,zh-Hant,zh,en',  # 支持更多语言选项
+               '--skip-download',  # 不下载视频
+               '--convert-subs', 'srt',  # 转换为srt格式
+               '--sub-format', 'srt/ass/vtt/best',  # 支持多种字幕格式
+               '-o', os.path.join(temp_dir, '%(title)s.%(ext)s'),
+               url]
         
-        if not should_download:
-            logger.info(f"根据策略决定不下载字幕，视频语言: {language}")
+        logger.info(f"执行命令: {' '.join(cmd)}")
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        stdout, stderr = process.communicate()
+        
+        # 记录完整的输出用于调试
+        if stdout:
+            logger.info("命令标准输出:\n" + stdout)
+        if stderr:
+            logger.warning("命令错误输出:\n" + stderr)
+        
+        # 检查临时目录中的文件
+        files = os.listdir(temp_dir)
+        logger.info(f"临时目录中的文件: {files}")
+        
+        # 查找字幕文件
+        subtitle_files = [f for f in files if f.endswith('.srt')]
+        if not subtitle_files:
+            logger.error("未找到字幕文件")
             return None, video_info
             
-        logger.info(f"视频语言: {language}, 目标字幕语言: {target_languages}")
+        # 读取第一个字幕文件
+        subtitle_file = os.path.join(temp_dir, subtitle_files[0])
+        logger.info(f"找到字幕文件: {subtitle_file}")
         
-        # 尝试下载字幕
-        for target_lang in target_languages:
-            # 首先尝试下载手动字幕
-            if video_info.get('subtitles'):
-                manual_subs = video_info['subtitles']
-                for lang, sub_info in manual_subs.items():
-                    if lang.startswith(target_lang):
-                        for fmt in sub_info:
-                            if fmt.get('ext') in ['vtt', 'srt', 'json3']:
-                                subtitle_url = fmt['url']
-                                content = download_subtitle_content(subtitle_url)
-                                if content:
-                                    logger.info(f"成功下载手动字幕，语言: {lang}")
-                                    return content, video_info
+        with open(subtitle_file, 'rb') as f:
+            content = f.read()
             
-            # 如果是英文视频且没有手动字幕，尝试下载自动字幕
-            if language == 'en' and video_info.get('automatic_captions'):
-                auto_subs = video_info['automatic_captions']
-                for lang, sub_info in auto_subs.items():
-                    if lang.startswith(target_lang):
-                        for fmt in sub_info:
-                            if fmt.get('ext') in ['vtt', 'srt', 'json3']:
-                                subtitle_url = fmt['url']
-                                content = download_subtitle_content(subtitle_url)
-                                if content:
-                                    logger.info(f"成功下载自动字幕，语言: {lang}")
-                                    return content, video_info
+        # 检测并处理文件编码
+        encoding = detect_file_encoding(content)
+        logger.info(f"检测到字幕文件编码: {encoding}")
         
-        logger.info("未找到合适的字幕")
-        return None, video_info
+        try:
+            subtitle_content = content.decode(encoding)
+        except UnicodeDecodeError:
+            logger.warning(f"使用 {encoding} 解码失败，尝试使用 utf-8")
+            try:
+                subtitle_content = content.decode('utf-8')
+            except UnicodeDecodeError:
+                logger.warning("使用 utf-8 解码失败，尝试使用 utf-8-sig")
+                subtitle_content = content.decode('utf-8-sig')
         
+        # 清理临时目录
+        shutil.rmtree(temp_dir)
+        logger.info("清理临时目录")
+        
+        return subtitle_content, video_info
+            
     except Exception as e:
         logger.error(f"下载YouTube字幕时出错: {str(e)}")
-        return None, video_info
+        if 'temp_dir' in locals():
+            shutil.rmtree(temp_dir)
+            logger.info("清理临时目录")
+        raise
 
 def download_subtitles(url, platform, video_info=None):
     """统一的字幕下载入口
@@ -415,37 +636,165 @@ def download_subtitle_content(subtitle_url):
         logger.error(f"处理字幕时出错: {str(e)}")
         return None
 
-def clean_subtitle_content(content):
-    """清理字幕内容，去除无用的标记和空行"""
-    # 移除 BOM
-    content = content.replace('\ufeff', '')
+def clean_subtitle_content(content, is_funasr=False):
+    """清理字幕内容
     
-    # 移除 HTML 标签
-    content = re.sub(r'<[^>]+>', '', content)
-    
-    # 移除多余的空行
-    lines = [line.strip() for line in content.splitlines()]
-    lines = [line for line in lines if line]
-    
-    # 移除字幕中的样式标记 (比如 {\\an8} 这样的标记)
-    lines = [re.sub(r'\{\\[^}]+\}', '', line) for line in lines]
-    
-    return '\n'.join(lines)
+    Args:
+        content: 字幕内容
+        is_funasr: 是否是FunASR转换的字幕
+    """
+    try:
+        if not content:
+            return ""
+            
+        # 移除WEBVTT头部
+        content = re.sub(r'^WEBVTT\s*\n', '', content)
+        
+        # 移除序号和时间轴
+        lines = []
+        current_text = []
+        skip_next = False
+        
+        for line in content.split('\n'):
+            line = line.strip()
+            
+            # 跳过序号行（纯数字）
+            if re.match(r'^\d+$', line):
+                continue
+                
+            # 跳过时间轴行
+            if re.match(r'^\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}', line):
+                continue
+                
+            # 跳过空行
+            if not line:
+                if current_text:
+                    if is_funasr:
+                        # FunASR转换的字幕：合并所有文本，不保留换行
+                        lines.append(' '.join(current_text))
+                    else:
+                        # 直接提取的字幕：保留原有换行
+                        lines.append('\n'.join(current_text))
+                    current_text = []
+                continue
+                
+            current_text.append(line)
+            
+        # 处理最后一段文本
+        if current_text:
+            if is_funasr:
+                lines.append(' '.join(current_text))
+            else:
+                lines.append('\n'.join(current_text))
+        
+        # 合并处理后的文本
+        if is_funasr:
+            # FunASR转换的字幕：所有段落用空格连接
+            return ' '.join(lines)
+        else:
+            # 直接提取的字幕：段落之间用两个换行符分隔
+            return '\n\n'.join(lines)
+            
+    except Exception as e:
+        logger.error(f"清理字幕内容时出错: {str(e)}")
+        return content
 
 def convert_to_srt(content, input_format):
-    """将其他格式的字幕转换为SRT格式"""
     if input_format == 'vtt':
-        # 移除 WEBVTT 头部
-        content = re.sub(r'^WEBVTT\n', '', content)
-        # 移除 VTT 特有的样式信息
-        content = re.sub(r'STYLE\n.*?\n\n', '', content, flags=re.DOTALL)
-        # 转换时间戳格式 (如果需要)
-        content = re.sub(r'(\d{2}):(\d{2}):(\d{2})\.(\d{3})', r'\1:\2:\3,\4', content)
-        return content
+        try:
+            # 移除 BOM 标记（如果存在）
+            content = content.strip('\ufeff')
+            
+            # 移除 WEBVTT 头部和注释
+            content = re.sub(r'^WEBVTT.*?\n', '', content, flags=re.DOTALL)
+            content = re.sub(r'NOTE.*?\n', '', content, flags=re.DOTALL)
+            
+            # 移除 VTT 特有的样式信息
+            content = re.sub(r'STYLE\n.*?\n\n', '', content, flags=re.DOTALL)
+            content = re.sub(r'REGION\n.*?\n\n', '', content, flags=re.DOTALL)
+            
+            # 清理空行和多余的空格
+            lines = [line.strip() for line in content.split('\n')]
+            lines = [line for line in lines if line]
+            
+            # 转换时间戳格式并添加序号
+            srt_lines = []
+            current_index = 1
+            i = 0
+            while i < len(lines):
+                # 检查是否是时间戳行
+                if re.match(r'^\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}', lines[i]):
+                    # 添加序号
+                    srt_lines.append(str(current_index))
+                    
+                    # 转换时间戳格式（将 . 替换为 ,）
+                    timestamp = re.sub(r'\.', ',', lines[i])
+                    srt_lines.append(timestamp)
+                    
+                    # 收集字幕文本直到下一个时间戳或结束
+                    text_lines = []
+                    i += 1
+                    while i < len(lines) and not re.match(r'^\d{2}:\d{2}:\d{2}[.,]\d{3}', lines[i]):
+                        text_lines.append(lines[i])
+                        i += 1
+                    
+                    # 添加字幕文本和空行
+                    if text_lines:
+                        srt_lines.append(' '.join(text_lines))
+                        srt_lines.append('')
+                        current_index += 1
+                    continue
+                i += 1
+            
+            if not srt_lines:
+                logger.error("转换后的SRT内容为空")
+                return None
+                
+            return '\n'.join(srt_lines)
+            
+        except Exception as e:
+            logger.error(f"转换VTT格式时出错: {str(e)}")
+            return None
     elif input_format == 'json3':
         try:
-            # 解析JSON内容
-            data = json.loads(content)
+            # 处理可能的多行 JSON
+            content = content.strip()
+            if content.startswith('[') and content.endswith(']'):
+                # 如果内容是 JSON 数组
+                data_list = json.loads(content)
+                if not data_list:
+                    logger.error("JSON数组为空")
+                    return None
+                # 使用第一个有效的 JSON 对象
+                for data in data_list:
+                    if isinstance(data, dict) and 'events' in data:
+                        break
+                else:
+                    logger.error("JSON数组中没有找到有效的字幕数据")
+                    return None
+            else:
+                # 尝试处理多行独立的 JSON 对象
+                try:
+                    # 首先尝试作为单个 JSON 对象解析
+                    data = json.loads(content)
+                except json.JSONDecodeError:
+                    # 如果失败，尝试分行处理
+                    lines = content.split('\n')
+                    for line in lines:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                            if isinstance(data, dict) and 'events' in data:
+                                break
+                        except json.JSONDecodeError:
+                            continue
+                    else:
+                        logger.error("未找到有效的字幕JSON数据")
+                        return None
+            
+            # 验证数据结构
             if not isinstance(data, dict) or 'events' not in data:
                 logger.error("无效的json3格式：缺少events字段")
                 return None
@@ -663,11 +1012,24 @@ def transcribe_audio(audio_path):
         
         # 合并所有结果
         if not all_results:
+            logger.error("没有有效的转录结果")
             return None
+            
+        # 记录所有结果的格式
+        logger.info(f"收到 {len(all_results)} 个转录结果")
+        for i, result in enumerate(all_results):
+            logger.info(f"结果 {i+1} 的类型: {type(result)}")
+            logger.info(f"结果 {i+1} 的内容: {result}")
             
         # 如果只有一个结果，直接返回
         if len(all_results) == 1:
-            return all_results[0]
+            result = all_results[0]
+            if isinstance(result, dict) and 'text' in result:
+                logger.info(f"单个结果的文本内容: {result['text']}")
+                return result['text']
+            else:
+                logger.error(f"单个结果格式错误: {result}")
+                return None
         
         # 合并多个结果
         merged_result = {
@@ -676,11 +1038,12 @@ def transcribe_audio(audio_path):
         }
         
         last_end_time = 0
-        for result in all_results:
-            if isinstance(result, dict):
+        for i, result in enumerate(all_results):
+            logger.info(f"处理第 {i+1} 个结果")
+            if isinstance(result, dict) and 'text' in result:
                 # 合并文本
-                if 'text' in result:
-                    merged_result['text'] += result['text']
+                merged_result['text'] += result['text']
+                logger.info(f"合并后的文本长度: {len(merged_result['text'])}")
                 
                 # 合并时间戳
                 if 'timestamp' in result and isinstance(result['timestamp'], list):
@@ -693,8 +1056,18 @@ def transcribe_audio(audio_path):
                     # 更新最后的结束时间
                     if adjusted_timestamps:
                         last_end_time = adjusted_timestamps[-1][1]
+                        logger.info(f"更新最后的结束时间: {last_end_time}")
+            else:
+                logger.error(f"结果 {i+1} 格式错误: {result}")
         
-        return merged_result
+        logger.info(f"最终合并的文本长度: {len(merged_result['text'])}")
+        logger.info(f"最终合并的文本内容: {merged_result['text'][:200]}...")  # 只显示前200个字符
+        
+        processed_text = process_subtitle_content(merged_result['text'], is_funasr=True)
+        logger.info(f"处理后的文本长度: {len(processed_text)}")
+        logger.info(f"处理后的文本内容: {processed_text[:200]}...")  # 只显示前200个字符
+        
+        return processed_text
             
     except Exception as e:
         logger.error(f"音频转录时出错: {str(e)}")
@@ -734,29 +1107,101 @@ def convert_youtube_url(url):
         return url
 
 def get_youtube_info(url):
-    """获取YouTube视频信息，包括标题和发布日期"""
+    """获取YouTube视频信息"""
     try:
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': False  # 需要完整的元数据
+            'extract_flat': False
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            # 获取发布日期并转换为ISO 8601格式
-            upload_date = info.get('upload_date')  # 格式：YYYYMMDD
-            if upload_date:
-                published_date = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}T00:00:00+00:00"
-            else:
-                published_date = None
-                
-            return {
-                'title': info.get('title', ''),
-                'published_date': published_date
+            
+            # 详细记录所有可能包含日期的字段
+            date_fields = {
+                'upload_date': info.get('upload_date'),
+                'release_date': info.get('release_date'),
+                'modified_date': info.get('modified_date'),
+                'timestamp': info.get('timestamp')
             }
+            logger.info(f"YouTube视频日期相关字段: {json.dumps(date_fields, indent=2, ensure_ascii=False)}")
+            
+            # 尝试多个日期字段
+            published_date = None
+            if info.get('upload_date'):
+                published_date = f"{info['upload_date'][:4]}-{info['upload_date'][4:6]}-{info['upload_date'][6:]}T00:00:00Z"
+            elif info.get('release_date'):
+                published_date = info['release_date']
+            elif info.get('modified_date'):
+                published_date = info['modified_date']
+            elif info.get('timestamp'):
+                from datetime import datetime
+                published_date = datetime.fromtimestamp(info['timestamp']).strftime('%Y-%m-%dT%H:%M:%SZ')
+            
+            logger.info(f"最终确定的发布日期: {published_date}")
+            
+            video_info = {
+                'title': info.get('title', ''),
+                'published_date': published_date,
+                'uploader': info.get('uploader', '')
+            }
+            
+            # 记录完整的返回信息
+            logger.info(f"返回的视频信息: {json.dumps(video_info, indent=2, ensure_ascii=False)}")
+            
+            return video_info
+            
     except Exception as e:
-        logger.error(f"获取YouTube信息时出错: {str(e)}")
-        return {'title': None, 'published_date': None}
+        logger.error(f"获取YouTube视频信息失败: {str(e)}")
+        raise
+
+def get_bilibili_info(url):
+    """获取Bilibili视频信息"""
+    try:
+        with yt_dlp.YoutubeDL({
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True
+        }) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            # 详细记录所有可能包含日期的字段
+            date_fields = {
+                'upload_date': info.get('upload_date'),
+                'release_date': info.get('release_date'),
+                'modified_date': info.get('modified_date'),
+                'timestamp': info.get('timestamp')
+            }
+            logger.info(f"Bilibili视频日期相关字段: {json.dumps(date_fields, indent=2, ensure_ascii=False)}")
+            
+            # 尝试多个日期字段
+            published_date = None
+            if info.get('upload_date'):
+                published_date = f"{info['upload_date'][:4]}-{info['upload_date'][4:6]}-{info['upload_date'][6:]}T00:00:00Z"
+            elif info.get('release_date'):
+                published_date = info['release_date']
+            elif info.get('modified_date'):
+                published_date = info['modified_date']
+            elif info.get('timestamp'):
+                from datetime import datetime
+                published_date = datetime.fromtimestamp(info['timestamp']).strftime('%Y-%m-%dT%H:%M:%SZ')
+            
+            logger.info(f"最终确定的发布日期: {published_date}")
+            
+            video_info = {
+                'title': info.get('title', ''),
+                'published_date': published_date,
+                'uploader': info.get('uploader', '')
+            }
+            
+            # 记录完整的返回信息
+            logger.info(f"返回的视频信息: {json.dumps(video_info, indent=2, ensure_ascii=False)}")
+            
+            return video_info
+            
+    except Exception as e:
+        logger.error(f"获取Bilibili视频信息失败: {str(e)}")
+        raise
 
 def get_video_info(url, platform):
     """获取视频信息"""
@@ -771,51 +1216,7 @@ def get_video_info(url, platform):
         logger.error(f"获取视频信息失败: {str(e)}")
         raise
 
-def get_youtube_info(url):
-    """获取YouTube视频信息"""
-    try:
-        with yt_dlp.YoutubeDL({
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': True
-        }) as ydl:
-            info = ydl.extract_info(url, download=False)
-            return {
-                'title': info.get('title'),
-                'language': get_video_language(info),
-                'duration': info.get('duration'),
-                'upload_date': info.get('upload_date'),
-                'uploader': info.get('uploader'),
-                'view_count': info.get('view_count'),
-                'platform': 'youtube'
-            }
-    except Exception as e:
-        logger.error(f"获取YouTube视频信息失败: {str(e)}")
-        raise
-
-def get_bilibili_info(url):
-    """获取Bilibili视频信息"""
-    try:
-        with yt_dlp.YoutubeDL({
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': True
-        }) as ydl:
-            info = ydl.extract_info(url, download=False)
-            return {
-                'title': info.get('title'),
-                'language': 'zh',  # Bilibili默认为中文
-                'duration': info.get('duration'),
-                'upload_date': info.get('upload_date'),
-                'uploader': info.get('uploader'),
-                'view_count': info.get('view_count'),
-                'platform': 'bilibili'
-            }
-    except Exception as e:
-        logger.error(f"获取Bilibili视频信息失败: {str(e)}")
-        raise
-
-def download_subtitles(url, platform, video_info):
+def download_subtitles(url, platform, video_info=None):
     """下载字幕"""
     try:
         if platform == 'youtube':
@@ -875,7 +1276,7 @@ def download_bilibili_subtitles(url, video_info):
         raise
 
 def save_to_readwise(title, content, url=None, published_date=None, author=None, location='new', tags=None):
-    """保存内容到Readwise，支持长文本分段"""
+    """保存内容到Readwise"""
     try:
         # 验证location参数
         valid_locations = ['new', 'later', 'archive', 'feed']
@@ -885,17 +1286,28 @@ def save_to_readwise(title, content, url=None, published_date=None, author=None,
         
         # 从文件读取token
         token_file = os.getenv('READWISE_API_TOKEN_FILE', '/app/config/readwise_token.txt')
+        logger.info(f"尝试从文件读取Readwise token: {token_file}")
+        
+        # 如果默认路径不存在，尝试在项目根目录下的config目录查找
         if not os.path.exists(token_file):
-            logger.error(f"Readwise token文件不存在: {token_file}")
-            return False
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            local_token_file = os.path.join(project_root, 'config', 'readwise_token.txt')
+            logger.info(f"默认token文件不存在，尝试从本地路径读取: {local_token_file}")
+            if os.path.exists(local_token_file):
+                token_file = local_token_file
+            else:
+                logger.error("未找到Readwise token文件")
+                return None
             
         with open(token_file, 'r') as f:
             token = f.read().strip()
             
         if not token:
             logger.error("Readwise token为空")
-            return False
+            return None
             
+        logger.info("成功读取Readwise token")
+        
         headers = {
             'Authorization': f'Token {token}',
             'Content-Type': 'application/json'
@@ -906,109 +1318,62 @@ def save_to_readwise(title, content, url=None, published_date=None, author=None,
             url = convert_youtube_url(url)
             logger.info(f"转换后的URL: {url}")
 
-        # 记录原始内容
-        logger.info("原始内容:")
-        logger.info(content[:1000])  # 记录前1000个字符
+        # 记录原始内容长度
+        logger.info(f"原始内容长度: {len(content)}")
+        logger.info(f"作者信息: {author}")
 
-        # 将内容分段，每段最大300000字符
-        MAX_LENGTH = 300000
-        segments = []
-        current_segment = []
-        current_length = 0
+        # 处理字幕内容，移除序号和时间轴
+        content = process_subtitle_content(content)
+        logger.info(f"处理后的内容长度: {len(content)}")
 
-        # 移除时间轴信息，只保留文本内容
-        lines = content.split('\n')
-        text_only_lines = []
-        for line in lines:
-            # 跳过时间轴行（通常包含 --> 或时间格式）
-            if '-->' in line or re.match(r'^\d{2}:\d{2}:\d{2}', line):
-                continue
-            # 跳过纯数字的行（通常是字幕序号）
-            if re.match(r'^\d+$', line.strip()):
-                continue
-            # 保留非空的文本行，移除方括号中的时间信息
-            if line.strip():
-                # 移除形如 [00:00:00,166] 的时间戳
-                cleaned_line = re.sub(r'\[\d{2}:\d{2}:\d{2},\d{3}\]\s*', '', line.strip())
-                if cleaned_line:  # 确保移除时间戳后还有内容
-                    text_only_lines.append(cleaned_line)
+        # 将内容转换为HTML格式
+        content_with_br = content.replace('\n', '<br>')
+        html_content = f'<div class="content">{content_with_br}</div>'
 
-        # 合并相邻的文本行
-        merged_text = ' '.join(text_only_lines)
-        
-        # 按句子分割文本
-        sentences = re.split(r'(?<=[.!?。！？])\s+', merged_text)
-        
-        for sentence in sentences:
-            sentence_length = len(sentence)
-            if current_length + sentence_length + 2 > MAX_LENGTH:  # +2 for '\n\n'
-                if current_segment:  # 保存当前段
-                    segments.append(' '.join(current_segment))
-                current_segment = [sentence]
-                current_length = sentence_length
-            else:
-                current_segment.append(sentence)
-                current_length += sentence_length + 2  # 包括空格
+        data = {
+            "url": url or "http://read.gauss.surf/youtube/unknown",
+            "title": title,
+            "author": author,
+            "html": html_content,
+            "should_clean_html": True,
+            "category": "article",
+            "location": location,
+            "saved_using": "youtube-subtitle-processor",
+            "tags": tags or []
+        }
 
-        if current_segment:  # 保存最后一段
-            segments.append(' '.join(current_segment))
+        # 添加发布日期（如果有）
+        if published_date:
+            data["published_date"] = published_date
+            logger.info(f"添加发布日期: {published_date}")
 
-        # 发送每个段落到Readwise
-        success = True
-        total_segments = len(segments)
-        for i, segment in enumerate(segments, 1):
-            # 构造HTML内容和标题
-            if total_segments > 1:
-                current_title = f"{title} (Part {i}/{total_segments})"
-            else:
-                current_title = title
+        # 记录发送到Readwise的数据
+        logger_data = {**data}
+        logger_data['html'] = logger_data['html'][:200] + '...' if len(logger_data['html']) > 200 else logger_data['html']
+        logger.info(f"发送到Readwise的数据: {json.dumps(logger_data, ensure_ascii=False)}")
 
-            html_content = f'<article><h1>{current_title}</h1><div class="content">{segment}</div></article>'
+        # 发送请求
+        response = requests.post(
+            'https://readwise.io/api/v3/save/',
+            headers=headers,
+            json=data
+        )
 
-            data = {
-                "url": url or f"http://read.gauss.surf/youtube/unknown",  # 使用新的默认URL格式
-                "html": html_content,
-                "title": current_title,
-                "category": "article",
-                "should_clean_html": True,
-                "saved_using": "YouTube Subtitles Tool",
-                "tags": tags or [],
-                "location": location
-            }
+        # 记录响应内容
+        logger.info(f"Readwise响应状态码: {response.status_code}")
+        logger.info(f"Readwise响应内容: {response.text}")
 
-            # 添加发布日期（如果有）
-            if published_date:
-                data["published_date"] = published_date
-
-            # 添加作者信息（如果有）
-            if author:
-                data["author"] = author
-
-            # 记录请求数据
-            logger.info("发送到Readwise的数据:")
-            logger.info(json.dumps(data, ensure_ascii=False, indent=2))
-
-            response = requests.post(
-                'https://readwise.io/api/v3/save/',
-                headers=headers,
-                json=data
-            )
-
-            # 记录响应
-            logger.info(f"Readwise响应状态码: {response.status_code}")
-            logger.info(f"Readwise响应内容: {response.text}")
-
-            if response.status_code not in [200, 201]:
-                logger.error(f"保存第{i}段到Readwise失败: {response.status_code} - {response.text}")
-                success = False
-            else:
-                logger.info(f"成功保存第{i}段到Readwise")
-
-        return success
+        if response.status_code not in [200, 201]:
+            logger.error(f"发送到Readwise失败: {response.status_code} - {response.text}")
+            return None
+        else:
+            logger.info("成功发送到Readwise")
+            return response.json()
 
     except Exception as e:
         logger.error(f"保存到Readwise时出错: {str(e)}")
-        return False
+        logger.exception(e)
+        return None
 
 # HTML模板
 HTML_TEMPLATE = '''
@@ -1045,10 +1410,6 @@ HTML_TEMPLATE = '''
         }
         .text {
             margin-top: 5px;
-        }
-        h1 {
-            color: #333;
-            margin-bottom: 20px;
         }
         .back-link {
             display: inline-block;
@@ -1101,7 +1462,6 @@ HTML_TEMPLATE = '''
 <body>
     <div class="container">
         <a href="/" class="back-link">← 返回列表</a>
-        <h1>{{filename}}</h1>
         <div class="meta-info">
             总字幕数：{{ subtitles|length }} 条
         </div>
@@ -1307,6 +1667,7 @@ FILES_LIST_TEMPLATE = '''
 </head>
 <body>
     <div class="container">
+        <a href="/" class="back-link">← 返回列表</a>
         <h1>字幕文件列表</h1>
         
         <form class="youtube-form" onsubmit="return submitYouTubeUrl()">
@@ -1369,11 +1730,19 @@ def get_available_transcribe_server():
     servers = load_transcribe_servers()
     available_servers = []
     
-    print("\n=== 开始检查转录服务器 ===")
-    print(f"发现 {len(servers)} 个配置的服务器")
+    message = "\n=== 开始检查转录服务器 ==="
+    print(message)
+    logger.info(message)
+    
+    message = f"发现 {len(servers)} 个配置的服务器"
+    print(message)
+    logger.info(message)
     
     for server in servers:
-        print(f"\n正在检查服务器: {server['name']} ({server['url']})")
+        message = f"\n正在检查服务器: {server['name']} ({server['url']})"
+        print(message)
+        logger.info(message)
+        
         try:
             response = requests.get(f"{server['url']}/health", timeout=5)
             if response.status_code == 200:
@@ -1381,14 +1750,27 @@ def get_available_transcribe_server():
                 # 将服务器状态信息添加到配置中
                 server.update(server_info)
                 available_servers.append(server)
-                print(f"✓ 服务器可用")
-                print(f"  - 设备类型: {server_info.get('device', 'unknown')}")
-                print(f"  - GPU状态: {'可用' if server_info.get('gpu_available', False) else '不可用'}")
+                
+                message = f"✓ 服务器可用"
+                print(message)
+                logger.info(message)
+                
+                message = f"  - 设备类型: {server_info.get('device', 'unknown')}"
+                print(message)
+                logger.info(message)
+                
+                message = f"  - GPU状态: {'可用' if server_info.get('gpu_available', False) else '不可用'}"
+                print(message)
+                logger.info(message)
         except Exception as e:
-            print(f"✗ 服务器不可用: {str(e)}")
+            message = f"✗ 服务器不可用: {str(e)}"
+            print(message)
+            logger.error(message)
     
     if not available_servers:
-        print("\n❌ 错误: 没有可用的转录服务器")
+        message = "\n❌ 错误: 没有可用的转录服务器"
+        print(message)
+        logger.error(message)
         raise Exception("没有可用的转录服务器")
     
     # 按优先级排序，优先使用GPU服务器
@@ -1398,12 +1780,30 @@ def get_available_transcribe_server():
     ))
     
     selected_server = available_servers[0]
-    print("\n=== 服务器选择结果 ===")
-    print(f"已选择: {selected_server['name']} ({selected_server['url']})")
-    print(f"  - 优先级: {selected_server['priority']}")
-    print(f"  - 设备类型: {selected_server.get('device', 'unknown')}")
-    print(f"  - GPU状态: {'可用' if selected_server.get('gpu_available', False) else '不可用'}")
-    print("==================\n")
+    
+    message = "\n=== 服务器选择结果 ==="
+    print(message)
+    logger.info(message)
+    
+    message = f"已选择: {selected_server['name']} ({selected_server['url']})"
+    print(message)
+    logger.info(message)
+    
+    message = f"  - 优先级: {selected_server['priority']}"
+    print(message)
+    logger.info(message)
+    
+    message = f"  - 设备类型: {selected_server.get('device', 'unknown')}"
+    print(message)
+    logger.info(message)
+    
+    message = f"  - GPU状态: {'可用' if selected_server.get('gpu_available', False) else '不可用'}"
+    print(message)
+    logger.info(message)
+    
+    message = "==================\n"
+    print(message)
+    logger.info(message)
     
     return selected_server['url']
 
@@ -1427,6 +1827,92 @@ def sanitize_filename(filename):
         clean_name = 'unnamed_file'
         
     return clean_name
+
+def process_subtitle_content(content, is_funasr=False):
+    """处理字幕内容，移除序号和时间轴，根据来源处理换行
+    
+    Args:
+        content: 字幕内容
+        is_funasr: 是否是FunASR转换的字幕
+    """
+    try:
+        if not content:
+            logger.error("输入内容为空")
+            return ""
+            
+        logger.info(f"开始处理字幕内容 [长度: {len(content)}字符]")
+        if is_funasr:
+            logger.info("使用FunASR模式处理字幕")
+        
+        # 移除WEBVTT头部
+        content = re.sub(r'^WEBVTT\s*\n', '', content)
+        
+        # 分割成行
+        lines = content.split('\n')
+        logger.info(f"字幕总行数: {len(lines)}")
+        text_blocks = []
+        current_block = []
+        
+        skipped_numbers = 0
+        skipped_timestamps = 0
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # 跳过序号行（纯数字）
+            if re.match(r'^\d+$', line):
+                skipped_numbers += 1
+                i += 1
+                continue
+                
+            # 跳过时间轴行
+            if re.match(r'^\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}', line):
+                skipped_timestamps += 1
+                i += 1
+                continue
+                
+            # 处理文本行
+            if line:
+                current_block.append(line)
+            elif current_block:  # 遇到空行，处理当前文本块
+                if is_funasr:
+                    # FunASR转换的字幕：合并所有文本，不保留换行
+                    text_blocks.append(' '.join(current_block))
+                else:
+                    # 直接提取的字幕：保留原有换行
+                    text_blocks.append('\n'.join(current_block))
+                current_block = []
+            
+            i += 1
+        
+        # 处理最后的文本块
+        if current_block:
+            if is_funasr:
+                text_blocks.append(' '.join(current_block))
+            else:
+                text_blocks.append('\n'.join(current_block))
+        
+        # 合并所有文本块
+        if is_funasr:
+            # FunASR转换的字幕：用空格连接所有块
+            result = ' '.join(text_blocks)
+        else:
+            # 直接提取的字幕：保留段落换行
+            result = '\n\n'.join(text_blocks)
+        
+        logger.info(f"字幕处理完成:")
+        logger.info(f"- 移除了 {skipped_numbers} 个序号标记")
+        logger.info(f"- 移除了 {skipped_timestamps} 个时间轴")
+        logger.info(f"- 处理后文本长度: {len(result)}字符")
+        logger.debug(f"处理后内容预览: {result[:200]}...")
+        
+        return result
+            
+    except Exception as e:
+        logger.error(f"处理字幕内容时出错: {str(e)}")
+        logger.error(f"错误的输入内容: {content}")
+        raise
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -1468,7 +1954,7 @@ def upload_file():
                 content = f.read()
                 
             # 解析字幕
-            subtitles = parse_srt(content)
+            subtitles = parse_srt_content(content)
             if not subtitles:
                 logger.error("解析字幕失败")
                 return jsonify({"error": "Failed to parse subtitles"}), 400
@@ -1497,15 +1983,6 @@ def upload_file():
         logger.error(f"处理文件时发生错误: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-def parse_time_str(time_str):
-    """解析SRT时间戳为秒数"""
-    try:
-        hours, minutes, seconds = time_str.replace(',', '.').split(':')
-        return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
-    except Exception as e:
-        logger.error(f"解析时间戳失败: {time_str}, 错误: {str(e)}")
-        return 0.0
-
 @app.route('/view/<file_id>')
 def view_file(file_id):
     """查看字幕文件内容"""
@@ -1523,40 +2000,8 @@ def view_file(file_id):
             srt_content = f.read()
             
         # 解析SRT内容为字幕列表
-        subtitles = []
-        current_subtitle = {}
-        for line in srt_content.strip().split('\n'):
-            line = line.strip()
-            if not line:  # 空行表示一个字幕结束
-                if current_subtitle and 'id' in current_subtitle and 'time' in current_subtitle and 'text' in current_subtitle:
-                    # 解析时间轴
-                    time_parts = current_subtitle['time'].split(' --> ')
-                    if len(time_parts) == 2:
-                        start_time = parse_time_str(time_parts[0])
-                        end_time = parse_time_str(time_parts[1])
-                        current_subtitle['start'] = start_time
-                        current_subtitle['end'] = end_time
-                    subtitles.append(current_subtitle)
-                current_subtitle = {}
-            elif not current_subtitle:  # 字幕序号
-                current_subtitle = {'id': line}
-            elif 'time' not in current_subtitle:  # 时间轴
-                current_subtitle['time'] = line
-            elif 'text' not in current_subtitle:  # 字幕文本
-                current_subtitle['text'] = line
-            else:  # 多行字幕文本
-                current_subtitle['text'] += '\n' + line
-                
-        # 添加最后一个字幕
-        if current_subtitle and 'id' in current_subtitle and 'time' in current_subtitle and 'text' in current_subtitle:
-            time_parts = current_subtitle['time'].split(' --> ')
-            if len(time_parts) == 2:
-                start_time = parse_time_str(time_parts[0])
-                end_time = parse_time_str(time_parts[1])
-                current_subtitle['start'] = start_time
-                current_subtitle['end'] = end_time
-            subtitles.append(current_subtitle)
-            
+        subtitles = parse_srt_content(srt_content)
+        
         return render_template_string(
             HTML_TEMPLATE,
             filename=file_info['filename'],
@@ -1591,124 +2036,46 @@ def process_youtube():
             
         url = data['url']
         location = data.get('location', 'new')  # 获取location参数，默认为'new'
-        logger.info(f"处理YouTube URL: {url}, location: {location}")
+        tags_str = data.get('tags', '')
+        tags = [tag.strip() for tag in tags_str.split(',')] if tags_str else []
+        logger.info(f"处理YouTube URL: %s, location: %s, tags: %s", 
+                   url, location, json.dumps(tags, ensure_ascii=False))
         
+        # 先获取视频信息
+        video_info = get_youtube_info(url)
+        logger.info(f"获取到的视频信息: %s", 
+                   json.dumps(video_info, indent=2, ensure_ascii=False))
+        
+        if not video_info or not video_info.get('title'):
+            logger.error("无法获取视频信息")
+            return jsonify({"error": "Failed to get video info", "success": False}), 400
+            
         # 下载字幕
-        srt_content, video_info = download_youtube_subtitles(url)
-        if not srt_content:
-            # 如果没有字幕，尝试下载视频并转录
-            audio_path = download_video(url)
-            if not audio_path or not os.path.exists(audio_path):
-                return jsonify({"error": "无法下载视频或提取音频", "success": False}), 500
-                
-            # 使用FunASR转录
-            result = transcribe_audio(audio_path)
-            if not result:
-                return jsonify({"error": "转录失败", "success": False}), 500
-                
-            # 解析转录结果生成字幕
-            subtitles = parse_srt(result)
-            if not subtitles:
-                return jsonify({"error": "解析转录结果失败", "success": False}), 500
-                
-            # 生成SRT格式内容
-            srt_content = ""
-            for i, subtitle in enumerate(subtitles, 1):
-                start_time = format_time(subtitle['start'])
-                end_time = format_time(subtitle['start'] + subtitle['duration'])
-                srt_content += f"{i}\n{start_time} --> {end_time}\n{subtitle['text']}\n\n"
-            
-            # 保存SRT文件
-            title = video_info.get('title', '') if video_info else ''
-            if not title:
-                title = f"video_transcript_{os.path.splitext(os.path.basename(audio_path))[0]}"
-                
-            output_filename = sanitize_filename(f"{title}.srt")
-            output_filepath = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
-            with open(output_filepath, 'w', encoding='utf-8') as f:
-                f.write(srt_content)
-            
-            logger.info(f"转录结果已保存到: {output_filepath}")
-            
-            # 删除临时音频文件
-            try:
-                os.remove(audio_path)
-                logger.info(f"已删除临时文件: {audio_path}")
-            except Exception as e:
-                logger.warning(f"删除临时文件失败: {str(e)}")
-                
-            # 生成文件信息并保存
-            file_id = str(uuid.uuid4())
-            file_info = {
-                'id': file_id,
-                'filename': output_filename,
-                'path': output_filepath,
-                'url': f'/view/{file_id}',
-                'upload_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'show_timeline': True,
-                'source': 'transcription',
-                'video_info': video_info
-            }
-            files_info = load_files_info()
-            files_info[file_id] = file_info
-            save_files_info(files_info)
-            
-            # 发送到Readwise
-            try:
-                if video_info:
-                    save_to_readwise(
-                        title=video_info.get('title', 'Video Transcript'),
-                        content=srt_content,
-                        url=url,
-                        published_date=video_info.get('published_date'),
-                        author=video_info.get('uploader'),
-                        location=location
-                    )
-                    logger.info("成功发送转录内容到Readwise")
-            except Exception as e:
-                logger.error(f"发送转录内容到Readwise失败: {str(e)}")
-                
-            return jsonify({
-                'success': True,
-                'video_info': video_info,
-                'subtitle_content': srt_content,
-                'filename': file_info['filename'],
-                'view_url': file_info['url'],
-                'source': 'transcription'
-            })
-            
-        # 获取视频信息
-        if not video_info:
-            video_info = get_youtube_info(url)
-        
-        # 更新文件信息并生成网页
-        file_id = str(uuid.uuid4())
-        files_info = load_files_info()
+        srt_content = None
+        try:
+            srt_content, video_info = download_youtube_subtitles(url, video_info)
+            if srt_content:
+                # 验证字幕内容
+                is_valid, error_msg = validate_subtitle_content(srt_content)
+                if not is_valid:
+                    logger.error(f"字幕内容验证失败: {error_msg}")
+                    srt_content = None
+                else:
+                    # 清理字幕内容
+                    srt_content = clean_subtitle_content(srt_content)
+        except Exception as e:
+            logger.error(f"下载字幕失败: {str(e)}")
+            srt_content = None
         
         # 解析字幕内容为列表格式
-        subtitles_list = []
-        current_subtitle = {}
-        for line in srt_content.strip().split('\n'):
-            line = line.strip()
-            if not line:  # 空行表示一个字幕条目的结束
-                if current_subtitle:
-                    subtitles_list.append(current_subtitle)
-                    current_subtitle = {}
-            elif '-->' in line:  # 时间戳行
-                start, end = line.split(' --> ')
-                current_subtitle['start'] = parse_time_str(start)
-                current_subtitle['duration'] = parse_time_str(end) - parse_time_str(start)
-            elif current_subtitle.get('start') is not None:  # 文本行
-                current_subtitle['text'] = line
-        
-        # 添加最后一个字幕条目
-        if current_subtitle:
-            subtitles_list.append(current_subtitle)
-        
-        # 保存文件信息
-        title = video_info.get('title', '') if video_info else ''
+        subtitles = parse_srt_content(srt_content)
+        if not subtitles:
+            return jsonify({'error': '解析字幕失败'}), 500
+            
+        # 保存字幕文件
+        title = video_info.get('title', '')
         if not title:
-            title = f"youtube_video_{os.path.splitext(os.path.basename(url))[0]}"
+            title = f"{os.path.splitext(os.path.basename(url))[0]}"
                 
         output_filename = sanitize_filename(f"{title}.srt")
         output_filepath = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
@@ -1716,7 +2083,9 @@ def process_youtube():
             f.write(srt_content)
         
         # 生成文件信息并保存
-        file_info = {
+        file_id = str(uuid.uuid4())
+        files_info = load_files_info()
+        files_info[file_id] = {
             'id': file_id,
             'filename': output_filename,
             'path': output_filepath,
@@ -1726,39 +2095,82 @@ def process_youtube():
             'source': 'subtitle',
             'video_info': video_info
         }
-        files_info[file_id] = file_info
         save_files_info(files_info)
         
         # 发送到Readwise
         try:
-            if video_info:
-                save_to_readwise(
-                    title=video_info.get('title', 'YouTube Video Transcript'),
-                    content='\n'.join(s['text'] for s in subtitles_list),
-                    url=url,
-                    published_date=video_info.get('published_date'),
-                    author=video_info.get('uploader'),
-                    location=location
-                )
+            # 将字幕列表转换为纯文本
+            subtitle_text = []
+            for subtitle in subtitles:
+                if 'text' in subtitle:
+                    subtitle_text.append(subtitle['text'])
+            content = '\n'.join(subtitle_text)
+            
+            # 记录原始内容长度
+            logger.info(f"原始内容长度: {len(content)}")
+            logger.info(f"作者信息: {video_info.get('uploader')}")
+            
+            # 将内容转换为HTML格式
+            content_with_br = content.replace('\n', '<br>')
+            html_content = f'<div class="content">{content_with_br}</div>'
+            
+            # 准备请求数据
+            data = {
+                "url": url,
+                "title": video_info.get('title', 'YouTube Video Transcript'),
+                "author": video_info.get('uploader'),
+                "html": html_content,
+                "should_clean_html": True,
+                "category": "article",
+                "location": location,
+                "saved_using": "youtube-subtitle-processor",
+                "tags": tags
+            }
+            
+            # 添加发布日期（如果有）
+            if video_info.get('published_date'):
+                data["published_date"] = video_info['published_date']
+                logger.info(f"添加发布日期: {video_info['published_date']}")
+            
+            # 记录发送到Readwise的数据
+            logger_data = {**data}
+            logger_data['html'] = logger_data['html'][:200] + '...' if len(logger_data['html']) > 200 else logger_data['html']
+            logger.info(f"发送到Readwise的数据: {json.dumps(logger_data, ensure_ascii=False)}")
+            
+            # 发送请求
+            response = requests.post(
+                'https://readwise.io/api/v3/save/',
+                headers={
+                    'Authorization': f'Token {os.getenv("READWISE_API_TOKEN")}',
+                    'Content-Type': 'application/json'
+                },
+                json=data
+            )
+            
+            # 记录响应内容
+            logger.info(f"Readwise响应状态码: {response.status_code}")
+            logger.info(f"Readwise响应内容: {response.text}")
+            
+            if response.status_code not in [200, 201]:
+                logger.error(f"发送到Readwise失败: {response.status_code} - {response.text}")
+                return jsonify({"error": "Failed to send to Readwise", "success": False}), 500
+            else:
                 logger.info("成功发送到Readwise")
+                return jsonify({
+                    "success": True,
+                    "srt_content": srt_content,
+                    "filename": output_filename,
+                    "view_url": f'/view/{file_id}'
+                })
+            
         except Exception as e:
             logger.error(f"发送到Readwise失败: {str(e)}")
-        
-        # 返回结果
-        response = {
-            "success": True,
-            "srt_content": srt_content,
-            "filename": file_info['filename'],
-            "view_url": file_info['url']
-        }
-        if video_info:
-            response.update(video_info)
-        
-        return jsonify(response)
+            logger.exception("详细错误信息:")
+            return jsonify({"error": "Failed to send to Readwise", "success": False}), 500
             
     except Exception as e:
         logger.error(f"处理YouTube URL时出错: {str(e)}")
-        logger.exception(e)  # 输出完整的错误堆栈
+        logger.exception("详细错误信息:")
         return jsonify({"error": str(e), "success": False}), 500
 
 @app.route('/process', methods=['POST'])
@@ -1773,7 +2185,8 @@ def process_video():
         location = data.get('location', 'new')
         
         # Log the request with location and tags
-        logger.info(f'处理{platform}URL: {url}, location: {location}, tags: {tags}')
+        logger.info(f'处理%s URL: %s, location: %s, tags: %s', 
+                   platform, url, location, json.dumps(tags, ensure_ascii=False))
         
         if not url or not platform or not video_id:
             return jsonify({'error': '缺少必要参数'}), 400
@@ -1870,15 +2283,32 @@ def process_video():
             
         # 如果有字幕，根据平台确定字幕格式并转换
         if platform == 'youtube':
-            srt_content = convert_to_srt(subtitle_content, 'json3')
+            # 检查内容是否已经是SRT格式
+            if subtitle_content and subtitle_content.strip().split('\n')[0].isdigit():
+                logger.info("字幕内容已经是SRT格式")
+                srt_content = subtitle_content
+            else:
+                logger.info("尝试将字幕转换为SRT格式")
+                srt_content = convert_to_srt(subtitle_content, 'json3')
         elif platform == 'bilibili':
-            srt_content = convert_to_srt(subtitle_content, 'json3')
+            # 检查内容是否已经是SRT格式
+            if subtitle_content and subtitle_content.strip().split('\n')[0].isdigit():
+                logger.info("字幕内容已经是SRT格式")
+                srt_content = subtitle_content
+            else:
+                logger.info("尝试将字幕转换为SRT格式")
+                srt_content = convert_to_srt(subtitle_content, 'json3')
         else:
             return jsonify({'error': '不支持的平台'}), 400
             
         if not srt_content:
-            return jsonify({'error': '字幕转换失败'}), 400
-        
+            return jsonify({'error': '转换字幕失败'}), 500
+            
+        # 解析字幕内容为列表格式
+        subtitles = parse_srt_content(srt_content)
+        if not subtitles:
+            return jsonify({'error': '解析字幕失败'}), 500
+            
         # 保存字幕文件
         title = video_info.get('title', '') if video_info else ''
         if not title:
@@ -1888,6 +2318,8 @@ def process_video():
         output_filepath = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
         with open(output_filepath, 'w', encoding='utf-8') as f:
             f.write(srt_content)
+            
+        logger.info(f"字幕文件已保存到: {output_filepath}")
         
         # 生成文件信息并保存
         file_id = str(uuid.uuid4())
@@ -1904,6 +2336,43 @@ def process_video():
         files_info = load_files_info()
         files_info[file_id] = file_info
         save_files_info(files_info)
+        
+        # 发送到Readwise
+        try:
+            # 将字幕列表转换为纯文本
+            subtitle_text = []
+            for subtitle in subtitles:
+                if 'text' in subtitle:
+                    subtitle_text.append(subtitle['text'])
+            content = '\n'.join(subtitle_text)
+            
+            # 准备视频信息
+            video_title = video_info.get('title', 'Video Transcript') if video_info else title
+            video_url = url
+            video_author = video_info.get('uploader') if video_info else None
+            video_date = video_info.get('published_date') if video_info else None
+            
+            logger.info(f"正在发送内容到Readwise: {video_title}")
+            
+            # 发送到Readwise
+            success = save_to_readwise(
+                title=video_title,
+                content=content,
+                url=video_url,
+                published_date=video_date,
+                author=video_author,
+                location=location,
+                tags=tags
+            )
+            
+            if success:
+                logger.info("成功发送到Readwise")
+            else:
+                logger.error("发送到Readwise失败")
+            
+        except Exception as e:
+            logger.error(f"发送到Readwise失败: {str(e)}")
+            logger.exception("详细错误信息:")
         
         # 返回结果
         return jsonify({
