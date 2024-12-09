@@ -15,6 +15,11 @@ RUN echo "deb https://mirrors.aliyun.com/debian/ bullseye main non-free contrib"
     curl \
     iputils-ping \
     net-tools \
+    firefox-esr \
+    x11vnc \
+    xvfb \
+    openbox \
+    supervisor \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -29,7 +34,17 @@ COPY app/* ./
 
 # 创建必要的目录
 RUN mkdir -p uploads videos
+RUN mkdir -p /root/.mozilla/firefox/
 
+# 设置VNC密码
+RUN mkdir -p /root/.vnc && x11vnc -storepasswd password /root/.vnc/passwd
+
+# 配置supervisor
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# 暴露端口
 EXPOSE 5000
+EXPOSE 5900
 
-CMD ["python", "app.py"]
+# 使用supervisor启动所有服务
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

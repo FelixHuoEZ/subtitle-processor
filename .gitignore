@@ -8,6 +8,7 @@ uploads/
 videos/
 models/
 outputs/
+firefox_profile/
 
 # Python
 __pycache__/

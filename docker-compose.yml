@@ -16,16 +16,19 @@ services:
               capabilities: [gpu]
     ports:
       - "5000:5000"
+      - "5001:5900"  # VNC 服务端口
     volumes:
       # - /share/docker/subtitle-processor/uploads:/app/uploads
       # - /share/docker/subtitle-processor/videos:/app/videos
       # - /share/docker/subtitle-processor/outputs:/app/outputs
       # - /share/docker/subtitle-processor/config:/app/config
+      # - /share/docker/subtitle-processor/firefox_profile:/root/.mozilla/firefox  # Firefox 配置目录
       - ./uploads:/app/uploads
       - ./videos:/app/videos
       - ./outputs:/app/outputs
       - ./config:/app/config
       - ./models:/app/models
+      - ./firefox_profile:/root/.mozilla/firefox  # Firefox 配置目录
     environment:
       - TZ=Asia/Shanghai
       - TRANSCRIBE_CONFIG=/app/config/transcribe_servers.json

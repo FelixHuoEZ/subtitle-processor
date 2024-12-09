@@ -1154,51 +1154,63 @@ def get_youtube_info(url):
     """获取YouTube视频信息"""
     try:
         ydl_opts = {
-            'quiet': True,
+            'format': 'best',
+            'writesubtitles': True,
+            'writeautomaticsub': True,
             'no_warnings': True,
             'extract_flat': False
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
-            # 详细记录所有可能包含日期的字段
-            date_fields = {
-                'upload_date': info.get('upload_date'),
-                'release_date': info.get('release_date'),
-                'modified_date': info.get('modified_date'),
-                'timestamp': info.get('timestamp')
-            }
-            logger.info(f"YouTube视频日期相关字段: {json.dumps(date_fields, indent=2, ensure_ascii=False)}")
-            
-            # 尝试多个日期字段
-            published_date = None
-            if info.get('upload_date'):
-                published_date = f"{info['upload_date'][:4]}-{info['upload_date'][4:6]}-{info['upload_date'][6:]}T00:00:00Z"
-            elif info.get('release_date'):
-                published_date = info['release_date']
-            elif info.get('modified_date'):
-                published_date = info['modified_date']
-            elif info.get('timestamp'):
-                from datetime import datetime
-                published_date = datetime.fromtimestamp(info['timestamp']).strftime('%Y-%m-%dT%H:%M:%SZ')
-            
-            logger.info(f"最终确定的发布日期: {published_date}")
-            
-            video_info = {
-                'title': info.get('title', ''),
-                'published_date': published_date,
-                'uploader': info.get('uploader', ''),
-                # 添加字幕和语言相关的信息
-                'subtitles': info.get('subtitles', {}),  # 手动上传的字幕
-                'automatic_captions': info.get('automatic_captions', {}),  # 自动生成的字幕
-                'language': info.get('language'),  # 视频语言
-                'description': info.get('description', '')  # 视频描述，可能包含语言信息
-            }
-            
-            # 记录完整的返回信息
-            logger.info(f"返回的视频信息: {json.dumps(video_info, indent=2, ensure_ascii=False)}")
-            
-            return video_info
+        
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as e:
+            if "Private video" in str(e):
+                logger.info("检测到私有视频，尝试使用Firefox cookies")
+                ydl_opts['cookies_from_browser'] = 'firefox'
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+            else:
+                raise
+        
+        # 详细记录所有可能包含日期的字段
+        date_fields = {
+            'upload_date': info.get('upload_date'),
+            'release_date': info.get('release_date'),
+            'modified_date': info.get('modified_date'),
+            'timestamp': info.get('timestamp')
+        }
+        logger.info(f"YouTube视频日期相关字段: {json.dumps(date_fields, indent=2, ensure_ascii=False)}")
+        
+        # 尝试多个日期字段
+        published_date = None
+        if info.get('upload_date'):
+            published_date = f"{info['upload_date'][:4]}-{info['upload_date'][4:6]}-{info['upload_date'][6:]}T00:00:00Z"
+        elif info.get('release_date'):
+            published_date = info['release_date']
+        elif info.get('modified_date'):
+            published_date = info['modified_date']
+        elif info.get('timestamp'):
+            from datetime import datetime
+            published_date = datetime.fromtimestamp(info['timestamp']).strftime('%Y-%m-%dT%H:%M:%SZ')
+        
+        logger.info(f"最终确定的发布日期: {published_date}")
+        
+        video_info = {
+            'title': info.get('title', ''),
+            'published_date': published_date,
+            'uploader': info.get('uploader', ''),
+            # 添加字幕和语言相关的信息
+            'subtitles': info.get('subtitles', {}),  # 手动上传的字幕
+            'automatic_captions': info.get('automatic_captions', {}),  # 自动生成的字幕
+            'language': info.get('language'),  # 视频语言
+            'description': info.get('description', '')  # 视频描述，可能包含语言信息
+        }
+        
+        # 记录完整的返回信息
+        logger.info(f"返回的视频信息: {json.dumps(video_info, indent=2, ensure_ascii=False)}")
+        
+        return video_info
             
     except Exception as e:
         logger.error(f"获取YouTube视频信息失败: {str(e)}")
@@ -1921,21 +1933,21 @@ def process_subtitle_content(content, is_funasr=False):
                 i += 1
                 continue
                 
-            # 处理文本行
-            if line:
-                current_block.append(line)
-            elif current_block:  # 遇到空行，处理当前文本块
-                if is_funasr:
-                    # FunASR转换的字幕：合并所有文本，不保留换行
-                    text_blocks.append(' '.join(current_block))
-                else:
-                    # 直接提取的字幕：保留原有换行
-                    text_blocks.append('\n'.join(current_block))
-                current_block = []
+            # 跳过空行
+            if not line:
+                if current_block:
+                    if is_funasr:
+                        # FunASR转换的字幕：合并所有文本，不保留换行
+                        text_blocks.append(' '.join(current_block))
+                    else:
+                        # 直接提取的字幕：保留原有换行
+                        text_blocks.append('\n'.join(current_block))
+                    current_block = []
+                continue
+                
+            current_block.append(line)
             
-            i += 1
-        
-        # 处理最后的文本块
+        # 处理最后一段文本
         if current_block:
             if is_funasr:
                 text_blocks.append(' '.join(current_block))
@@ -2615,4 +2627,4 @@ def get_subtitle_strategy(language, info):
 
 if __name__ == '__main__':
     logger.info("启动Flask服务器")
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000, debug=True)
