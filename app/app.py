@@ -1933,9 +1933,11 @@ def process_subtitle_content(content, is_funasr=False):
                 i += 1
                 continue
                 
-            # 跳过空行
-            if not line:
-                if current_block:
+            # 处理文本行
+            if line:
+                current_block.append(line)
+            else:  # 遇到空行，处理当前文本块
+                if current_block:  # 只有当前块不为空时才处理
                     if is_funasr:
                         # FunASR转换的字幕：合并所有文本，不保留换行
                         text_blocks.append(' '.join(current_block))
@@ -1943,11 +1945,10 @@ def process_subtitle_content(content, is_funasr=False):
                         # 直接提取的字幕：保留原有换行
                         text_blocks.append('\n'.join(current_block))
                     current_block = []
-                continue
-                
-            current_block.append(line)
             
-        # 处理最后一段文本
+            i += 1
+        
+        # 处理最后的文本块
         if current_block:
             if is_funasr:
                 text_blocks.append(' '.join(current_block))
