@@ -22,6 +22,7 @@ services:
       # - /share/docker/subtitle-processor/videos:/app/videos
       # - /share/docker/subtitle-processor/outputs:/app/outputs
       # - /share/docker/subtitle-processor/config:/app/config
+      # - /share/docker/subtitle-processor/models:/app/models
       # - /share/docker/subtitle-processor/firefox_profile:/root/.mozilla/firefox  # Firefox 配置目录
       - ./uploads:/app/uploads
       - ./videos:/app/videos
