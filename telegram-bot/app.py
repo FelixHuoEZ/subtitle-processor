@@ -15,6 +15,7 @@ import time
 import datetime
 import pytz
 import re
+import yaml
 
 # 配置日志
 logging.basicConfig(
@@ -30,25 +31,31 @@ logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('telegram').setLevel(logging.WARNING)
 logging.getLogger('httpcore').setLevel(logging.WARNING)
 
-# 获取环境变量
-TELEGRAM_TOKEN_FILE = os.getenv('TELEGRAM_TOKEN_FILE')
-TELEGRAM_TOKEN = None
-
-if TELEGRAM_TOKEN_FILE and os.path.exists(TELEGRAM_TOKEN_FILE):
+def load_config():
+    """加载YAML配置文件"""
+    config_path = os.getenv('CONFIG_PATH', 'config/config.yml')
     try:
-        with open(TELEGRAM_TOKEN_FILE, 'r') as f:
-            TELEGRAM_TOKEN = f.read().strip()
-        logger.info("成功从文件读取Telegram Token")
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f)
     except Exception as e:
-        logger.error(f"读取Telegram Token文件失败: {str(e)}")
-else:
-    # 兼容旧的环境变量方式
-    TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+        logger.error(f"加载配置文件失败: {str(e)}")
+        return None
 
+# 加载配置
+config = load_config()
+if not config:
+    logger.error("配置加载失败，使用空配置")
+    config = {}
+
+# 获取配置
+TELEGRAM_TOKEN = config.get('tokens', {}).get('telegram')
 SUBTITLE_PROCESSOR_URL = os.getenv('SUBTITLE_PROCESSOR_URL', 'http://subtitle-processor:5000')
-logger.info(f"使用的SUBTITLE_PROCESSOR_URL: {SUBTITLE_PROCESSOR_URL}")
+SERVER_DOMAIN = config.get('servers', {}).get('domain')
 
-# 配置代理
+logger.info(f"使用的SUBTITLE_PROCESSOR_URL: {SUBTITLE_PROCESSOR_URL}")
+logger.info(f"使用的SERVER_DOMAIN: {SERVER_DOMAIN}")
+
+# 获取环境变量
 PROXY = os.getenv('ALL_PROXY') or os.getenv('HTTPS_PROXY') or os.getenv('HTTP_PROXY')
 if PROXY:
     logger.info(f"Using proxy: {PROXY}")

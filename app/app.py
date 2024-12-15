@@ -23,6 +23,7 @@ import time
 import math
 from pydub import AudioSegment
 import wave
+import yaml
 
 # 配置日志格式和级别
 class ColoredFormatter(logging.Formatter):
@@ -74,6 +75,106 @@ file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(mes
 # 添加处理器到logger
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
+
+# 配置文件路径
+CONTAINER_CONFIG_PATH = '/app/config/config.yml'
+LOCAL_CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config')
+LOCAL_CONFIG_PATH = os.path.join(LOCAL_CONFIG_DIR, 'config.yml')
+
+# 优先使用容器内配置路径
+CONFIG_PATH = CONTAINER_CONFIG_PATH if os.path.exists(CONTAINER_CONFIG_PATH) else LOCAL_CONFIG_PATH
+CONFIG_DIR = os.path.dirname(CONFIG_PATH)
+
+# 确保配置目录存在
+if not os.path.exists(CONFIG_DIR):
+    try:
+        os.makedirs(CONFIG_DIR)
+        logger.info(f"创建配置目录: {CONFIG_DIR}")
+    except Exception as e:
+        logger.error(f"创建配置目录失败: {str(e)}")
+
+logger.info(f"配置文件路径: {CONFIG_PATH}")
+
+# 获取配置值的辅助函数
+def get_config_value(key_path, default=None):
+    """从配置中获取值，支持点号分隔的路径，如 'tokens.openai.api_key'"""
+    try:
+        if not config:
+            logger.warning("配置对象为空")
+            return default
+            
+        value = config
+        keys = key_path.split('.')
+        for i, key in enumerate(keys):
+            if not isinstance(value, dict):
+                logger.warning(f"配置路径 {'.'.join(keys[:i])} 的值不是字典: {value}")
+                return default
+            if key not in value:
+                logger.warning(f"配置路径 {'.'.join(keys[:i+1])} 不存在")
+                return default
+            value = value[key]
+            
+        logger.debug(f"获取配置 {key_path}: {value}")
+        return value
+    except Exception as e:
+        logger.warning(f"获取配置 {key_path} 时出错: {str(e)}, 使用默认值: {default}")
+        return default
+
+def load_config():
+    """加载YAML配置文件"""
+    global config
+    try:
+        logger.info(f"尝试加载配置文件: {CONFIG_PATH}")
+        if not os.path.exists(CONFIG_PATH):
+            logger.error(f"配置文件不存在: {CONFIG_PATH}")
+            return {}
+            
+        # 检查文件权限
+        if not os.access(CONFIG_PATH, os.R_OK):
+            logger.error(f"配置文件无读取权限: {CONFIG_PATH}")
+            return {}
+        logger.info("配置文件可读")
+            
+        with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+            content = f.read()
+            logger.debug(f"配置文件内容:\n{content}")
+            try:
+                loaded_config = yaml.safe_load(content)
+                if not loaded_config:
+                    logger.error("配置文件为空或格式错误")
+                    return {}
+                if not isinstance(loaded_config, dict):
+                    logger.error(f"配置文件格式错误，应为字典，实际为: {type(loaded_config)}")
+                    return {}
+                logger.info("成功加载配置文件")
+                logger.debug(f"解析后的配置: {loaded_config}")
+                return loaded_config
+            except yaml.YAMLError as e:
+                logger.error(f"YAML解析错误: {str(e)}")
+                return {}
+    except Exception as e:
+        logger.error(f"加载配置文件失败: {str(e)}")
+        return {}
+
+# 加载配置
+config = load_config()
+if not config:
+    logger.error("配置加载失败，使用空配置")
+    config = {}
+else:
+    logger.info(f"配置加载成功，包含以下部分: {list(config.keys())}")
+    for section in config.keys():
+        logger.debug(f"配置部分 {section}: {config[section]}")
+
+# DeepLX API 配置
+DEEPLX_API_URL = get_config_value('deeplx.api_url', "http://deeplx:1188/translate")
+DEEPLX_API_V2_URL = get_config_value('deeplx.api_v2_url', "http://deeplx:1188/v2/translate")
+
+# 翻译相关配置
+TRANSLATE_MAX_RETRIES = get_config_value('translation.max_retries', 3)
+TRANSLATE_BASE_DELAY = get_config_value('translation.base_delay', 3)
+TRANSLATE_REQUEST_INTERVAL = get_config_value('translation.request_interval', 1.0)
+TRANSLATE_TARGET_LENGTH = get_config_value('translation.chunk_size', 2000)
 
 # 创建Flask应用
 app = Flask(__name__)
@@ -515,7 +616,15 @@ def download_youtube_subtitles(url, video_info=None, lang_priority=None):
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 video_info = ydl.extract_info(url, download=False)
-                logger.info(f"获取到的视频信息: {json.dumps({k: v for k, v in video_info.items() if k in ['title', 'uploader', 'upload_date', 'subtitles', 'automatic_captions']}, ensure_ascii=False)}")
+                # 创建简化的信息对象，只包含必要字段
+                simplified_info = {
+                    'title': video_info.get('title', ''),
+                    'uploader': video_info.get('uploader', ''),
+                    'upload_date': video_info.get('upload_date', ''),
+                    'subtitles': list(video_info.get('subtitles', {}).keys()),
+                    'automatic_captions': list(video_info.get('automatic_captions', {}).keys())
+                }
+                logger.info(f"获取到的视频信息: {json.dumps(simplified_info, ensure_ascii=False)}")
         
         # 使用提供的语言优先级或默认值
         if lang_priority:
@@ -558,33 +667,43 @@ def download_youtube_subtitles(url, video_info=None, lang_priority=None):
         # 如果没有找到手动上传的字幕，检查自动生成的字幕
         if not subtitle_url:
             for lang in lang_priority:
-                if lang in auto_captions:
-                    formats = auto_captions[lang]
-                    # 优先选择srt格式
-                    for fmt in formats:
-                        if fmt.get('ext') == 'srt':
-                            subtitle_url = fmt['url']
-                            subtitle_lang = lang
-                            logger.info(f"找到自动生成的{lang}字幕，格式为srt")
-                            break
-                    # 如果没有srt格式，使用第一个可用格式
-                    if not subtitle_url and formats:
-                        subtitle_url = formats[0]['url']
-                        subtitle_lang = lang
-                        logger.info(f"找到自动生成的{lang}字幕，格式为{formats[0].get('ext')}")
-                    if subtitle_url:
-                        break
-        
-        if not subtitle_url:
-            logger.info("未找到首选语言的字幕文件")
-            return None, video_info
-        
+                # 检查原始语言和翻译后的语言
+                check_langs = [lang]
+                if lang == 'en':
+                    check_langs.append('en-orig')
+                
+                for check_lang in check_langs:
+                    if check_lang in auto_captions:
+                        formats = auto_captions[check_lang]
+                        # 优先选择json3格式，因为它包含完整的字幕信息
+                        for fmt in formats:
+                            if fmt.get('ext') == 'json3':
+                                subtitle_url = fmt['url']
+                                subtitle_lang = check_lang
+                                logger.info(f"找到自动生成的{check_lang}字幕，格式为json3")
+                                break
+                        # 如果没有json3格式，尝试其他格式（按优先级）
+                        if not subtitle_url:
+                            preferred_formats = ['vtt', 'ttml', 'srv3', 'srv2', 'srv1']
+                            for pref_fmt in preferred_formats:
+                                for fmt in formats:
+                                    if fmt.get('ext') == pref_fmt:
+                                        subtitle_url = fmt['url']
+                                        subtitle_lang = check_lang
+                                        logger.info(f"找到自动生成的{check_lang}字幕，格式为{pref_fmt}")
+                                        break
+                            if subtitle_url:
+                                break
+            if not subtitle_url:
+                logger.info("未找到首选语言的字幕文件")
+                return None
+            
         # 下载字幕
         logger.info(f"开始下载字幕: {subtitle_url}")
         response = requests.get(subtitle_url)
         if response.status_code != 200:
             logger.error(f"下载字幕失败: {response.status_code}")
-            return None, video_info
+            return None
         
         # 检测并处理文件编码
         content = response.content
@@ -1129,13 +1248,21 @@ def format_time(seconds):
 def parse_time(time_str):
     """将 HH:MM:SS,mmm 格式时间转换为秒数"""
     try:
-        h, m, s = time_str.replace(',', '.').split(':')
-        return float(h) * 3600 + float(m) * 60 + float(s)
-    except:
-        return 0
+        # 处理毫秒
+        if ',' in time_str:
+            time_str = time_str.replace(',', '.')
+        
+        # 分离时、分、秒
+        hours, minutes, seconds = time_str.split(':')
+        total_seconds = float(hours) * 3600 + float(minutes) * 60 + float(seconds)
+        return total_seconds
+        
+    except Exception as e:
+        logger.error(f"解析时间字符串出错: {str(e)}, 时间字符串: {time_str}")
+        return 0.0
 
 def convert_youtube_url(url):
-    """将YouTube URL转换为Gauss Surf格式"""
+    """将YouTube URL转换为自定义domain"""
     try:
         # 处理不同格式的YouTube URL
         if 'youtu.be/' in url:
@@ -1145,7 +1272,9 @@ def convert_youtube_url(url):
         else:
             video_id = url  # 假设直接传入了video_id
 
-        return f"http://read.gauss.surf/youtube/{video_id}"
+        # 从配置中获取视频域名
+        video_domain = get_config_value('servers.video_domain')
+        return f"{video_domain}/youtube/{video_id}"
     except Exception as e:
         logger.error(f"转换YouTube URL时出错: {str(e)}")
         return url
@@ -1153,64 +1282,69 @@ def convert_youtube_url(url):
 def get_youtube_info(url):
     """获取YouTube视频信息"""
     try:
+        # 自定义日志处理器
+        class QuietLogger:
+            def debug(self, msg):
+                # 忽略调试信息
+                pass
+            def warning(self, msg):
+                logger.warning(msg)
+            def error(self, msg):
+                logger.error(msg)
+        
         ydl_opts = {
-            'format': 'best',
-            'writesubtitles': True,
-            'writeautomaticsub': True,
-            'no_warnings': True,
-            'extract_flat': False
+            'logger': QuietLogger(),  # 使用自定义日志处理器
+            'quiet': True,  # 减少输出
+            'no_warnings': True,  # 不显示警告
         }
         
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-        except Exception as e:
-            if "Private video" in str(e):
-                logger.info("检测到私有视频，尝试使用Firefox cookies")
-                ydl_opts['cookies_from_browser'] = 'firefox'
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-            else:
-                raise
-        
-        # 详细记录所有可能包含日期的字段
-        date_fields = {
-            'upload_date': info.get('upload_date'),
-            'release_date': info.get('release_date'),
-            'modified_date': info.get('modified_date'),
-            'timestamp': info.get('timestamp')
-        }
-        logger.info(f"YouTube视频日期相关字段: {json.dumps(date_fields, indent=2, ensure_ascii=False)}")
-        
-        # 尝试多个日期字段
-        published_date = None
-        if info.get('upload_date'):
-            published_date = f"{info['upload_date'][:4]}-{info['upload_date'][4:6]}-{info['upload_date'][6:]}T00:00:00Z"
-        elif info.get('release_date'):
-            published_date = info['release_date']
-        elif info.get('modified_date'):
-            published_date = info['modified_date']
-        elif info.get('timestamp'):
-            from datetime import datetime
-            published_date = datetime.fromtimestamp(info['timestamp']).strftime('%Y-%m-%dT%H:%M:%SZ')
-        
-        logger.info(f"最终确定的发布日期: {published_date}")
-        
-        video_info = {
-            'title': info.get('title', ''),
-            'published_date': published_date,
-            'uploader': info.get('uploader', ''),
-            # 添加字幕和语言相关的信息
-            'subtitles': info.get('subtitles', {}),  # 手动上传的字幕
-            'automatic_captions': info.get('automatic_captions', {}),  # 自动生成的字幕
-            'language': info.get('language'),  # 视频语言
-            'description': info.get('description', '')  # 视频描述，可能包含语言信息
-        }
-        
-        # 记录完整的返回信息
-        logger.info(f"返回的视频信息: {json.dumps(video_info, indent=2, ensure_ascii=False)}")
-        
-        return video_info
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            # 详细记录所有可能包含日期的字段
+            date_fields = {
+                'upload_date': info.get('upload_date'),
+                'release_date': info.get('release_date'),
+                'modified_date': info.get('modified_date'),
+                'timestamp': info.get('timestamp')
+            }
+            logger.info(f"YouTube视频日期相关字段: {json.dumps(date_fields, indent=2, ensure_ascii=False)}")
+            
+            # 尝试多个日期字段
+            published_date = None
+            if info.get('upload_date'):
+                published_date = f"{info['upload_date'][:4]}-{info['upload_date'][4:6]}-{info['upload_date'][6:]}T00:00:00Z"
+            elif info.get('release_date'):
+                published_date = info['release_date']
+            elif info.get('modified_date'):
+                published_date = info['modified_date']
+            elif info.get('timestamp'):
+                from datetime import datetime
+                published_date = datetime.fromtimestamp(info['timestamp']).strftime('%Y-%m-%dT%H:%M:%SZ')
+            
+            logger.info(f"最终确定的发布日期: {published_date}")
+            
+            video_info = {
+                'title': info.get('title', ''),
+                'published_date': published_date,
+                'uploader': info.get('uploader', ''),
+                'subtitles': info.get('subtitles', {}),
+                'automatic_captions': info.get('automatic_captions', {}),
+                'language': info.get('language')
+            }
+            
+            # 记录简化的返回信息
+            simplified_info = {
+                'title': video_info['title'],
+                'uploader': video_info['uploader'],
+                'published_date': video_info['published_date'],
+                'language': video_info['language'],
+                'subtitles': list(video_info['subtitles'].keys()),
+                'automatic_captions': list(video_info['automatic_captions'].keys())
+            }
+            # logger.info(f"视频信息: {json.dumps(simplified_info, indent=2, ensure_ascii=False)}")
+            
+            return video_info
             
     except Exception as e:
         logger.error(f"获取YouTube视频信息失败: {str(e)}")
@@ -1252,7 +1386,10 @@ def get_bilibili_info(url):
             video_info = {
                 'title': info.get('title', ''),
                 'published_date': published_date,
-                'uploader': info.get('uploader', '')
+                'uploader': info.get('uploader', ''),
+                'subtitles': info.get('subtitles', {}),
+                'automatic_captions': info.get('automatic_captions', {}),
+                'language': info.get('language')
             }
             
             # 记录完整的返回信息
@@ -1337,32 +1474,64 @@ def download_bilibili_subtitles(url, video_info):
         raise
 
 def save_to_readwise(title, content, url=None, published_date=None, author=None, location='new', tags=None):
-    """保存内容到Readwise"""
+    """保存内容到Readwise
+    
+    Args:
+        title: 标题
+        content: 内容
+        url: 链接
+        published_date: 发布日期
+        author: 作者
+        location: 保存位置 ('new' 或 'later')
+        tags: 标签列表
+    """
     try:
         # 验证location参数
         valid_locations = ['new', 'later', 'archive', 'feed']
         if location not in valid_locations:
             logger.warning(f"无效的location值: {location}，使用默认值'new'")
             location = 'new'
+            
+        # 检查标题是否为英文
+        if is_english_title(title):
+            logger.info("检测到英文标题，开始翻译...")
+            translated_title = translate_text(title)
+            if translated_title and translated_title != title:
+                title = f"{title} | {translated_title}"
+                logger.info(f"标题已翻译: {title}")
+            
+        # 检查是否包含英文内容
+        has_english = any(c.isalpha() for c in content)
+        if has_english:
+            # 添加翻译
+            translated_content = translate_text(content)
+            content = f"{content}\n\n中文翻译：\n{translated_content}"
         
-        # 从文件读取token
-        token_file = os.getenv('READWISE_API_TOKEN_FILE', '/app/config/readwise_token.txt')
-        logger.info(f"尝试从文件读取Readwise token: {token_file}")
-        
-        # 如果默认路径不存在，尝试在项目根目录下的config目录查找
-        if not os.path.exists(token_file):
-            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            local_token_file = os.path.join(project_root, 'config', 'readwise_token.txt')
-            logger.info(f"默认token文件不存在，尝试从本地路径读取: {local_token_file}")
-            if os.path.exists(local_token_file):
-                token_file = local_token_file
-            else:
-                logger.error("未找到Readwise token文件")
+        # 优先从配置文件获取token
+        token = get_config_value('tokens.readwise')
+        if not token:
+            # 如果配置中没有token，从文件读取
+            token_file = os.getenv('READWISE_API_TOKEN_FILE', '/app/config/readwise_token.txt')
+            logger.info(f"配置中未找到token，尝试从文件读取: {token_file}")
+            
+            # 如果默认路径不存在，尝试在项目根目录下的config目录查找
+            if not os.path.exists(token_file):
+                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                local_token_file = os.path.join(project_root, 'config', 'readwise_token.txt')
+                logger.info(f"默认token文件不存在，尝试从本地路径读取: {local_token_file}")
+                if os.path.exists(local_token_file):
+                    token_file = local_token_file
+                else:
+                    logger.error("未找到Readwise token文件")
+                    return None
+                    
+            try:
+                with open(token_file, 'r', encoding='utf-8') as f:
+                    token = f.read().strip()
+            except Exception as e:
+                logger.error(f"读取Readwise token失败: {str(e)}")
                 return None
-            
-        with open(token_file, 'r') as f:
-            token = f.read().strip()
-            
+        
         if not token:
             logger.error("Readwise token为空")
             return None
@@ -1373,7 +1542,7 @@ def save_to_readwise(title, content, url=None, published_date=None, author=None,
             'Authorization': f'Token {token}',
             'Content-Type': 'application/json'
         }
-        
+
         # 转换YouTube URL
         if url:
             url = convert_youtube_url(url)
@@ -1392,14 +1561,13 @@ def save_to_readwise(title, content, url=None, published_date=None, author=None,
         html_content = f'<div class="content">{content_with_br}</div>'
 
         data = {
-            "url": url or "http://read.gauss.surf/youtube/unknown",
+            "url": url or f"{video_domain}/youtube/unknown",
             "title": title,
             "author": author,
             "html": html_content,
             "should_clean_html": True,
             "category": "article",
             "location": location,
-            "saved_using": "youtube-subtitle-processor",
             "tags": tags or []
         }
 
@@ -1762,29 +1930,32 @@ FILES_LIST_TEMPLATE = '''
 import json
 import os
 
+# 翻译文本长度限制
+TRANSLATE_MIN_LENGTH = 1600  # 最小字符数
+TRANSLATE_MAX_LENGTH = 2400  # 最大字符数
+TRANSLATE_TARGET_LENGTH = get_config_value('translation.chunk_size', 2000)  # 目标字符数
+
+# 重试配置
+TRANSLATE_MAX_RETRIES = get_config_value('translation.max_retries', 3)
+TRANSLATE_BASE_DELAY = get_config_value('translation.base_delay', 3)
+TRANSLATE_REQUEST_INTERVAL = get_config_value('translation.request_interval', 1.0)
+
 def load_transcribe_servers():
     """加载转录服务器配置"""
-    config_path = os.getenv('TRANSCRIBE_CONFIG', '/app/config/transcribe_servers.json')
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-            logger.info(f"已加载转录服务器配置: {len(config['servers'])} 个服务器")
-            return config['servers']
-    except Exception as e:
-        logger.error(f"加载转录服务器配置失败: {str(e)}")
-        # 使用默认配置
-        return [
-            {
-                "name": "local",
-                "url": os.getenv('LOCAL_TRANSCRIBE_URL', 'http://localhost:10095'),
-                "priority": 1
-            },
-            {
-                "name": "nas",
-                "url": os.getenv('NAS_TRANSCRIBE_URL', 'http://nas:10095'),
-                "priority": 2
-            }
-        ]
+    servers = get_config_value('servers.transcribe.servers', [])
+    if not servers:
+        # 如果yml中没有配置，尝试从backup文件加载
+        backup_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'transcribe_servers-backup.json')
+        try:
+            with open(backup_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                servers = data.get('servers', [])
+        except Exception as e:
+            logger.error(f"加载转录服务器配置失败: {str(e)}")
+            servers = []
+    
+    # 按优先级排序
+    return sorted(servers, key=lambda x: x.get('priority', 999))
 
 def get_available_transcribe_server():
     """获取可用的转录服务器"""
@@ -1889,12 +2060,14 @@ def sanitize_filename(filename):
         
     return clean_name
 
-def process_subtitle_content(content, is_funasr=False):
-    """处理字幕内容，移除序号和时间轴，根据来源处理换行
+def process_subtitle_content(content, is_funasr=False, translate=False):
+    """
+    处理字幕内容，移除序号和时间轴，根据来源处理换行
     
     Args:
         content: 字幕内容
         is_funasr: 是否是FunASR转换的字幕
+        translate: 是否需要翻译
     """
     try:
         if not content:
@@ -1933,11 +2106,9 @@ def process_subtitle_content(content, is_funasr=False):
                 i += 1
                 continue
                 
-            # 处理文本行
-            if line:
-                current_block.append(line)
-            else:  # 遇到空行，处理当前文本块
-                if current_block:  # 只有当前块不为空时才处理
+            # 跳过空行
+            if not line:
+                if current_block:
                     if is_funasr:
                         # FunASR转换的字幕：合并所有文本，不保留换行
                         text_blocks.append(' '.join(current_block))
@@ -1945,10 +2116,13 @@ def process_subtitle_content(content, is_funasr=False):
                         # 直接提取的字幕：保留原有换行
                         text_blocks.append('\n'.join(current_block))
                     current_block = []
+                i += 1
+                continue
             
+            current_block.append(line)
             i += 1
-        
-        # 处理最后的文本块
+            
+        # 处理最后一段文本
         if current_block:
             if is_funasr:
                 text_blocks.append(' '.join(current_block))
@@ -1960,21 +2134,345 @@ def process_subtitle_content(content, is_funasr=False):
             # FunASR转换的字幕：用空格连接所有块
             result = ' '.join(text_blocks)
         else:
-            # 直接提取的字幕：保留段落换行
+            # 直接提取的字幕：段落之间用两个换行符分隔
             result = '\n\n'.join(text_blocks)
-        
+            
         logger.info(f"字幕处理完成:")
         logger.info(f"- 移除了 {skipped_numbers} 个序号标记")
         logger.info(f"- 移除了 {skipped_timestamps} 个时间轴")
         logger.info(f"- 处理后文本长度: {len(result)}字符")
         logger.debug(f"处理后内容预览: {result[:200]}...")
         
+        if translate:
+            # 直接使用改进后的 translate_text 函数进行翻译
+            translated = translate_text(result)
+            if translated != result:  # 只有在翻译成功时才使用翻译结果
+                # 再次清理翻译后的文本
+                translated = re.sub(r'^\d+\s*$', '', translated, flags=re.MULTILINE)  # 移除序号行
+                translated = re.sub(r'^\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}\s*$', '', translated, flags=re.MULTILINE)  # 移除时间轴行
+                translated = re.sub(r'\n{3,}', '\n\n', translated)  # 移除多余的空行
+                translated = translated.strip()
+                result = f"{result}\n\n{translated}"
+            
         return result
             
     except Exception as e:
         logger.error(f"处理字幕内容时出错: {str(e)}")
         logger.error(f"错误的输入内容: {content}")
         raise
+
+def translate_text(text, source_lang='en', target_lang='zh'):
+    """翻译文本，首先尝试DeepLX，如果失败则使用OpenAI"""
+    if not text:
+        return text
+
+    logger.info("开始翻译文本...")
+    logger.info(f"原文前100个字符: {text[:100]}")
+    
+    try:
+        # 移除HTML标签，保留换行符
+        text = re.sub(r'<br\s*/?>', '\n', text)  # 将<br>转换为换行符
+        text = re.sub(r'<[^>]+>', '', text)  # 移除其他HTML标签
+        
+        # 将文本按照100-150字符分段
+        segments = []
+        current_pos = 0
+        text_length = len(text)
+        
+        while current_pos < text_length:
+            # 找到目标字符长度的位置
+            next_pos = min(current_pos + TRANSLATE_TARGET_LENGTH, text_length)
+            
+            # 如果不是文本末尾，查找最近的句子结束标记
+            if next_pos < text_length:
+                # 在目标范围内查找句子结束标记
+                for end_pos in range(next_pos, min(next_pos + (TRANSLATE_MAX_LENGTH - TRANSLATE_TARGET_LENGTH), text_length)):
+                    if text[end_pos] in '.!?。！？':
+                        next_pos = end_pos + 1
+                        break
+            
+            segment = text[current_pos:next_pos].strip()
+            if segment:
+                segments.append(segment)
+            current_pos = next_pos
+        
+        logger.info(f"分割完成，共 {len(segments)} 个文本段")
+        
+        translated_segments = []
+        last_request_time = 0
+        min_request_interval = TRANSLATE_REQUEST_INTERVAL  # 最小请求间隔（秒）
+        
+        for i, segment in enumerate(segments, 1):
+            if not segment.strip():
+                continue
+                
+            logger.debug(f"文本段[{i}]: {segment[:50]}...")
+            logger.debug(f"文本段长度: {len(segment)} 字符")
+            
+            # 控制请求频率
+            current_time = time.time()
+            time_since_last_request = current_time - last_request_time
+            if time_since_last_request < min_request_interval:
+                time.sleep(min_request_interval - time_since_last_request)
+            
+            # 尝试翻译，最多重试3次
+            for attempt in range(TRANSLATE_MAX_RETRIES):
+                try:
+                    if attempt > 0:
+                        # 503错误时使用更长的等待时间
+                        delay = (attempt + 1) * TRANSLATE_BASE_DELAY  # 3秒、6秒、9秒
+                        logger.info(f"第 {attempt + 1} 次重试，等待 {delay} 秒...")
+                        time.sleep(delay)
+                    
+                    translated = _translate_with_retry(segment, source_lang, target_lang)
+                    translated_segments.append(translated)
+                    last_request_time = time.time()
+                    break
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.error(f"翻译失败 (尝试 {attempt+1}/{TRANSLATE_MAX_RETRIES}): {error_msg}")
+                    if attempt == TRANSLATE_MAX_RETRIES - 1:  # 最后一次尝试失败
+                        translated_segments.append(segment)  # 使用原文
+                        logger.warning(f"翻译失败{TRANSLATE_MAX_RETRIES}次，使用原文: {segment[:50]}...")
+                
+            logger.info(f"翻译进度: {i}/{len(segments)}")
+        
+        # 合并翻译结果
+        translated_text = " ".join(translated_segments)
+        
+        # 记录翻译后的前100个字符
+        logger.info(f"翻译后前100个字符: {translated_text[:100]}")
+        
+        return translated_text
+            
+    except Exception as e:
+        logger.error(f"翻译过程出错: {str(e)}")
+        logger.error(traceback.format_exc())
+        return text  # 出错时返回原文
+
+def _translate_with_retry(text, source_lang='en', target_lang='zh'):
+    """
+    带重试机制的翻译函数，支持DeepLX和OpenAI
+    每个接口会重试到最大次数后，再切换到下一个接口
+    """
+    # 获取翻译服务配置
+    services = get_config_value('translation.services', [
+        {'name': 'deeplx_v2', 'enabled': True, 'priority': 1},
+        {'name': 'openai', 'enabled': True, 'priority': 2},
+        {'name': 'deeplx', 'enabled': True, 'priority': 3}
+    ])
+    
+    # 按优先级排序服务
+    services.sort(key=lambda x: x.get('priority', 999))
+    enabled_services = [s['name'] for s in services if s.get('enabled', True)]
+    
+    # 创建服务配置字典，方便后续查找
+    services_dict = {s['name']: s for s in services if s.get('enabled', True)}
+    
+    logger.info(f"可用翻译服务（按优先级）: {enabled_services}")
+    
+    TRANSLATE_MAX_RETRIES = get_config_value('translation.max_retries', 3)
+    TRANSLATE_BASE_DELAY = get_config_value('translation.base_delay', 3)
+    
+    last_error = None
+    
+    # 遍历所有启用的服务
+    for service in enabled_services:
+        logger.info(f"尝试使用 {service} 进行翻译")
+        service_success = False
+        
+        # 对每个服务进行最大重试次数的尝试
+        for attempt in range(TRANSLATE_MAX_RETRIES):
+            try:
+                if attempt > 0:
+                    # 503错误时使用更长的等待时间
+                    delay = (attempt + 1) * TRANSLATE_BASE_DELAY  # 3秒、6秒、9秒
+                    logger.info(f"第 {attempt + 1} 次重试，等待 {delay} 秒...")
+                    time.sleep(delay)
+                
+                # OpenAI服务的处理
+                if service == "openai":
+                    openai_configs = get_config_value('tokens.openai', [])
+                    for config in openai_configs:
+                        logger.info(f"尝试使用OpenAI配置: {config.get('name', 'unnamed')}")
+                        translation = translate_with_openai(text, target_lang, config)
+                        if translation:
+                            return translation
+                    continue
+                
+                # 指定OpenAI配置的处理
+                elif service.startswith("openai_"):
+                    config_name = services_dict[service].get('config_name')
+                    if not config_name:
+                        logger.warning(f"服务 {service} 未指定config_name，跳过")
+                        continue
+                        
+                    openai_configs = get_config_value('tokens.openai', [])
+                    config = next((c for c in openai_configs if c.get('name') == config_name), None)
+                    if not config:
+                        logger.warning(f"未找到名为 {config_name} 的OpenAI配置，跳过")
+                        continue
+                        
+                    logger.info(f"使用OpenAI配置: {config_name}")
+                    translation = translate_with_openai(text, target_lang, config)
+                    if translation:
+                        return translation
+                    continue
+                
+                # DeepL V2服务的处理
+                elif service == "deeplx_v2":
+                    api_url = get_config_value('deeplx.api_v2_url', 'http://deeplx:1188/v2/translate')
+                    lang_map = {
+                        'zh': 'zh', 'en': 'en', 'ja': 'ja', 'ko': 'ko',
+                        'fr': 'fr', 'de': 'de', 'es': 'es', 'pt': 'pt',
+                        'it': 'it', 'nl': 'nl', 'pl': 'pl', 'ru': 'ru',
+                    }
+                    source_lang_code = lang_map.get(source_lang, source_lang.lower())
+                    target_lang_code = lang_map.get(target_lang, target_lang.lower())
+                    
+                    v2_data = {
+                        "text": text,
+                        "source_lang": source_lang_code,
+                        "target_lang": target_lang_code
+                    }
+                    logger.info(f"发送请求到DeepLX V2: {api_url}")
+                    logger.debug(f"请求数据: {json.dumps(v2_data, ensure_ascii=False)}")
+                    
+                    api_key = get_config_value('tokens.deepl', '')
+                    headers = {
+                        'Content-Type': 'application/json'
+                    }
+                    if api_key:
+                        headers['Authorization'] = f'DeepL-Auth-Key {api_key}'
+                    
+                    response = requests.post(
+                        api_url,
+                        json=v2_data,
+                        headers=headers,
+                        timeout=10
+                    )
+                
+                # DeepL V1服务的处理
+                elif service == "deeplx":
+                    api_url = get_config_value('deeplx.api_url', 'http://deeplx:1188/translate')
+                    v1_data = {
+                        "text": text,
+                        "source_lang": source_lang,
+                        "target_lang": target_lang
+                    }
+                    response = requests.post(
+                        api_url,
+                        json=v1_data,
+                        timeout=10
+                    )
+                
+                # 处理DeepL服务的响应
+                if service in ["deeplx_v2", "deeplx"]:
+                    if response.status_code == 200:
+                        result = response.json()
+                        if result.get("code") == 200 and result.get("data"):
+                            return result["data"]
+                        elif "translations" in result:
+                            return result['translations'][0]['text']
+                        elif "data" in result:
+                            return result["data"]
+                        
+                    logger.warning(f"{service} 返回状态码: {response.status_code}")
+                    raise Exception(f"{service} 返回状态码: {response.status_code}")
+                
+                service_success = True
+                break
+                
+            except Exception as e:
+                last_error = str(e)
+                logger.error(f"{service} 请求失败: {last_error}")
+                if attempt == TRANSLATE_MAX_RETRIES - 1:
+                    logger.warning(f"{service} 已达到最大重试次数，准备切换到下一个服务")
+        
+        if service_success:
+            break
+    
+    logger.error(f"所有翻译服务都已尝试失败，最后的错误: {last_error}")
+    return text
+
+def translate_with_openai(text, target_lang='zh', config=None):
+    """使用OpenAI API翻译文本
+    
+    Args:
+        text: 要翻译的文本
+        target_lang: 目标语言代码，默认为'zh'（中文）
+        config: OpenAI配置字典，包含api_key、api_endpoint等
+    """
+    if not config:
+        logger.warning("未提供OpenAI配置")
+        return None
+        
+    # 获取配置
+    api_key = config.get('api_key')
+    api_endpoint = config.get('api_endpoint')
+    model = config.get('model', 'gpt-4o-mini')
+    prompt_template = config.get('prompt', 'You are a professional translator. Please translate the following text to {target_lang}, maintaining the original meaning, style, and formatting. Pay special attention to context and nuance.')
+    
+    logger.debug(f"OpenAI配置 - endpoint: {api_endpoint}, model: {model}")
+    logger.debug(f"API密钥长度: {len(api_key) if api_key else 0}")
+    logger.debug(f"翻译目标语言: {target_lang}")
+    
+    if not api_key:
+        logger.warning("未配置OpenAI API密钥，跳过OpenAI翻译")
+        return None
+
+    try:
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {api_key}'
+        }
+
+        data = {
+            'model': model,
+            'messages': [
+                {
+                    'role': 'system',
+                    'content': prompt_template.format(target_lang=target_lang)
+                },
+                {
+                    'role': 'user',
+                    'content': text
+                }
+            ],
+            'temperature': 0.7
+        }
+
+        logger.debug(f"准备发送请求到OpenAI - URL: {api_endpoint}")
+        response = requests.post(
+            api_endpoint,
+            headers=headers,
+            json=data,
+            timeout=30
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+            if 'choices' in result and len(result['choices']) > 0:
+                translation = result['choices'][0]['message']['content'].strip()
+                logger.info("OpenAI翻译成功")
+                return translation
+            
+        logger.error(f"OpenAI翻译失败，状态码：{response.status_code}，响应：{response.text}")
+        return None
+            
+    except Exception as e:
+        logger.error(f"OpenAI翻译出错: {str(e)}")
+        return None
+
+def is_english_title(title):
+    """判断标题是否为纯英文"""
+    # 检查是否包含足够多的英文字符（至少5个），且不包含中文字符
+    english_chars = sum(1 for c in title if c.isalpha() and c.isascii())
+    chinese_chars = sum(1 for c in title if '\u4e00' <= c <= '\u9fff')
+    logger.info(f"标题「{title}」包含 {english_chars} 个英文字母，{chinese_chars} 个中文字符")
+    is_english = english_chars >= 5 and chinese_chars == 0
+    logger.info(f"标题「{title}」{'是' if is_english else '不是'}英文标题")
+    return is_english
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -2093,10 +2591,7 @@ def process_youtube():
     """处理YouTube视频字幕"""
     try:
         data = request.get_json()
-        if not data or 'url' not in data:
-            return jsonify({"error": "Missing URL parameter", "success": False}), 400
-            
-        url = data['url']
+        url = data.get('url')
         location = data.get('location', 'new')  # 获取location参数，默认为'new'
         tags_str = data.get('tags', '')
         tags = [tag.strip() for tag in tags_str.split(',')] if tags_str else []
@@ -2206,60 +2701,42 @@ def process_youtube():
             content_with_br = content.replace('\n', '<br>')
             html_content = f'<div class="content">{content_with_br}</div>'
             
-            # 准备请求数据
-            data = {
-                "url": url,
-                "title": video_info.get('title', 'YouTube Video Transcript'),
-                "author": video_info.get('uploader'),
-                "html": html_content,
-                "should_clean_html": True,
-                "category": "article",
-                "location": location,
-                "saved_using": "youtube-subtitle-processor",
-                "tags": tags
-            }
+            # 准备视频信息
+            video_title = video_info.get('title', 'YouTube Video Transcript')
+            video_url = url
+            video_author = video_info.get('uploader')
+            video_date = video_info.get('published_date')
             
-            # 添加发布日期（如果有）
-            if video_info.get('published_date'):
-                data["published_date"] = video_info['published_date']
-                logger.info(f"添加发布日期: {video_info['published_date']}")
+            logger.info(f"正在发送内容到Readwise: {video_title}")
             
-            # 记录发送到Readwise的数据
-            logger_data = {**data}
-            logger_data['html'] = logger_data['html'][:200] + '...' if len(logger_data['html']) > 200 else logger_data['html']
-            logger.info(f"发送到Readwise的数据: {json.dumps(logger_data, ensure_ascii=False)}")
-            
-            # 发送请求
-            response = requests.post(
-                'https://readwise.io/api/v3/save/',
-                headers={
-                    'Authorization': f'Token {os.getenv("READWISE_API_TOKEN")}',
-                    'Content-Type': 'application/json'
-                },
-                json=data
+            # 发送到Readwise
+            success = save_to_readwise(
+                title=video_title,
+                content=html_content,
+                url=video_url,
+                published_date=video_date,
+                author=video_author,
+                location=location,
+                tags=tags
             )
             
-            # 记录响应内容
-            logger.info(f"Readwise响应状态码: {response.status_code}")
-            logger.info(f"Readwise响应内容: {response.text}")
-            
-            if response.status_code not in [200, 201]:
-                logger.error(f"发送到Readwise失败: {response.status_code} - {response.text}")
-                return jsonify({"error": "Failed to send to Readwise", "success": False}), 500
-            else:
+            if success:
                 logger.info("成功发送到Readwise")
-                return jsonify({
-                    "success": True,
-                    "srt_content": srt_content,
-                    "filename": output_filename,
-                    "view_url": f'/view/{file_id}'
-                })
+            else:
+                logger.error("发送到Readwise失败")
             
         except Exception as e:
             logger.error(f"发送到Readwise失败: {str(e)}")
             logger.exception("详细错误信息:")
-            return jsonify({"error": "Failed to send to Readwise", "success": False}), 500
-            
+        
+        # 返回结果
+        return jsonify({
+            "success": True,
+            "srt_content": srt_content,
+            "filename": output_filename,
+            "view_url": f'/view/{file_id}'
+        })
+        
     except Exception as e:
         logger.error(f"处理YouTube URL时出错: {str(e)}")
         logger.exception("详细错误信息:")
@@ -2271,16 +2748,15 @@ def process_video():
     try:
         data = request.get_json()
         url = data.get('url')
-        platform = data.get('platform')
-        video_id = data.get('video_id')
+        platform = data.get('platform', 'youtube')  # 默认为YouTube
+        location = data.get('location', 'new')  # 默认为new
         tags = data.get('tags', [])  # 获取tags参数，默认为空列表
-        location = data.get('location', 'new')
         
         # Log the request with location and tags
         logger.info(f'处理%s URL: %s, location: %s, tags: %s', 
                    platform, url, location, json.dumps(tags, ensure_ascii=False))
         
-        if not url or not platform or not video_id:
+        if not url or not platform:
             return jsonify({'error': '缺少必要参数'}), 400
         
         # 获取视频信息
@@ -2326,12 +2802,17 @@ def process_video():
             for i, subtitle in enumerate(subtitles, 1):
                 start_time = format_time(subtitle['start'])
                 end_time = format_time(subtitle['start'] + subtitle['duration'])
-                srt_content += f"{i}\n{start_time} --> {end_time}\n{subtitle['text']}\n\n"
+                text = subtitle['text']
+                # 如果是英文视频，添加翻译
+                if language == 'en':
+                    translation = translate_text(text)
+                    text = f"{text}\n{translation}"
+                srt_content += f"{i}\n{start_time} --> {end_time}\n{text}\n\n"
             
             # 保存字幕文件
             title = video_info.get('title', '') if video_info else ''
             if not title:
-                title = f"{video_id}"
+                title = f"{os.path.splitext(os.path.basename(url))[0]}"
                 
             output_filename = sanitize_filename(f"{title}.srt")
             output_filepath = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
@@ -2418,7 +2899,7 @@ def process_video():
         # 保存字幕文件
         title = video_info.get('title', '') if video_info else ''
         if not title:
-            title = f"{video_id}"
+            title = f"{os.path.splitext(os.path.basename(url))[0]}"
                 
         output_filename = sanitize_filename(f"{title}.srt")
         output_filepath = os.path.join(app.config['OUTPUT_FOLDER'], output_filename)
@@ -2452,6 +2933,14 @@ def process_video():
                     subtitle_text.append(subtitle['text'])
             content = '\n'.join(subtitle_text)
             
+            # 记录原始内容长度
+            logger.info(f"原始内容长度: {len(content)}")
+            logger.info(f"作者信息: {video_info.get('uploader')}")
+            
+            # 将内容转换为HTML格式
+            content_with_br = content.replace('\n', '<br>')
+            html_content = f'<div class="content">{content_with_br}</div>'
+            
             # 准备视频信息
             video_title = video_info.get('title', 'Video Transcript') if video_info else title
             video_url = url
@@ -2463,7 +2952,7 @@ def process_video():
             # 发送到Readwise
             success = save_to_readwise(
                 title=video_title,
-                content=content,
+                content=html_content,
                 url=video_url,
                 published_date=video_date,
                 author=video_author,
@@ -2507,7 +2996,7 @@ def get_video_language(info):
         str: 'zh' 表示中文, 'en' 表示英文, None 表示其他语言
     """
     try:
-        logger.info(f"开始进行视频语言检测，输入信息: {json.dumps(info, indent=2, ensure_ascii=False)}")
+        # logger.info(f"开始进行视频语言检测，输入信息: {json.dumps(info, indent=2, ensure_ascii=False)}")
         
         # 1. 从标题判断语言
         if info.get('title'):
@@ -2516,16 +3005,21 @@ def get_video_language(info):
             
             # 检测标题是否包含中文字符
             has_chinese = any('\u4e00' <= char <= '\u9fff' for char in title)
-            has_english = all(ord(char) < 128 for char in title)
+            # 检查英文字母数量
+            english_chars = sum(1 for char in title if char.isalpha())
+            # 检查非ASCII字符（排除标点和空格）
+            non_english = sum(1 for char in title if not char.isascii() and not char.isspace() and not char in "''""…—–-?!.,")
+            # 如果标题包含足够多的英文字符（至少5个），且没有中文字符，判定为英文
+            is_mainly_english = english_chars >= 5 and not has_chinese
             
-            logger.info(f"标题特征: 包含中文={has_chinese}, 全英文={has_english}")
+            logger.info(f"标题特征: 包含中文={has_chinese}, 英文字符数={english_chars}, 非英文字符数={non_english}")
             
             if has_chinese:
                 result = "✓ 通过标题检测：标题包含中文字符，判定为中文视频"
                 logger.info(result)
                 return 'zh'
-            elif has_english:
-                result = "✓ 通过标题检测：标题全为英文字符，判定为英文视频"
+            elif is_mainly_english:
+                result = "✓ 通过标题检测：标题主要是英文，判定为英文视频"
                 logger.info(result)
                 return 'en'
             logger.info("标题语言无法确定，继续检查其他来源")
@@ -2558,16 +3052,21 @@ def get_video_language(info):
             available_langs = list(auto_subs.keys())
             logger.info(f"发现自动生成的字幕，可用语言: {available_langs}")
             
-            # 优先检查中文字幕
-            if any(lang.startswith('zh') for lang in available_langs):
-                result = "✓ 通过自动字幕检测：找到中文字幕，判定为中文视频"
+            # 检查是否有en-orig，这表示原始视频是英文的
+            if 'en-orig' in available_langs:
+                result = "✓ 通过自动字幕检测：找到英文原始字幕，判定为英文视频"
                 logger.info(result)
-                return 'zh'
-            # 其次检查英文字幕
-            elif any(lang.startswith('en') for lang in available_langs):
+                return 'en'
+            # 其次检查是否有英文字幕
+            elif any(lang == 'en' for lang in available_langs):
                 result = "✓ 通过自动字幕检测：找到英文字幕，判定为英文视频"
                 logger.info(result)
                 return 'en'
+            # 最后检查中文字幕
+            elif any(lang.startswith('zh') for lang in available_langs):
+                result = "✓ 通过自动字幕检测：找到中文字幕，判定为中文视频"
+                logger.info(result)
+                return 'zh'
             logger.info("未找到中文或英文的自动字幕，继续检查其他来源")
         else:
             logger.info("未找到自动生成的字幕，跳过自动字幕语言检测")

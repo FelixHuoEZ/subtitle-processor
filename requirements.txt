@@ -6,3 +6,4 @@ flask-cors
 pydub==0.25.1
 python-telegram-bot==20.7
 pytz
+pyyaml>=6.0.1

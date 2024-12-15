@@ -1,7 +1,12 @@
 # 配置文件
+config/config.yml
 config/telegram_token.txt
 config/readwise_token.txt
 config/transcribe_servers.json
+config/openai_token-backup.txt
+config/readwise_token-backup.txt
+config/telegram_token-backup.txt
+config/transcribe_servers-backup.json
 
 # 数据目录
 uploads/

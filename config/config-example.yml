@@ -1,0 +1,60 @@
+# API Tokens
+tokens:
+  readwise: your_readwise_token_here
+  telegram: your_telegram_bot_token_here
+  deepl: your_deepl_token_here
+  openai:
+    - name: example_provider1
+      api_key: your_openai_api_key_here
+      api_endpoint: https://api.example.com/v1/chat/completions
+      model: gpt-4
+      prompt: "You are a professional translator. Please translate the following text to {target_lang}, maintaining the original meaning, style, and formatting. Pay special attention to context and nuance."
+    - name: example_provider2
+      api_key: your_openai_api_key_here
+      api_endpoint: https://api.example2.com/v1/chat/completions
+      model: gpt-3.5-turbo
+      prompt: "You are a professional translator. Please translate the following text to {target_lang}, maintaining the original meaning, style, and formatting. Pay special attention to context and nuance."
+
+# Server Configuration
+servers:
+  domain: http://your.domain.com  # 添加服务器域名配置
+  video_domain: http://video.domain.com
+  transcribe:
+    default_url: http://localhost:9000/asr
+    timeout: 30
+    servers:
+      - name: server1
+        url: http://server1.example.com:10095
+        priority: 1
+        description: Example Server 1
+      - name: server2
+        url: http://server2.example.com:10095
+        priority: 2
+        description: Example Server 2
+
+# Translation Settings
+translation:
+  max_retries: 3
+  base_delay: 3
+  chunk_size: 2000
+  request_interval: 1.0
+  services:
+    - name: deeplx_v2
+      enabled: true
+      priority: 1
+    - name: openai_gauss
+      enabled: true
+      priority: 2
+      config_name: example_provider1
+    - name: openai_cerebras
+      enabled: true
+      priority: 3
+      config_name: example_provider2
+    - name: deeplx
+      enabled: true
+      priority: 4
+
+# DeepL Settings
+deeplx:
+  api_url: http://deeplx:1188/translate
+  api_v2_url: http://deeplx:1188/v2/translate

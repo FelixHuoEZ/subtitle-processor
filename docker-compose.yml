@@ -31,20 +31,21 @@ services:
       - ./firefox_profile:/root/.mozilla/firefox  # Firefox 配置目录
     environment:
       - TZ=Asia/Shanghai
-      - TRANSCRIBE_CONFIG=/app/config/transcribe_servers.json
       - FLASK_APP=app.py
       - FLASK_ENV=development
-      # 从配置文件读取API token
-      - READWISE_API_TOKEN_FILE=/app/config/readwise_token.txt
       # 只对外部请求使用代理
       # - NO_PROXY=transcribe-audio,localhost,127.0.0.1
       # - ALL_PROXY=http://host.docker.internal:20172
       # - HTTP_PROXY=http://host.docker.internal:20172
       # - HTTPS_PROXY=http://host.docker.internal:20172
+      # 从配置文件读取所有配置
+      - CONFIG_PATH=/app/config/config.yml
     networks:
       - srt-network
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      - deeplx
 
   transcribe-audio:
     build:  # 直接运行、不构建的时候，注释掉
@@ -85,11 +86,22 @@ services:
       - FUNASR_VAD_MODEL=fsmn-vad
       - FUNASR_PUNC_MODEL=ct-punc
       - FUNASR_SPK_MODEL=cam++
+      # 从配置文件读取所有配置
+      - CONFIG_PATH=/app/config/config.yml
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+    networks:
+      - srt-network
+
+  deeplx:
+    image: ghcr.io/owo-network/deeplx:latest
+    container_name: deeplx
+    restart: unless-stopped
+    ports:
+      - "1188:1188"
     networks:
       - srt-network
 
@@ -102,13 +114,13 @@ services:
     restart: unless-stopped
     environment:
       - TZ=Asia/Shanghai
-      - TELEGRAM_TOKEN_FILE=/app/config/telegram_token.txt
       - SUBTITLE_PROCESSOR_URL=http://subtitle-processor:5000
-      - SERVER_DOMAIN=http://localhost:5000
       # - NO_PROXY=subtitle-processor,localhost,127.0.0.1
       # - ALL_PROXY=http://host.docker.internal:20172
       # - HTTP_PROXY=http://host.docker.internal:20172
       # - HTTPS_PROXY=http://host.docker.internal:20172
+      # 从配置文件读取所有配置
+      - CONFIG_PATH=/app/config/config.yml
     volumes:
       - ./config:/app/config
       # - /share/docker/subtitle-processor/config:/app/config
