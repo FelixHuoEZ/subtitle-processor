@@ -1401,6 +1401,55 @@ def get_bilibili_info(url):
         logger.error(f"获取Bilibili视频信息失败: {str(e)}")
         raise
 
+def get_acfun_info(url):
+    """获取AcFun视频信息"""
+    try:
+        with yt_dlp.YoutubeDL({
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': True
+        }) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            # 详细记录所有可能包含日期的字段
+            date_fields = {
+                'upload_date': info.get('upload_date'),
+                'release_date': info.get('release_date'),
+                'modified_date': info.get('modified_date'),
+                'timestamp': info.get('timestamp')
+            }
+            logger.info(f"AcFun视频日期相关字段: {json.dumps(date_fields, indent=2, ensure_ascii=False)}")
+            
+            # 尝试多个日期字段
+            published_date = None
+            if info.get('upload_date'):
+                published_date = f"{info['upload_date'][:4]}-{info['upload_date'][4:6]}-{info['upload_date'][6:]}T00:00:00Z"
+            elif info.get('release_date'):
+                published_date = info['release_date']
+            elif info.get('modified_date'):
+                published_date = info['modified_date']
+            elif info.get('timestamp'):
+                from datetime import datetime
+                published_date = datetime.fromtimestamp(info['timestamp']).strftime('%Y-%m-%dT%H:%M:%SZ')
+            
+            logger.info(f"最终确定的发布日期: {published_date}")
+            
+            video_info = {
+                'title': info.get('title', ''),
+                'published_date': published_date,
+                'uploader': info.get('uploader', ''),
+                'subtitles': info.get('subtitles', {}),
+                'automatic_captions': info.get('automatic_captions', {}),
+                'language': 'zh'  # AcFun主要是中文内容
+            }
+            
+            logger.info(f"返回的视频信息: {json.dumps(video_info, indent=2, ensure_ascii=False)}")
+            return video_info
+            
+    except Exception as e:
+        logger.error(f"获取AcFun视频信息失败: {str(e)}")
+        raise
+
 def get_video_info(url, platform):
     """获取视频信息"""
     try:
@@ -1408,6 +1457,8 @@ def get_video_info(url, platform):
             return get_youtube_info(url)
         elif platform == 'bilibili':
             return get_bilibili_info(url)
+        elif platform == 'acfun':
+            return get_acfun_info(url)
         else:
             raise ValueError(f"不支持的平台: {platform}")
     except Exception as e:
@@ -1421,6 +1472,8 @@ def download_subtitles(url, platform, video_info=None):
             return download_youtube_subtitles(url, video_info)
         elif platform == 'bilibili':
             return download_bilibili_subtitles(url, video_info)
+        elif platform == 'acfun':
+            return download_acfun_subtitles(url, video_info)
         else:
             raise ValueError(f"不支持的平台: {platform}")
     except Exception as e:
@@ -1471,6 +1524,52 @@ def download_bilibili_subtitles(url, video_info):
             
     except Exception as e:
         logger.error(f"下载Bilibili字幕失败: {str(e)}")
+        raise
+
+def download_acfun_subtitles(url, video_info):
+    """下载AcFun字幕"""
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'writesubtitles': True,
+            'writeautomaticsub': True,
+            'subtitleslangs': ['zh-CN', 'zh-Hans', 'zh'],  # AcFun主要是中文字幕
+            'skip_download': True,
+            'format': 'best',
+            # 添加重试和超时设置
+            'retries': 10,
+            'fragment_retries': 10,
+            'socket_timeout': 30,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            # 检查是否有字幕
+            if not info.get('subtitles') and not info.get('automatic_captions'):
+                logger.info("未找到字幕")
+                return None
+            
+            # 优先使用手动上传的字幕
+            subtitles = info.get('subtitles', {})
+            if not subtitles:
+                subtitles = info.get('automatic_captions', {})
+            
+            # 按优先级尝试不同的中文字幕
+            for lang in ['zh-CN', 'zh-Hans', 'zh']:
+                if lang in subtitles:
+                    subtitle_info = subtitles[lang]
+                    for fmt in subtitle_info:
+                        if fmt.get('ext') in ['vtt', 'srt', 'json3']:
+                            subtitle_url = fmt['url']
+                            return download_subtitle_content(subtitle_url)
+            
+            logger.info("未找到合适格式的字幕")
+            return None
+            
+    except Exception as e:
+        logger.error(f"下载AcFun字幕失败: {str(e)}")
         raise
 
 def save_to_readwise(title, content, url=None, published_date=None, author=None, location='new', tags=None, language=None):
@@ -1826,15 +1925,15 @@ FILES_LIST_TEMPLATE = '''
             var location = document.getElementById('save-location').value;
             var tags = document.getElementById('tags').value;
             if (!url) {
-                showError('请输入YouTube URL');
+                showError('请输入视频 URL');
                 return false;
             }
             
-            // 处理tags
-            var tagsList = [];
-            if (tags) {
-                // 支持中英文逗号
-                tagsList = tags.split(/[,，]/).map(tag => tag.trim()).filter(tag => tag);
+            // 获取视频ID和平台信息
+            var videoInfo = extractVideoId(url);
+            if (!videoInfo) {
+                showError('不支持的视频URL格式');
+                return false;
             }
             
             // 显示进度
@@ -1842,9 +1941,7 @@ FILES_LIST_TEMPLATE = '''
             document.getElementById('progress').innerText = '正在处理...';
             document.getElementById('error-message').style.display = 'none';
             
-            // 获取video_id
-            var videoId = extractVideoId(url);
-            
+            // 发送请求
             fetch('/process', {
                 method: 'POST',
                 headers: {
@@ -1852,10 +1949,10 @@ FILES_LIST_TEMPLATE = '''
                 },
                 body: JSON.stringify({
                     url: url,
-                    platform: 'youtube',
+                    platform: videoInfo.platform,
                     location: location,
-                    video_id: videoId,
-                    tags: tagsList
+                    video_id: videoInfo.id,
+                    tags: tags.split(',').map(tag => tag.trim()).filter(tag => tag)
                 })
             })
             .then(response => response.json())
@@ -1876,14 +1973,28 @@ FILES_LIST_TEMPLATE = '''
         }
         
         function extractVideoId(url) {
+            // YouTube
             var match = url.match(/[?&]v=([^&]+)/);
             if (match) {
-                return match[1];
+                return { platform: 'youtube', id: match[1] };
             }
             match = url.match(/youtu\.be\/([^?]+)/);
             if (match) {
-                return match[1];
+                return { platform: 'youtube', id: match[1] };
             }
+            
+            // Bilibili
+            match = url.match(/bilibili\.com\/video\/(BV[\w]+)/);
+            if (match) {
+                return { platform: 'bilibili', id: match[1] };
+            }
+            
+            // AcFun
+            match = url.match(/acfun\.cn\/v\/ac(\d+)/);
+            if (match) {
+                return { platform: 'acfun', id: match[1] };
+            }
+            
             return null;
         }
         
@@ -1901,7 +2012,7 @@ FILES_LIST_TEMPLATE = '''
         <h1>字幕文件列表</h1>
         
         <form class="youtube-form" onsubmit="return submitYouTubeUrl()">
-            <input type="text" id="youtube-url" placeholder="输入YouTube视频URL">
+            <input type="text" id="youtube-url" placeholder="输入视频URL">
             <select id="save-location">
                 <option value="new">New</option>
                 <option value="later">Later</option>
@@ -2065,7 +2176,7 @@ def process_subtitle_content(content, is_funasr=False, translate=False, language
     """
     处理字幕内容，移除序号和时间轴，根据来源处理换行
     
-    Args:
+    Args：
         content: 字幕内容
         is_funasr: 是否是FunASR转换的字幕
         translate: 是否需要翻译
@@ -2873,6 +2984,14 @@ def process_video():
                 logger.info("尝试将字幕转换为SRT格式")
                 srt_content = convert_to_srt(subtitle_content, 'json3')
         elif platform == 'bilibili':
+            # 检查内容是否已经是SRT格式
+            if subtitle_content and subtitle_content.strip().split('\n')[0].isdigit():
+                logger.info("字幕内容已经是SRT格式")
+                srt_content = subtitle_content
+            else:
+                logger.info("尝试将字幕转换为SRT格式")
+                srt_content = convert_to_srt(subtitle_content, 'json3')
+        elif platform == 'acfun':
             # 检查内容是否已经是SRT格式
             if subtitle_content and subtitle_content.strip().split('\n')[0].isdigit():
                 logger.info("字幕内容已经是SRT格式")
