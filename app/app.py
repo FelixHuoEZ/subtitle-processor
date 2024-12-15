@@ -1473,7 +1473,7 @@ def download_bilibili_subtitles(url, video_info):
         logger.error(f"下载Bilibili字幕失败: {str(e)}")
         raise
 
-def save_to_readwise(title, content, url=None, published_date=None, author=None, location='new', tags=None):
+def save_to_readwise(title, content, url=None, published_date=None, author=None, location='new', tags=None, language=None):
     """保存内容到Readwise
     
     Args:
@@ -1484,6 +1484,7 @@ def save_to_readwise(title, content, url=None, published_date=None, author=None,
         author: 作者
         location: 保存位置 ('new' 或 'later')
         tags: 标签列表
+        language: 视频语言
     """
     try:
         # 验证location参数
@@ -1493,7 +1494,7 @@ def save_to_readwise(title, content, url=None, published_date=None, author=None,
             location = 'new'
             
         # 检查标题是否为英文
-        if is_english_title(title):
+        if language == 'en':
             logger.info("检测到英文标题，开始翻译...")
             translated_title = translate_text(title)
             if translated_title and translated_title != title:
@@ -1502,7 +1503,7 @@ def save_to_readwise(title, content, url=None, published_date=None, author=None,
             
         # 检查是否包含英文内容
         has_english = any(c.isalpha() for c in content)
-        if has_english:
+        if has_english and language == 'en':
             # 添加翻译
             translated_content = translate_text(content)
             content = f"{content}\n\n中文翻译：\n{translated_content}"
@@ -1553,7 +1554,7 @@ def save_to_readwise(title, content, url=None, published_date=None, author=None,
         logger.info(f"作者信息: {author}")
 
         # 处理字幕内容，移除序号和时间轴
-        content = process_subtitle_content(content)
+        content = process_subtitle_content(content, translate=False, language=language)
         logger.info(f"处理后的内容长度: {len(content)}")
 
         # 将内容转换为HTML格式
@@ -2060,7 +2061,7 @@ def sanitize_filename(filename):
         
     return clean_name
 
-def process_subtitle_content(content, is_funasr=False, translate=False):
+def process_subtitle_content(content, is_funasr=False, translate=False, language=None):
     """
     处理字幕内容，移除序号和时间轴，根据来源处理换行
     
@@ -2068,6 +2069,7 @@ def process_subtitle_content(content, is_funasr=False, translate=False):
         content: 字幕内容
         is_funasr: 是否是FunASR转换的字幕
         translate: 是否需要翻译
+        language: 视频语言
     """
     try:
         if not content:
@@ -2143,7 +2145,9 @@ def process_subtitle_content(content, is_funasr=False, translate=False):
         logger.info(f"- 处理后文本长度: {len(result)}字符")
         logger.debug(f"处理后内容预览: {result[:200]}...")
         
-        if translate:
+        # 只有当视频是英文且需要翻译时才进行翻译
+        if translate and language == 'en':
+            logger.info("检测到英文视频，开始翻译...")
             # 直接使用改进后的 translate_text 函数进行翻译
             translated = translate_text(result)
             if translated != result:  # 只有在翻译成功时才使用翻译结果
@@ -2231,8 +2235,7 @@ def translate_text(text, source_lang='en', target_lang='zh'):
                 except Exception as e:
                     error_msg = str(e)
                     logger.error(f"翻译失败 (尝试 {attempt+1}/{TRANSLATE_MAX_RETRIES}): {error_msg}")
-                    if attempt == TRANSLATE_MAX_RETRIES - 1:  # 最后一次尝试失败
-                        translated_segments.append(segment)  # 使用原文
+                    if attempt == TRANSLATE_MAX_RETRIES - 1:
                         logger.warning(f"翻译失败{TRANSLATE_MAX_RETRIES}次，使用原文: {segment[:50]}...")
                 
             logger.info(f"翻译进度: {i}/{len(segments)}")
@@ -2463,16 +2466,6 @@ def translate_with_openai(text, target_lang='zh', config=None):
     except Exception as e:
         logger.error(f"OpenAI翻译出错: {str(e)}")
         return None
-
-def is_english_title(title):
-    """判断标题是否为纯英文"""
-    # 检查是否包含足够多的英文字符（至少5个），且不包含中文字符
-    english_chars = sum(1 for c in title if c.isalpha() and c.isascii())
-    chinese_chars = sum(1 for c in title if '\u4e00' <= c <= '\u9fff')
-    logger.info(f"标题「{title}」包含 {english_chars} 个英文字母，{chinese_chars} 个中文字符")
-    is_english = english_chars >= 5 and chinese_chars == 0
-    logger.info(f"标题「{title}」{'是' if is_english else '不是'}英文标题")
-    return is_english
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -2717,7 +2710,8 @@ def process_youtube():
                 published_date=video_date,
                 author=video_author,
                 location=location,
-                tags=tags
+                tags=tags,
+                language=language
             )
             
             if success:
@@ -2853,7 +2847,8 @@ def process_video():
                         url=url,
                         published_date=video_info.get('published_date'),
                         author=video_info.get('uploader'),
-                        tags=tags  # 传递tags参数
+                        tags=tags,  # 传递tags参数
+                        language=language
                     )
                     logger.info("成功发送转录内容到Readwise")
             except Exception as e:
@@ -2957,7 +2952,8 @@ def process_video():
                 published_date=video_date,
                 author=video_author,
                 location=location,
-                tags=tags
+                tags=tags,
+                language=language
             )
             
             if success:
