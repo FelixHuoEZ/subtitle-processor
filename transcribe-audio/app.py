@@ -47,6 +47,7 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max-limit
 app.config['UPLOAD_FOLDER'] = '/app/uploads'
 
+
 # 全局模型变量
 model = None
 
@@ -428,8 +429,15 @@ def process_recognition_result(result):
         logger.warning(f"未知的识别结果格式: {type(result)}")
         return str(result)
 
-def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000):
-    """分块处理音频数据"""
+def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000, hotwords=None):
+    """分块处理音频数据
+    
+    Args:
+        audio_data: 音频数据
+        sample_rate: 采样率
+        chunk_size: 每个音频块的大小（默认30秒）
+        hotwords: 热词列表，用于提高特定词汇的识别准确率
+    """
     try:
         results = []
         total_len = len(audio_data)
@@ -442,7 +450,19 @@ def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000):
             try:
                 with torch.no_grad():
                     # print(f"\n处理短音频 (长度: {total_len/sample_rate:.2f}秒)")
-                    result = model.generate(input=audio_data, sample_rate=sample_rate)
+                    # 检查 generate 方法的参数
+                    if hotwords:
+                        # 将热词列表转换为空格分隔的字符串
+                        hotword_str = ' '.join(hotwords)
+                        logger.warning(f"调用 model.generate 方法，热词：{hotword_str}")
+                    else:
+                        hotword_str = None
+                    
+                    result = model.generate(
+                        input=audio_data, 
+                        sample_rate=sample_rate, 
+                        hotword=hotword_str  # 使用空格分隔的热词字符串
+                    )
                     processed_result = process_recognition_result(result)
                     if processed_result:
                         results.append(processed_result)
@@ -472,7 +492,19 @@ def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000):
                 
                 try:
                     with torch.no_grad():
-                        result = model.generate(input=chunk, sample_rate=sample_rate)
+                        # 检查 generate 方法的参数
+                        if hotwords:
+                            # 将热词列表转换为空格分隔的字符串
+                            hotword_str = ' '.join(hotwords)
+                            logger.warning(f"调用 model.generate 方法，热词：{hotword_str}")
+                        else:
+                            hotword_str = None
+                        
+                        result = model.generate(
+                            input=chunk, 
+                            sample_rate=sample_rate, 
+                            hotword=hotword_str  # 使用空格分隔的热词字符串
+                        )
                         processed_result = process_recognition_result(result)
                         if processed_result:
                             results.append(processed_result)
@@ -508,6 +540,12 @@ def recognize_audio():
         audio_file.seek(0)  # 重置文件指针
         logger.info(f"接收到音频文件: {original_filename}, 大小: {file_size/1024:.2f}KB")
         
+        # 获取热词参数
+        hotwords = request.form.get('hotwords', '')
+        if hotwords:
+            hotwords = [word.strip() for word in hotwords.split(',') if word.strip()]
+            logger.warning(f"接收到热词参数: {hotwords}")  # 使用 warning 级别确保一定会打印
+        
         # 保存上传的音频文件
         orig_audio_path = os.path.join(app.config['UPLOAD_FOLDER'], 'temp_audio_orig')
         audio_file.save(orig_audio_path)
@@ -532,7 +570,7 @@ def recognize_audio():
             
             # 分块处理音频
             logger.info("开始音频识别...")
-            result = process_audio_chunk(audio_data, sample_rate)
+            result = process_audio_chunk(audio_data, sample_rate, hotwords=hotwords if hotwords else None)
             
             # 放宽对空结果的处理
             if not result or len(result.strip()) == 0:
@@ -540,7 +578,11 @@ def recognize_audio():
                 # 如果分块识别失败，尝试整体识别
                 try:
                     with torch.no_grad():
-                        result = model.generate(input=audio_data, sample_rate=sample_rate)
+                        result = model.generate(
+                            input=audio_data, 
+                            sample_rate=sample_rate,
+                            hotwords=hotwords if hotwords else None
+                        )
                         result = process_recognition_result(result)
                 except Exception as e:
                     logger.error(f"整体识别失败: {str(e)}")

@@ -30,6 +30,7 @@ RUN pip install -r requirements.txt
 
 # 复制应用文件
 COPY app/app.py .
+COPY app/templates ./templates/
 COPY app/* ./
 
 # 创建必要的目录

@@ -1,10 +1,11 @@
 document.addEventListener('DOMContentLoaded', function() {
   // 加载保存的设置
-  chrome.storage.sync.get(['serverUrl', 'readwiseToken', 'saveLocation', 'tags'], function(items) {
+  chrome.storage.sync.get(['serverUrl', 'readwiseToken', 'saveLocation', 'tags', 'hotwords'], function(items) {
     document.getElementById('serverUrl').value = items.serverUrl || '';
     document.getElementById('readwiseToken').value = items.readwiseToken || '';
     document.getElementById('saveLocation').value = items.saveLocation || 'new';
     document.getElementById('tags').value = items.tags || '';
+    document.getElementById('hotwords').value = items.hotwords || '';
   });
 
   // 保存设置按钮点击事件
@@ -13,13 +14,15 @@ document.addEventListener('DOMContentLoaded', function() {
     const readwiseToken = document.getElementById('readwiseToken').value.trim();
     const saveLocation = document.getElementById('saveLocation').value;
     const tags = document.getElementById('tags').value.trim();
+    const hotwords = document.getElementById('hotwords').value.trim();
     
     // 保存设置到Chrome存储
     chrome.storage.sync.set({
       serverUrl: serverUrl,
       readwiseToken: readwiseToken,
       saveLocation: saveLocation,
-      tags: tags
+      tags: tags,
+      hotwords: hotwords
     }, function() {
       const status = document.getElementById('status');
       status.textContent = '设置已保存！';
@@ -35,7 +38,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const status = document.getElementById('status');
     
     // 获取设置
-    chrome.storage.sync.get(['serverUrl', 'readwiseToken', 'saveLocation'], function(items) {
+    chrome.storage.sync.get(['serverUrl', 'readwiseToken', 'saveLocation', 'tags', 'hotwords'], function(items) {
       if (!items.serverUrl || !items.readwiseToken) {
         status.textContent = '请先设置服务器地址和Readwise Token！';
         status.className = 'error';
@@ -52,6 +55,14 @@ document.addEventListener('DOMContentLoaded', function() {
         if (currentTags) {
           // 支持中英文逗号
           tagsList = currentTags.split(/[,，]/).map(tag => tag.trim()).filter(tag => tag);
+        }
+
+        // 处理hotwords - 使用当前输入框的值
+        const currentHotwords = document.getElementById('hotwords').value.trim();
+        let hotwordsList = [];
+        if (currentHotwords) {
+          // 支持中英文逗号
+          hotwordsList = currentHotwords.split(/[,，]/).map(word => word.trim()).filter(word => word);
         }
 
         // 提取video_id
@@ -74,7 +85,8 @@ document.addEventListener('DOMContentLoaded', function() {
             video_id: videoId,
             readwise_token: items.readwiseToken,
             location: items.saveLocation || 'new',
-            tags: tagsList
+            tags: tagsList,
+            hotwords: hotwordsList
           })
         })
         .then(response => response.json())
@@ -102,7 +114,7 @@ function extractVideoId(url) {
     return match[1];
   }
   
-  // 匹配短链接
+  // 匹配短链接格式
   match = url.match(/youtu\.be\/([^?]+)/);
   if (match) {
     return match[1];

@@ -15,7 +15,7 @@ services:
               count: 1
               capabilities: [gpu]
     ports:
-      - "5000:5000"
+      - "5000:5000"  # Web 界面
       - "5001:5900"  # VNC 服务端口
     volumes:
       # - /share/docker/subtitle-processor/uploads:/app/uploads
@@ -63,7 +63,7 @@ services:
               count: all
               capabilities: [gpu]
     ports:
-      - "10095:10095"
+      - "10095:10095"  # API 服务端口
     volumes:
       # - /share/docker/subtitle-processor/uploads:/app/uploads
       # - /share/docker/subtitle-processor/videos:/app/videos

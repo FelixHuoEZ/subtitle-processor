@@ -269,8 +269,13 @@ def detect_file_encoding(raw_bytes):
 
     return 'utf-8'  # 默认使用UTF-8
 
-def parse_srt(result):
-    """解析FunASR的结果为SRT格式"""
+def parse_srt(result, hotwords=None):
+    """解析FunASR的结果为SRT格式
+    
+    Args:
+        result: FunASR的识别结果
+        hotwords: 热词列表，用于日志记录和调试
+    """
     try:
         logger.info("开始解析字幕内容")
         logger.debug(f"输入结果类型: {type(result)}")
@@ -1126,8 +1131,13 @@ def split_audio(audio_path, max_duration=600, max_size=100*1024*1024):
         logger.error(f"分割音频文件时出错: {str(e)}")
         return [audio_path]
 
-def transcribe_audio(audio_path):
-    """使用FunASR转录音频"""
+def transcribe_audio(audio_path, hotwords=None):
+    """使用FunASR转录音频
+    
+    Args:
+        audio_path: 音频文件路径
+        hotwords: 热词列表，用于提高特定词汇的识别准确率
+    """
     try:
         # 检查音频文件大小
         file_size = os.path.getsize(audio_path)
@@ -1153,10 +1163,22 @@ def transcribe_audio(audio_path):
             # 准备请求
             url = f"{server_url}/recognize"
             
-            # 发送文件
-            with open(segment_path, 'rb') as f:
-                files = {'audio': f}
-                response = requests.post(url, files=files)
+            # 准备请求数据
+            files = {'audio': open(segment_path, 'rb')}
+            data = {}
+            
+            # 如果有热词，添加到请求中
+            if hotwords and isinstance(hotwords, list) and len(hotwords) > 0:
+                # 将热词列表转换为FunASR支持的格式
+                data['hotwords'] = ','.join(hotwords)
+                logger.info(f"使用热词: {data['hotwords']}")
+            
+            # 发送请求
+            try:
+                response = requests.post(url, files=files, data=data)
+            finally:
+                # 确保文件被关闭
+                files['audio'].close()
             
             logger.info(f"FunASR响应状态码: {response.status_code}")
             logger.info(f"FunASR响应头: {dict(response.headers)}")
@@ -1606,7 +1628,19 @@ def save_to_readwise(title, content, url=None, published_date=None, author=None,
             # 添加翻译
             translated_content = translate_text(content)
             content = f"{content}\n\n中文翻译：\n{translated_content}"
-        
+
+        # 记录原始内容长度和作者信息
+        logger.info(f"原始内容长度: {len(content)}")
+        logger.info(f"作者信息: {author}")
+
+        # 处理字幕内容，移除序号和时间轴
+        content = process_subtitle_content(content, translate=False, language=language)
+        logger.info(f"处理后的内容长度: {len(content)}")
+
+        # 将内容转换为HTML格式
+        content_with_br = content.replace('\n', '<br>')
+        html_content = f'<div class="content">{content_with_br}</div>'
+
         # 优先从配置文件获取token
         token = get_config_value('tokens.readwise')
         if not token:
@@ -1647,18 +1681,6 @@ def save_to_readwise(title, content, url=None, published_date=None, author=None,
         if url:
             url = convert_youtube_url(url)
             logger.info(f"转换后的URL: {url}")
-
-        # 记录原始内容长度
-        logger.info(f"原始内容长度: {len(content)}")
-        logger.info(f"作者信息: {author}")
-
-        # 处理字幕内容，移除序号和时间轴
-        content = process_subtitle_content(content, translate=False, language=language)
-        logger.info(f"处理后的内容长度: {len(content)}")
-
-        # 将内容转换为HTML格式
-        content_with_br = content.replace('\n', '<br>')
-        html_content = f'<div class="content">{content_with_br}</div>'
 
         data = {
             "url": url or f"{video_domain}/youtube/unknown",
@@ -1703,341 +1725,6 @@ def save_to_readwise(title, content, url=None, published_date=None, author=None,
         logger.error(f"保存到Readwise时出错: {str(e)}")
         logger.exception(e)
         return None
-
-# HTML模板
-HTML_TEMPLATE = '''
-<!DOCTYPE html>
-<html>
-<head>
-    <title>字幕查看器</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            line-height: 1.6;
-            margin: 0;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background-color: white;
-            padding: 20px;
-            border-radius: 5px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .subtitle {
-            margin-bottom: 15px;
-            padding: 10px;
-            border-bottom: 1px solid #eee;
-        }
-        .time {
-            color: #666;
-            font-size: 0.9em;
-        }
-        .text {
-            margin-top: 5px;
-        }
-        .back-link {
-            display: inline-block;
-            margin-bottom: 20px;
-            color: #0066cc;
-            text-decoration: none;
-        }
-        .back-link:hover {
-            text-decoration: underline;
-        }
-        .meta-info {
-            margin-bottom: 20px;
-            color: #666;
-            font-size: 0.9em;
-        }
-        .search-box {
-            margin-bottom: 20px;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-        }
-        .search-box input {
-            width: 100%;
-            padding: 8px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }
-    </style>
-    <script>
-        function searchSubtitles() {
-            const searchText = document.getElementById('search').value.toLowerCase();
-            const subtitles = document.getElementsByClassName('subtitle');
-            let foundCount = 0;
-            
-            for (let subtitle of subtitles) {
-                const text = subtitle.getElementsByClassName('text')[0].innerText.toLowerCase();
-                if (text.includes(searchText)) {
-                    subtitle.style.display = 'block';
-                    foundCount++;
-                } else {
-                    subtitle.style.display = 'none';
-                }
-            }
-            
-            document.getElementById('search-count').innerText = 
-                searchText ? `找到 ${foundCount} 个匹配项` : '';
-        }
-    </script>
-</head>
-<body>
-    <div class="container">
-        <a href="/" class="back-link">← 返回列表</a>
-        <div class="meta-info">
-            总字幕数：{{ subtitles|length }} 条
-        </div>
-        <div class="search-box">
-            <input type="text" id="search" placeholder="搜索字幕..." oninput="searchSubtitles()">
-            <div id="search-count"></div>
-        </div>
-        {% for sub in subtitles %}
-        <div class="subtitle">
-            {% if show_timeline %}
-            <div class="time">{{ "%.3f"|format(sub.start) }} - {{ "%.3f"|format(sub.end) }}</div>
-            {% endif %}
-            <div class="text">{{ sub.text }}</div>
-        </div>
-        {% endfor %}
-    </div>
-</body>
-</html>
-'''
-
-FILES_LIST_TEMPLATE = '''
-<!DOCTYPE html>
-<html>
-<head>
-    <title>字幕文件列表</title>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            line-height: 1.6;
-            margin: 0;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background-color: white;
-            padding: 20px;
-            border-radius: 5px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        h1 {
-            color: #333;
-            margin-bottom: 20px;
-        }
-        .file-list {
-            list-style: none;
-            padding: 0;
-        }
-        .file-item {
-            padding: 10px;
-            border-bottom: 1px solid #eee;
-        }
-        .file-item:last-child {
-            border-bottom: none;
-        }
-        .file-link {
-            color: #0066cc;
-            text-decoration: none;
-        }
-        .file-link:hover {
-            text-decoration: underline;
-        }
-        .file-time {
-            color: #666;
-            font-size: 0.9em;
-        }
-        .youtube-form {
-            margin-bottom: 20px;
-            padding: 15px;
-            background-color: #f8f9fa;
-            border-radius: 5px;
-        }
-        .youtube-form input[type="text"] {
-            width: 100%;
-            padding: 8px;
-            margin-bottom: 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }
-        .youtube-form select {
-            width: 100%;
-            padding: 8px;
-            margin-bottom: 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }
-        .youtube-form button {
-            background-color: #0066cc;
-            color: white;
-            padding: 8px 16px;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-        }
-        .youtube-form button:hover {
-            background-color: #0052a3;
-        }
-        .tags-input {
-            width: 100%;
-            padding: 8px;
-            margin-bottom: 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }
-        .tags-help {
-            font-size: 0.9em;
-            color: #666;
-            margin-bottom: 10px;
-        }
-        #progress {
-            display: none;
-            margin-top: 10px;
-            padding: 10px;
-            background-color: #e9ecef;
-            border-radius: 4px;
-        }
-        .error-message {
-            color: #dc3545;
-            margin-top: 10px;
-            padding: 10px;
-            background-color: #f8d7da;
-            border-radius: 4px;
-            display: none;
-        }
-    </style>
-    <script>
-        function submitYouTubeUrl() {
-            var url = document.getElementById('youtube-url').value;
-            var location = document.getElementById('save-location').value;
-            var tags = document.getElementById('tags').value;
-            if (!url) {
-                showError('请输入视频 URL');
-                return false;
-            }
-            
-            // 获取视频ID和平台信息
-            var videoInfo = extractVideoId(url);
-            if (!videoInfo) {
-                showError('不支持的视频URL格式');
-                return false;
-            }
-            
-            // 显示进度
-            document.getElementById('progress').style.display = 'block';
-            document.getElementById('progress').innerText = '正在处理...';
-            document.getElementById('error-message').style.display = 'none';
-            
-            // 发送请求
-            fetch('/process', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    url: url,
-                    platform: videoInfo.platform,
-                    location: location,
-                    video_id: videoInfo.id,
-                    tags: tags.split(',').map(tag => tag.trim()).filter(tag => tag)
-                })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.error) {
-                    showError(data.error);
-                } else if (data.view_url) {
-                    window.location.href = data.view_url;
-                } else {
-                    showError('处理成功但未返回查看链接');
-                }
-            })
-            .catch(error => {
-                showError('请求失败: ' + error);
-            });
-            
-            return false;
-        }
-        
-        function extractVideoId(url) {
-            // YouTube
-            var match = url.match(/[?&]v=([^&]+)/);
-            if (match) {
-                return { platform: 'youtube', id: match[1] };
-            }
-            match = url.match(/youtu\.be\/([^?]+)/);
-            if (match) {
-                return { platform: 'youtube', id: match[1] };
-            }
-            
-            // Bilibili
-            match = url.match(/bilibili\.com\/video\/(BV[\w]+)/);
-            if (match) {
-                return { platform: 'bilibili', id: match[1] };
-            }
-            
-            // AcFun
-            match = url.match(/acfun\.cn\/v\/ac(\d+)/);
-            if (match) {
-                return { platform: 'acfun', id: match[1] };
-            }
-            
-            return null;
-        }
-        
-        function showError(message) {
-            var errorDiv = document.getElementById('error-message');
-            errorDiv.innerText = message;
-            errorDiv.style.display = 'block';
-            document.getElementById('progress').style.display = 'none';
-        }
-    </script>
-</head>
-<body>
-    <div class="container">
-        <a href="/" class="back-link">← 返回列表</a>
-        <h1>字幕文件列表</h1>
-        
-        <form class="youtube-form" onsubmit="return submitYouTubeUrl()">
-            <input type="text" id="youtube-url" placeholder="输入视频URL">
-            <select id="save-location">
-                <option value="new">New</option>
-                <option value="later">Later</option>
-                <option value="archive">Archive</option>
-                <option value="feed">Feed</option>
-            </select>
-            <input type="text" id="tags" class="tags-input" placeholder="输入标签，用逗号分隔">
-            <div class="tags-help">标签示例：youtube字幕,学习笔记,英语学习</div>
-            <button type="submit">处理</button>
-            <div id="progress"></div>
-            <div id="error-message" class="error-message"></div>
-        </form>
-
-        <ul class="file-list">
-        {% for file in files %}
-            <li class="file-item">
-                <a href="{{ file.url }}" class="file-link">{{ file.filename }}</a>
-                <div class="file-time">{{ file.upload_time }}</div>
-            </li>
-        {% endfor %}
-        </ul>
-    </div>
-</body>
-</html>
-'''
 
 import json
 import os
@@ -2172,7 +1859,7 @@ def sanitize_filename(filename):
         
     return clean_name
 
-def process_subtitle_content(content, is_funasr=False, translate=False, language=None):
+def process_subtitle_content(content, is_funasr=False, translate=False, language=None, hotwords=None):
     """
     处理字幕内容，移除序号和时间轴，根据来源处理换行
     
@@ -2181,6 +1868,7 @@ def process_subtitle_content(content, is_funasr=False, translate=False, language
         is_funasr: 是否是FunASR转换的字幕
         translate: 是否需要翻译
         language: 视频语言
+        hotwords: 热词列表，用于记录日志和调试
     """
     try:
         if not content:
@@ -2190,6 +1878,8 @@ def process_subtitle_content(content, is_funasr=False, translate=False, language
         logger.info(f"开始处理字幕内容 [长度: {len(content)}字符]")
         if is_funasr:
             logger.info("使用FunASR模式处理字幕")
+            if hotwords:
+                logger.info(f"使用的热词: {hotwords}")
         
         # 移除WEBVTT头部
         content = re.sub(r'^WEBVTT\s*\n', '', content)
@@ -2244,7 +1934,7 @@ def process_subtitle_content(content, is_funasr=False, translate=False, language
         
         # 合并所有文本块
         if is_funasr:
-            # FunASR转换的字幕：用空格连接所有块
+            # FunASR转换的字幕：所有段落用空格连接
             result = ' '.join(text_blocks)
         else:
             # 直接提取的字幕：段落之间用两个换行符分隔
@@ -2300,7 +1990,7 @@ def translate_text(text, source_lang='en', target_lang='zh'):
             
             # 如果不是文本末尾，查找最近的句子结束标记
             if next_pos < text_length:
-                # 在目标范围内查找句子结束标记
+                # 在目标范围内查找句子结束标点
                 for end_pos in range(next_pos, min(next_pos + (TRANSLATE_MAX_LENGTH - TRANSLATE_TARGET_LENGTH), text_length)):
                     if text[end_pos] in '.!?。！？':
                         next_pos = end_pos + 1
@@ -2666,8 +2356,8 @@ def view_file(file_id):
         # 解析SRT内容为字幕列表
         subtitles = parse_srt_content(srt_content)
         
-        return render_template_string(
-            HTML_TEMPLATE,
+        return render_template(
+            'view.html',
             filename=file_info['filename'],
             subtitles=subtitles,
             show_timeline=file_info.get('show_timeline', True)
@@ -2683,7 +2373,7 @@ def view_files():
     files_info = load_files_info()
     files_info_list = list(files_info.values())
     files_info_list.sort(key=lambda x: x['upload_time'], reverse=True)
-    return render_template_string(FILES_LIST_TEMPLATE, files=files_info_list)
+    return render_template('index.html', files=files_info_list)
 
 @app.route('/')
 def index():
@@ -2856,10 +2546,14 @@ def process_video():
         platform = data.get('platform', 'youtube')  # 默认为YouTube
         location = data.get('location', 'new')  # 默认为new
         tags = data.get('tags', [])  # 获取tags参数，默认为空列表
+        hotwords = data.get('hotwords', [])  # 获取hotwords参数，默认为空列表
         
-        # Log the request with location and tags
-        logger.info(f'处理%s URL: %s, location: %s, tags: %s', 
-                   platform, url, location, json.dumps(tags, ensure_ascii=False))
+        # Log the request with location, tags and hotwords
+        logger.info(f'处理%s URL: %s, location: %s, tags: %s, hotwords: %s', 
+                   platform, url, 
+                   json.dumps(location, ensure_ascii=False),
+                   json.dumps(tags, ensure_ascii=False),
+                   json.dumps(hotwords, ensure_ascii=False))
         
         if not url or not platform:
             return jsonify({'error': '缺少必要参数'}), 400
@@ -2893,12 +2587,12 @@ def process_video():
                 return jsonify({"error": "下载视频失败"}, {"success": False}), 500
                 
             # 使用FunASR转录
-            result = transcribe_audio(audio_path)
+            result = transcribe_audio(audio_path, hotwords)
             if not result:
                 return jsonify({"error": "转录失败"}, {"success": False}), 500
                 
             # 解析转录结果生成字幕
-            subtitles = parse_srt(result)
+            subtitles = parse_srt(result, hotwords)
             if not subtitles:
                 return jsonify({"error": "解析转录结果失败"}, {"success": False}), 500
                 

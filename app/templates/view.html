@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block title %}{{ filename }} - 字幕查看器{% endblock %}
+
+{% block content %}
+<a href="/" class="back-link">← 返回列表</a>
+<div class="meta-info">
+    总字幕数：{{ subtitles|length }} 条
+</div>
+<div class="search-box">
+    <input type="text" id="search" placeholder="搜索字幕..." oninput="searchSubtitles()">
+    <div id="search-count"></div>
+</div>
+{% for sub in subtitles %}
+<div class="subtitle">
+    {% if show_timeline %}
+    <div class="time">{{ "%.3f"|format(sub.start) }} - {{ "%.3f"|format(sub.end) }}</div>
+    {% endif %}
+    <div class="text">{{ sub.text }}</div>
+</div>
+{% endfor %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function searchSubtitles() {
+        const searchText = document.getElementById('search').value.toLowerCase();
+        const subtitles = document.getElementsByClassName('subtitle');
+        let foundCount = 0;
+        
+        for (let subtitle of subtitles) {
+            const text = subtitle.getElementsByClassName('text')[0].innerText.toLowerCase();
+            if (text.includes(searchText)) {
+                subtitle.style.display = 'block';
+                foundCount++;
+            } else {
+                subtitle.style.display = 'none';
+            }
+        }
+        
+        document.getElementById('search-count').innerText = 
+            searchText ? `找到 ${foundCount} 个匹配项` : '';
+    }
+</script>
+{% endblock %}
