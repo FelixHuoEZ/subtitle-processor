@@ -53,7 +53,10 @@ A comprehensive subtitle processing service that automatically downloads, transc
    TELEGRAM_TOKEN=your_telegram_bot_token
    READWISE_TOKEN=your_readwise_token
    ```
-4. Start the services:
+4. Configure Firefox cookies for YouTube access:
+   - Copy your Firefox profile directory (located at `C:\Users\<USER_NAME>\AppData\Roaming\Mozilla\Firefox\Profiles\`) to the `firefox_profile` directory in the project
+   - This enables downloading restricted YouTube videos using your Firefox login cookies
+5. Start the services:
    ```bash
    docker-compose up --build
    ```
@@ -132,7 +135,10 @@ Special thanks to:
    TELEGRAM_TOKEN=你的_telegram_机器人_token
    READWISE_TOKEN=你的_readwise_token
    ```
-4. 启动服务：
+4. 配置 Firefox cookies 以访问 YouTube：
+   - 将 Firefox 配置文件目录（位于 `C:\Users\<USER_NAME>\AppData\Roaming\Mozilla\Firefox\Profiles\`）复制到项目中的 `firefox_profile` 目录
+   - 这使您可以使用 Firefox 登录 cookie 下载受限制的 YouTube 视频
+5. 启动服务：
    ```bash
    docker-compose up --build
    ```

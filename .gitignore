@@ -44,3 +44,6 @@ test_subtitles.py
 tests/
 logseq-plugin-whisper-subtitles/
 logseq-whisper-subtitles-server/
+app/export_cookies.py
+test_download.py
+test_download2.py
