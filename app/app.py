@@ -609,6 +609,7 @@ def download_youtube_subtitles(url, video_info=None, lang_priority=None):
         # 如果没有提供video_info，获取视频信息
         if not video_info:
             ydl_opts = {
+                'format': 'best',
                 'quiet': True,
                 'no_warnings': True,
                 'extract_flat': False,
@@ -617,7 +618,11 @@ def download_youtube_subtitles(url, video_info=None, lang_priority=None):
                 'subtitleslangs': lang_priority or ['zh-Hans', 'zh-Hant', 'zh', 'en'],
                 'skip_download': True,
                 'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-                'subtitlesformat': 'srt/ass/vtt/best'
+                'subtitlesformat': 'srt/ass/vtt/best',
+                'cookiesfrombrowser': ('firefox', '/root/.mozilla/firefox/Profiles/3tfynuxa.default-release'),  # 使用Firefox的cookie数据库
+                'cookiefile': '/tmp/cookies.txt',  # 同时尝试使用cookie文件
+                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0',  # 使用Firefox的UA
+                'http_headers': {'Referer': 'https://www.youtube.com/'}  # 添加Referer头
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 video_info = ydl.extract_info(url, download=False)
@@ -738,307 +743,6 @@ def download_youtube_subtitles(url, video_info=None, lang_priority=None):
             logger.info("清理临时目录")
         raise
 
-def download_subtitles(url, platform, video_info=None):
-    """统一的字幕下载入口
-    
-    Args:
-        url: 视频URL
-        platform: 平台（'youtube' 或 'bilibili'）
-        video_info: 预先获取的视频信息（可选）
-    
-    Returns:
-        tuple: (字幕内容, 视频信息)
-    """
-    try:
-        if platform == 'youtube':
-            return download_youtube_subtitles(url, video_info)
-        elif platform == 'bilibili':
-            return download_bilibili_subtitles(url, video_info)
-        else:
-            logger.error(f"不支持的平台: {platform}")
-            return None, None
-    except Exception as e:
-        logger.error(f"下载字幕时出错: {str(e)}")
-        return None, None
-
-def download_subtitle_content(subtitle_url):
-    """下载并处理字幕内容"""
-    # 优先使用srt格式
-    try:
-        # 下载字幕内容
-        logger.info(f"正在从URL下载字幕: {subtitle_url}")
-        response = requests.get(subtitle_url, timeout=30)
-        response.raise_for_status()
-        
-        # 获取字幕内容的字节数据
-        content_bytes = response.content
-        
-        # 检查内容是否为空
-        if not content_bytes:
-            logger.warning("字幕内容为空")
-            return None
-        
-        # 检测编码并解码
-        encoding = detect_file_encoding(content_bytes)
-        subtitle_content = content_bytes.decode(encoding)
-        
-        # 清理字幕内容
-        subtitle_content = clean_subtitle_content(subtitle_content)
-        
-        # 如果不是SRT格式，尝试转换
-        if subtitle_url.endswith('.vtt'):
-            logger.info("将VTT格式转换为SRT格式")
-            subtitle_content = convert_to_srt(subtitle_content, 'vtt')
-        
-        # 验证字幕内容
-        is_valid, message = validate_subtitle_content(subtitle_content)
-        if not is_valid:
-            logger.warning(f"字幕内容无效: {message}")
-            return None
-        
-        logger.info("成功下载并处理字幕")
-        logger.debug(f"字幕内容预览: {subtitle_content[:200]}...")
-        return subtitle_content
-        
-    except Exception as e:
-        logger.error(f"处理字幕时出错: {str(e)}")
-        return None
-
-def clean_subtitle_content(content, is_funasr=False):
-    """清理字幕内容
-    
-    Args:
-        content: 字幕内容
-        is_funasr: 是否是FunASR转换的字幕
-    """
-    try:
-        if not content:
-            return ""
-            
-        # 移除WEBVTT头部
-        content = re.sub(r'^WEBVTT\s*\n', '', content)
-        
-        # 移除序号和时间轴
-        lines = []
-        current_text = []
-        skip_next = False
-        
-        for line in content.split('\n'):
-            line = line.strip()
-            
-            # 跳过序号行（纯数字）
-            if re.match(r'^\d+$', line):
-                continue
-                
-            # 跳过时间轴行
-            if re.match(r'^\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}', line):
-                continue
-                
-            # 跳过空行
-            if not line:
-                if current_text:
-                    if is_funasr:
-                        # FunASR转换的字幕：合并所有文本，不保留换行
-                        lines.append(' '.join(current_text))
-                    else:
-                        # 直接提取的字幕：保留原有换行
-                        lines.append('\n'.join(current_text))
-                    current_text = []
-                continue
-                
-            current_text.append(line)
-            
-        # 处理最后一段文本
-        if current_text:
-            if is_funasr:
-                lines.append(' '.join(current_text))
-            else:
-                lines.append('\n'.join(current_text))
-        
-        # 合并处理后的文本
-        if is_funasr:
-            # FunASR转换的字幕：所有段落用空格连接
-            return ' '.join(lines)
-        else:
-            # 直接提取的字幕：段落之间用两个换行符分隔
-            return '\n\n'.join(lines)
-            
-    except Exception as e:
-        logger.error(f"清理字幕内容时出错: {str(e)}")
-        return content
-
-def convert_to_srt(content, input_format):
-    if input_format == 'vtt':
-        try:
-            # 移除 BOM 标记（如果存在）
-            content = content.strip('\ufeff')
-            
-            # 移除 WEBVTT 头部和注释
-            content = re.sub(r'^WEBVTT.*?\n', '', content, flags=re.DOTALL)
-            content = re.sub(r'NOTE.*?\n', '', content, flags=re.DOTALL)
-            
-            # 移除 VTT 特有的样式信息
-            content = re.sub(r'STYLE\n.*?\n\n', '', content, flags=re.DOTALL)
-            content = re.sub(r'REGION\n.*?\n\n', '', content, flags=re.DOTALL)
-            
-            # 清理空行和多余的空格
-            lines = [line.strip() for line in content.split('\n')]
-            lines = [line for line in lines if line]
-            
-            # 转换时间戳格式并添加序号
-            srt_lines = []
-            current_index = 1
-            i = 0
-            while i < len(lines):
-                # 检查是否是时间戳行
-                if re.match(r'^\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}', lines[i]):
-                    # 添加序号
-                    srt_lines.append(str(current_index))
-                    
-                    # 转换时间戳格式（将 . 替换为 ,）
-                    timestamp = re.sub(r'\.', ',', lines[i])
-                    srt_lines.append(timestamp)
-                    
-                    # 收集字幕文本直到下一个时间戳或结束
-                    text_lines = []
-                    i += 1
-                    while i < len(lines) and not re.match(r'^\d{2}:\d{2}:\d{2}[.,]\d{3}', lines[i]):
-                        text_lines.append(lines[i])
-                        i += 1
-                    
-                    # 添加字幕文本和空行
-                    if text_lines:
-                        srt_lines.append(' '.join(text_lines))
-                        srt_lines.append('')
-                        current_index += 1
-                    continue
-                i += 1
-            
-            if not srt_lines:
-                logger.error("转换后的SRT内容为空")
-                return None
-                
-            return '\n'.join(srt_lines)
-            
-        except Exception as e:
-            logger.error(f"转换VTT格式时出错: {str(e)}")
-            return None
-    elif input_format == 'json3':
-        try:
-            # 处理可能的多行 JSON
-            content = content.strip()
-            if content.startswith('[') and content.endswith(']'):
-                # 如果内容是 JSON 数组
-                data_list = json.loads(content)
-                if not data_list:
-                    logger.error("JSON数组为空")
-                    return None
-                # 使用第一个有效的 JSON 对象
-                for data in data_list:
-                    if isinstance(data, dict) and 'events' in data:
-                        break
-                else:
-                    logger.error("JSON数组中没有找到有效的字幕数据")
-                    return None
-            else:
-                # 尝试处理多行独立的 JSON 对象
-                try:
-                    # 首先尝试作为单个 JSON 对象解析
-                    data = json.loads(content)
-                except json.JSONDecodeError:
-                    # 如果失败，尝试分行处理
-                    lines = content.split('\n')
-                    for line in lines:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            data = json.loads(line)
-                            if isinstance(data, dict) and 'events' in data:
-                                break
-                        except json.JSONDecodeError:
-                            continue
-                    else:
-                        logger.error("未找到有效的字幕JSON数据")
-                        return None
-            
-            # 验证数据结构
-            if not isinstance(data, dict) or 'events' not in data:
-                logger.error("无效的json3格式：缺少events字段")
-                return None
-            
-            events = data['events']
-            if not events:
-                logger.error("无效的json3格式：events为空")
-                return None
-            
-            # 转换为SRT格式
-            srt_lines = []
-            for i, event in enumerate(events, 1):
-                # 检查必要的字段
-                if 'tStartMs' not in event or 'dDurationMs' not in event or 'segs' not in event:
-                    continue
-                
-                # 获取开始时间和持续时间
-                start_ms = event['tStartMs']
-                duration_ms = event['dDurationMs']
-                end_ms = start_ms + duration_ms
-                
-                # 转换为SRT时间格式
-                start_time = format_time(start_ms / 1000)
-                end_time = format_time(end_ms / 1000)
-                
-                # 获取文本内容
-                text = ''.join(seg.get('utf8', '') for seg in event['segs'] if 'utf8' in seg)
-                if not text.strip():
-                    continue
-                
-                # 添加SRT条目
-                srt_lines.extend([
-                    str(i),
-                    f"{start_time} --> {end_time}",
-                    text.strip(),
-                    ""
-                ])
-            
-            if not srt_lines:
-                logger.error("转换后的SRT内容为空")
-                return None
-            
-            return "\n".join(srt_lines)
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON解析错误: {str(e)}")
-            return None
-        except Exception as e:
-            logger.error(f"转换json3格式时出错: {str(e)}")
-            return None
-    
-    logger.error(f"不支持的字幕格式: {input_format}")
-    return None
-
-def validate_subtitle_content(content):
-    """验证字幕内容是否有效"""
-    # 检查基本内容
-    if not content or not content.strip():
-        return False, "字幕内容为空"
-    
-    # 检查是否包含时间戳
-    if '-->' not in content:
-        return False, "未找到时间戳"
-    
-    # 检查时间戳格式
-    timestamp_pattern = r'\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}'
-    if not re.search(timestamp_pattern, content):
-        return False, "时间戳格式无效"
-    
-    # 检查是否有实际的文本内容
-    text_lines = [line.strip() for line in content.split('\n') if line.strip() and '-->' not in line and not line.strip().isdigit()]
-    if not text_lines:
-        return False, "没有有效的字幕文本"
-    
-    return True, "字幕内容有效"
-
 def download_video(url):
     """下载视频并提取音频"""
     try:
@@ -1048,13 +752,16 @@ def download_video(url):
         
         # 设置下载选项
         ydl_opts = {
-            'format': 'bestaudio/best',
+            'format': '599/600/249/250/251/140',  # 按优先级尝试不同的音频格式
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'wav',
+                'preferredcodec': 'wav'
             }],
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
-            'quiet': True
+            'cookiesfrombrowser': ('firefox', '/root/.mozilla/firefox/Profiles/3tfynuxa.default-release'),  # 使用Firefox的cookie数据库
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',  # 使用Chrome的UA
+            'quiet': True,
+            'no_warnings': True
         }
         
         # 下载视频并提取音频
@@ -1318,6 +1025,10 @@ def get_youtube_info(url):
             'logger': QuietLogger(),  # 使用自定义日志处理器
             'quiet': True,  # 减少输出
             'no_warnings': True,  # 不显示警告
+            'cookiesfrombrowser': ('firefox', '/root/.mozilla/firefox/Profiles/3tfynuxa.default-release'),  # 使用Firefox的cookie数据库
+            'cookiefile': '/tmp/cookies.txt',  # 同时尝试使用cookie文件
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0',  # 使用Firefox的UA
+            'http_headers': {'Referer': 'https://www.youtube.com/'}  # 添加Referer头
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1517,6 +1228,10 @@ def download_bilibili_subtitles(url, video_info):
             'retries': 10,
             'fragment_retries': 10,
             'socket_timeout': 30,
+            'cookiesfrombrowser': ('firefox', '/root/.mozilla/firefox/Profiles/3tfynuxa.default-release'),  # 使用Firefox的cookie
+            'cookiefile': '/tmp/cookies.txt',  # 同时尝试使用cookie文件
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0',  # 使用Firefox的UA
+            'http_headers': {'Referer': 'https://www.bilibili.com/'}  # 添加Referer头
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1563,6 +1278,10 @@ def download_acfun_subtitles(url, video_info):
             'retries': 10,
             'fragment_retries': 10,
             'socket_timeout': 30,
+            'cookiesfrombrowser': ('firefox', '/root/.mozilla/firefox/Profiles/3tfynuxa.default-release'),  # 使用Firefox的cookie
+            'cookiefile': '/tmp/cookies.txt',  # 同时尝试使用cookie文件
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0',  # 使用Firefox的UA
+            'http_headers': {'Referer': 'https://www.acfun.cn/'}  # 添加Referer头
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -1885,64 +1604,53 @@ def process_subtitle_content(content, is_funasr=False, translate=False, language
         content = re.sub(r'^WEBVTT\s*\n', '', content)
         
         # 分割成行
-        lines = content.split('\n')
-        logger.info(f"字幕总行数: {len(lines)}")
-        text_blocks = []
-        current_block = []
+        lines = []
+        current_text = []
+        skip_next = False
         
-        skipped_numbers = 0
-        skipped_timestamps = 0
-        
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
+        for line in content.split('\n'):
+            line = line.strip()
             
             # 跳过序号行（纯数字）
             if re.match(r'^\d+$', line):
-                skipped_numbers += 1
-                i += 1
                 continue
                 
             # 跳过时间轴行
             if re.match(r'^\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}', line):
-                skipped_timestamps += 1
-                i += 1
                 continue
                 
             # 跳过空行
             if not line:
-                if current_block:
+                if current_text:
                     if is_funasr:
                         # FunASR转换的字幕：合并所有文本，不保留换行
-                        text_blocks.append(' '.join(current_block))
+                        lines.append(' '.join(current_text))
                     else:
                         # 直接提取的字幕：保留原有换行
-                        text_blocks.append('\n'.join(current_block))
-                    current_block = []
-                i += 1
+                        lines.append('\n'.join(current_text))
+                    current_text = []
                 continue
-            
-            current_block.append(line)
-            i += 1
+                
+            current_text.append(line)
             
         # 处理最后一段文本
-        if current_block:
+        if current_text:
             if is_funasr:
-                text_blocks.append(' '.join(current_block))
+                lines.append(' '.join(current_text))
             else:
-                text_blocks.append('\n'.join(current_block))
+                lines.append('\n'.join(current_text))
         
-        # 合并所有文本块
+        # 合并处理后的文本
         if is_funasr:
             # FunASR转换的字幕：所有段落用空格连接
-            result = ' '.join(text_blocks)
+            result = ' '.join(lines)
         else:
             # 直接提取的字幕：段落之间用两个换行符分隔
-            result = '\n\n'.join(text_blocks)
+            result = '\n\n'.join(lines)
             
         logger.info(f"字幕处理完成:")
-        logger.info(f"- 移除了 {skipped_numbers} 个序号标记")
-        logger.info(f"- 移除了 {skipped_timestamps} 个时间轴")
+        logger.info(f"- 移除了 {len(lines)} 个序号标记")
+        logger.info(f"- 移除了 {len(lines)} 个时间轴")
         logger.info(f"- 处理后文本长度: {len(result)}字符")
         logger.debug(f"处理后内容预览: {result[:200]}...")
         
