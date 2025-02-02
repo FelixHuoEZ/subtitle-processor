@@ -1,27 +1,48 @@
 import os
-import json
-import logging
-import requests
-import chardet
-import traceback
-import subprocess
 import re
+import json
+import uuid
+import shutil
+import logging
+import chardet
+import requests
+import tempfile
+import yt_dlp
+from flask import Flask, request, jsonify
+from pydub import AudioSegment
+import os
+import logging
+import sys
+import json
+import re
+import time
+import requests
 import yt_dlp
 import sys
 import tempfile
 import shutil
-from flask import Flask, request, jsonify, send_file, render_template, render_template_string
+import chardet
+from flask import Flask, request, jsonify, send_file, render_template
 from flask_cors import CORS
 from datetime import datetime
 import pytz
-import uuid
+from pydub import AudioSegment
+import wave
+import codecs
+import binascii
+import ast
+import socket
+import math
+import yaml
+import subprocess
+import traceback
 import codecs
 import binascii
 import ast
 import socket
 import time
 import math
-from pydub import AudioSegment
+import pydub
 import wave
 import yaml
 
@@ -270,11 +291,17 @@ def detect_file_encoding(raw_bytes):
     return 'utf-8'  # 默认使用UTF-8
 
 def parse_srt(result, hotwords=None):
-    """解析FunASR的结果为SRT格式
+    """解析FunASR的结果为字幕对象列表
     
     Args:
         result: FunASR的识别结果
         hotwords: 热词列表，用于日志记录和调试
+        
+    Returns:
+        list: 字幕对象列表，每个对象包含：
+            - index: 字幕序号
+            - timestamp: 包含start和end的时间戳对象
+            - text: 字幕文本
     """
     try:
         logger.info("开始解析字幕内容")
@@ -317,12 +344,19 @@ def parse_srt(result, hotwords=None):
                     try:
                         timestamps = json.loads(timestamps)
                         logger.debug("成功解析时间戳字符串")
-                    except json.JSONDecodeError:
-                        logger.warning("时间戳解析失败，将不使用时间戳")
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"时间戳解析失败: {str(e)}")
                         timestamps = None
                 
                 if timestamps:
-                    logger.debug(f"时间戳数量: {len(timestamps)}")
+                    if not isinstance(timestamps, list):
+                        logger.error(f"时间戳格式不正确，期望list，实际为: {type(timestamps)}")
+                        timestamps = None
+                    elif not all(isinstance(ts, (list, tuple)) and len(ts) == 2 for ts in timestamps):
+                        logger.error("时间戳格式不正确，每个时间戳应该是包含开始和结束时间的列表或元组")
+                        timestamps = None
+                    else:
+                        logger.debug(f"时间戳数量: {len(timestamps)}")
         
         if not text_content:
             logger.error("未找到有效的文本内容")
@@ -344,17 +378,25 @@ def parse_srt(result, hotwords=None):
                     current_text.append(char)
                     
                     # 判断是否需要结束当前字幕
-                    is_sentence_end = char in '.。!！?？;；'
-                    is_too_long = len(''.join(current_text)) >= 25
-                    is_long_pause = i < len(timestamps) - 1 and timestamps[i+1][0] - end > 800
-                    is_natural_break = char in '，,、' and len(''.join(current_text)) >= 15
-                    is_last_char = i == len(text_content) - 1
+                    try:
+                        is_sentence_end = char in '.。!！?？;；'
+                        is_too_long = len(''.join(current_text)) >= 25
+                        is_long_pause = i < len(timestamps) - 1 and timestamps[i+1][0] - end > 800
+                        is_natural_break = char in '，,、' and len(''.join(current_text)) >= 15
+                        is_last_char = i == len(text_content) - 1
+                    except Exception as e:
+                        logger.error(f"处理字幕分段时出错: {str(e)}")
+                        continue
                     
+                    # 判断是否需要结束当前字幕
                     if is_sentence_end or is_too_long or is_long_pause or is_natural_break or is_last_char:
                         if current_text:
                             subtitle = {
-                                'start': current_start / 1000.0,
-                                'duration': (end - current_start) / 1000.0,
+                                'index': len(subtitles) + 1,
+                                'timestamp': {
+                                    'start': format_timestamp(current_start / 1000.0),
+                                    'end': format_timestamp(end / 1000.0)
+                                },
                                 'text': ''.join(current_text).strip()
                             }
                             subtitles.append(subtitle)
@@ -366,8 +408,11 @@ def parse_srt(result, hotwords=None):
             # 处理最后剩余的文本
             if current_text:
                 subtitle = {
-                    'start': current_start / 1000.0,
-                    'duration': (timestamps[-1][1] - current_start) / 1000.0,
+                    'index': len(subtitles) + 1,
+                    'timestamp': {
+                        'start': format_timestamp(current_start / 1000.0),
+                        'end': format_timestamp(timestamps[-1][1] / 1000.0)
+                    },
                     'text': ''.join(current_text).strip()
                 }
                 subtitles.append(subtitle)
@@ -743,18 +788,18 @@ def download_youtube_subtitles(url, video_info=None, lang_priority=None):
             logger.info("清理临时目录")
         raise
 
-def download_video(url):
+def download_video(video_url):
     """下载视频并提取音频"""
     try:
         # 创建临时目录
         temp_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'temp')
         os.makedirs(temp_dir, exist_ok=True)
-        logger.info(f"开始下载视频: {url}")
+        logger.info(f"开始下载视频: {video_url}")
         
         # 先尝试检查视频信息
         try:
             with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-                info = ydl.extract_info(url, download=False)
+                info = ydl.extract_info(video_url, download=False)
                 logger.info(f"视频标题: {info.get('title')}")
                 if info.get('age_limit', 0) > 0:
                     logger.info(f"视频有年龄限制: {info.get('age_limit')}+")
@@ -768,7 +813,7 @@ def download_video(url):
         # 基础下载选项
         base_opts = {
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
-            'cookiesfrombrowser': ('firefox', '/root/.mozilla/firefox/Profiles/3tfynuxa.default-release'),
+            'cookiesfrombrowser': ('firefox', '/root/.mozilla/firefox/Profiles/3tfynuxa.default-release'),  # 使用Firefox的cookie
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'quiet': True,
             'no_warnings': True,
@@ -792,29 +837,51 @@ def download_video(url):
         logger.info(f"将尝试以下格式: {'/'.join(formats)}")
         
         last_error = None
+        downloaded_file = None
+        
         for fmt in formats:
             try:
                 logger.info(f"尝试格式: {fmt}")
                 opts = base_opts.copy()
                 opts['format'] = fmt
-                if fmt != '18':  # 非完整视频格式需要提取音频
-                    opts['postprocessors'] = [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'wav'
-                    }]
                 
                 with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
+                    info = ydl.extract_info(video_url, download=True)
                     video_id = info['id']
-                    audio_path = os.path.join(temp_dir, f"{video_id}.wav")
+                    downloaded_file = os.path.join(temp_dir, f"{video_id}.{info['ext']}")
                     
-                    if not os.path.exists(audio_path):
-                        logger.warning(f"音频文件不存在，尝试下一个格式: {audio_path}")
+                    if not os.path.exists(downloaded_file):
+                        logger.warning(f"下载的文件不存在: {downloaded_file}")
                         continue
                     
-                    logger.info(f"成功下载并转换为WAV格式: {audio_path}")
+                    logger.info(f"成功下载文件: {downloaded_file}")
                     logger.info(f"使用的格式: {fmt}")
-                    return audio_path
+                    
+                    # 如果是纯音频格式，直接转换为wav
+                    if fmt in ['599', '600', '249', '250', '251', '140']:
+                        audio = AudioSegment.from_file(downloaded_file)
+                    # 如果是视频格式，提取音频
+                    else:
+                        logger.info("从视频文件提取音频...")
+                        audio = AudioSegment.from_file(downloaded_file)
+                    
+                    # 转换为单声道、16kHz的WAV格式
+                    if audio.channels > 1:
+                        audio = audio.set_channels(1)
+                    if audio.frame_rate != 16000:
+                        audio = audio.set_frame_rate(16000)
+                    
+                    # 保存为WAV文件
+                    wav_path = os.path.join(temp_dir, f"{video_id}.wav")
+                    audio.export(wav_path, format='wav')
+                    logger.info(f"成功转换为WAV格式: {wav_path}")
+                    
+                    # 删除原始下载文件
+                    if downloaded_file != wav_path:
+                        os.remove(downloaded_file)
+                        logger.info(f"已删除原始文件: {downloaded_file}")
+                    
+                    return wav_path
                     
             except Exception as e:
                 last_error = e
@@ -822,6 +889,9 @@ def download_video(url):
                     logger.info(f"格式 {fmt} 下载失败: 403 错误")
                 else:
                     logger.info(f"格式 {fmt} 下载失败: {str(e)}")
+                # 如果文件下载失败，清理文件
+                if downloaded_file and os.path.exists(downloaded_file):
+                    os.remove(downloaded_file)
                 continue
         
         # 如果所有格式都失败了
@@ -1021,31 +1091,6 @@ def transcribe_audio(audio_path, hotwords=None):
     except Exception as e:
         logger.error(f"音频转录时出错: {str(e)}")
         return None
-
-def format_time(seconds):
-    """将秒数转换为 HH:MM:SS,mmm 格式"""
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    seconds = seconds % 60
-    milliseconds = int((seconds % 1) * 1000)
-    seconds = int(seconds)
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
-
-def parse_time(time_str):
-    """将 HH:MM:SS,mmm 格式时间转换为秒数"""
-    try:
-        # 处理毫秒
-        if ',' in time_str:
-            time_str = time_str.replace(',', '.')
-        
-        # 分离时、分、秒
-        hours, minutes, seconds = time_str.split(':')
-        total_seconds = float(hours) * 3600 + float(minutes) * 60 + float(seconds)
-        return total_seconds
-        
-    except Exception as e:
-        logger.error(f"解析时间字符串出错: {str(e)}, 时间字符串: {time_str}")
-        return 0.0
 
 def convert_youtube_url(url):
     """将YouTube URL转换为自定义domain"""
@@ -2203,12 +2248,35 @@ def process_youtube():
                 # 下载视频音频
                 audio_path = download_video(url)
                 # 转录音频
-                srt_content = transcribe_audio(audio_path)
+                transcribe_results = transcribe_audio(audio_path)
+                logger.info(f"转录结果类型: {type(transcribe_results)}")
+                logger.info(f"转录结果: {transcribe_results}")
+                
+                if transcribe_results:
+                    if isinstance(transcribe_results, (str, dict)):
+                        # 解析转录结果生成字幕
+                        srt_content = parse_srt(transcribe_results)
+                        if srt_content:
+                            logger.info("成功解析转录结果为SRT格式")
+                            srt_content = clean_subtitle_content(srt_content, is_funasr=True)
+                            if not srt_content:
+                                logger.error("字幕内容清理失败")
+                            else:
+                                logger.info("转录完成并清理完成")
+                        else:
+                            logger.error("无法解析转录结果为SRT格式")
+                    else:
+                        logger.error(f"转录结果格式不正确，期望str或dict，实际为: {type(transcribe_results)}")
+                else:
+                    logger.error("转录返回空结果")
+                    
                 # 清理临时文件
-                os.remove(audio_path)
-                if srt_content:
-                    srt_content = clean_subtitle_content(srt_content, is_funasr=True)
-                    logger.info("转录完成并清理完成")
+                try:
+                    os.remove(audio_path)
+                    logger.info(f"已删除临时文件: {audio_path}")
+                except Exception as e:
+                    logger.warning(f"删除临时文件失败: {str(e)}")
+                    
             except Exception as e:
                 logger.error(f"转录失败: {str(e)}")
                 logger.exception("详细错误信息:")
@@ -2698,6 +2766,227 @@ def get_subtitle_strategy(language, info):
     else:
         # 其他语言：暂不处理
         return False, []
+
+def clean_subtitle_content(content, is_funasr=False):
+    """
+    清理字幕内容
+    :param content: 原始字幕内容
+    :param is_funasr: 是否是 FunASR 转录的内容
+    :return: 清理后的字幕内容
+    """
+    try:
+        if not isinstance(content, str):
+            logger.warning(f"输入内容不是字符串类型: {type(content)}")
+            if isinstance(content, (list, tuple)):
+                logger.debug("将列表或元组转换为字符串")
+                content = ' '.join(map(str, content))
+            else:
+                content = str(content)
+        
+        content = content.strip()
+        logger.debug(f"清理后的字幕内容长度: {len(content)}")
+        return content
+    except Exception as e:
+        logger.error(f"清理字幕内容时出错: {str(e)}")
+        logger.exception("详细错误信息:")
+        return None
+
+def format_time(seconds):
+    """将秒数转换为 HH:MM:SS,mmm 格式"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    seconds = seconds % 60
+    milliseconds = int((seconds % 1) * 1000)
+    seconds = int(seconds)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
+
+def parse_time(time_str):
+    """将 HH:MM:SS,mmm 格式时间转换为秒数"""
+    try:
+        # 处理毫秒
+        if ',' in time_str:
+            time_str = time_str.replace(',', '.')
+        
+        # 分离时、分、秒
+        hours, minutes, seconds = time_str.split(':')
+        total_seconds = float(hours) * 3600 + float(minutes) * 60 + float(seconds)
+        return total_seconds
+        
+    except Exception as e:
+        logger.error(f"解析时间字符串出错: {str(e)}, 时间字符串: {time_str}")
+        return 0.0
+
+def format_timestamp(seconds):
+    """将秒数转换为SRT时间戳格式 (HH:MM:SS,mmm)"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    milliseconds = int((seconds - int(seconds)) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
+
+def format_srt_subtitles(subtitles):
+    """将字幕列表转换为SRT格式文本"""
+    if not subtitles:
+        return None
+    
+    srt_lines = []
+    for i, sub in enumerate(subtitles, 1):
+        if isinstance(sub.get('timestamp'), dict):
+            # 如果已经是格式化的时间戳
+            start_time = sub['timestamp']['start']
+            end_time = sub['timestamp']['end']
+        else:
+            # 如果是秒数，需要格式化
+            start_time = format_timestamp(sub['start'])
+            end_time = format_timestamp(sub['start'] + sub['duration'])
+        
+        srt_lines.extend([
+            str(i),
+            f"{start_time} --> {end_time}",
+            sub['text'],
+            ""  # 空行分隔
+        ])
+    return '\n'.join(srt_lines)
+
+def parse_srt(result, hotwords=None):
+    """解析FunASR的结果为字幕对象列表
+    
+    Args:
+        result: FunASR的识别结果
+        hotwords: 热词列表，用于日志记录和调试
+        
+    Returns:
+        list: 字幕对象列表，每个对象包含：
+            - index: 字幕序号
+            - timestamp: 包含start和end的时间戳对象
+            - text: 字幕文本
+    """
+    try:
+        logger.info("开始解析字幕内容")
+        logger.debug(f"输入结果类型: {type(result)}")
+        logger.debug(f"输入结果内容: {result}")
+        
+        text_content = None
+        timestamps = None
+        duration = None
+        
+        # 如果结果是字符串，尝试解析为字典
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+                logger.debug("成功将字符串解析为字典")
+            except json.JSONDecodeError:
+                logger.debug("输入是纯文本，直接使用")
+                text_content = result
+        
+        # 从字典中提取信息
+        if isinstance(result, dict):
+            # 获取音频时长
+            if 'audio_info' in result and 'duration_seconds' in result['audio_info']:
+                duration = result['audio_info']['duration_seconds']
+                logger.debug(f"获取到音频时长: {duration}秒")
+            
+            # 获取文本内容
+            if 'text' in result:
+                if isinstance(result['text'], str):
+                    text_content = result['text']
+                    logger.debug(f"获取到文本内容: {text_content[:200]}...")
+                else:
+                    logger.error(f"text字段不是字符串类型: {type(result['text'])}")
+                    return None
+            
+            # 获取时间戳
+            if 'timestamp' in result:
+                timestamps = result['timestamp']
+                if isinstance(timestamps, str):
+                    try:
+                        timestamps = json.loads(timestamps)
+                        logger.debug("成功解析时间戳字符串")
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"时间戳解析失败: {str(e)}")
+                        timestamps = None
+                
+                if timestamps:
+                    if not isinstance(timestamps, list):
+                        logger.error(f"时间戳格式不正确，期望list，实际为: {type(timestamps)}")
+                        timestamps = None
+                    elif not all(isinstance(ts, (list, tuple)) and len(ts) == 2 for ts in timestamps):
+                        logger.error("时间戳格式不正确，每个时间戳应该是包含开始和结束时间的列表或元组")
+                        timestamps = None
+                    else:
+                        logger.debug(f"时间戳数量: {len(timestamps)}")
+        
+        if not text_content:
+            logger.error("未找到有效的文本内容")
+            return None
+        
+        # 分割文本为句子
+        sentences = split_into_sentences(text_content)
+        
+        # 如果有时间戳，使用时间戳生成字幕
+        if timestamps and isinstance(timestamps, list) and len(timestamps) > 0:
+            logger.info("使用时间戳生成字幕")
+            subtitles = []
+            current_text = []
+            current_start = timestamps[0][0]
+            
+            for i, (start, end) in enumerate(timestamps):
+                if i < len(text_content):
+                    char = text_content[i]
+                    current_text.append(char)
+                    
+                    # 判断是否需要结束当前字幕
+                    try:
+                        is_sentence_end = char in '.。!！?？;；'
+                        is_too_long = len(''.join(current_text)) >= 25
+                        is_long_pause = i < len(timestamps) - 1 and timestamps[i+1][0] - end > 800
+                        is_natural_break = char in '，,、' and len(''.join(current_text)) >= 15
+                        is_last_char = i == len(text_content) - 1
+                    except Exception as e:
+                        logger.error(f"处理字幕分段时出错: {str(e)}")
+                        continue
+                    
+                    # 判断是否需要结束当前字幕
+                    if is_sentence_end or is_too_long or is_long_pause or is_natural_break or is_last_char:
+                        if current_text:
+                            subtitle = {
+                                'index': len(subtitles) + 1,
+                                'timestamp': {
+                                    'start': format_timestamp(current_start / 1000.0),
+                                    'end': format_timestamp(end / 1000.0)
+                                },
+                                'text': ''.join(current_text).strip()
+                            }
+                            subtitles.append(subtitle)
+                            logger.debug(f"添加字幕: {subtitle}")
+                            current_text = []
+                            if i < len(timestamps) - 1:
+                                current_start = timestamps[i+1][0]
+            
+            # 处理最后剩余的文本
+            if current_text:
+                subtitle = {
+                    'index': len(subtitles) + 1,
+                    'timestamp': {
+                        'start': format_timestamp(current_start / 1000.0),
+                        'end': format_timestamp(timestamps[-1][1] / 1000.0)
+                    },
+                    'text': ''.join(current_text).strip()
+                }
+                subtitles.append(subtitle)
+                logger.debug(f"添加最后的字幕: {subtitle}")
+            
+            logger.info(f"使用时间戳生成了 {len(subtitles)} 条字幕")
+            return subtitles
+        
+        # 如果没有时间戳，使用估算的时间戳
+        logger.info("使用估算的时间戳生成字幕")
+        return generate_srt_timestamps(sentences, duration)
+    
+    except Exception as e:
+        logger.error(f"解析字幕时出错: {str(e)}")
+        logger.error(f"错误的输入内容: {result}")
+        return None
 
 if __name__ == '__main__':
     logger.info("启动Flask服务器")
