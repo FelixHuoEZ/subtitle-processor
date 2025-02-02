@@ -749,35 +749,122 @@ def download_video(url):
         # 创建临时目录
         temp_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'temp')
         os.makedirs(temp_dir, exist_ok=True)
+        logger.info(f"开始下载视频: {url}")
         
-        # 设置下载选项
-        ydl_opts = {
-            'format': '599/600/249/250/251/140',  # 按优先级尝试不同的音频格式
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'wav'
-            }],
+        # 先尝试检查视频信息
+        try:
+            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                info = ydl.extract_info(url, download=False)
+                logger.info(f"视频标题: {info.get('title')}")
+                if info.get('age_limit', 0) > 0:
+                    logger.info(f"视频有年龄限制: {info.get('age_limit')}+")
+                if info.get('is_live', False):
+                    logger.info("这是一个直播视频")
+                if info.get('availability', '') != 'public':
+                    logger.info(f"视频可用性: {info.get('availability', 'unknown')}")
+        except Exception as e:
+            logger.info(f"无法获取视频信息，可能需要登录: {str(e)}")
+        
+        # 基础下载选项
+        base_opts = {
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
-            'cookiesfrombrowser': ('firefox', '/root/.mozilla/firefox/Profiles/3tfynuxa.default-release'),  # 使用Firefox的cookie数据库
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',  # 使用Chrome的UA
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'quiet': True,
-            'no_warnings': True
+            'no_warnings': True,
+            'geo_bypass': True,
+            'no_check_certificate': True,
+            'http_headers': {
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Origin': 'https://www.youtube.com',
+                'Referer': 'https://www.youtube.com/'
+            },
+            'progress_hooks': [lambda d: logger.info(f"正在下载: 格式={d.get('format_id', 'unknown')}, "
+                                                   f"大小={d.get('total_bytes_estimate', 0)/1024/1024:.2f}MB, "
+                                                   f"进度={d.get('downloaded_bytes', 0)/max(d.get('total_bytes', 1), 1)*100:.1f}%")]
         }
         
-        # 下载视频并提取音频
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            video_id = info['id']
-            audio_path = os.path.join(temp_dir, f"{video_id}.wav")
-            
-            if not os.path.exists(audio_path):
-                logger.error(f"音频文件不存在: {audio_path}")
-                return None
+        # 尝试获取Firefox配置文件路径
+        firefox_profile = get_firefox_profile_path()
+        if firefox_profile:
+            logger.info(f"使用Firefox配置文件: {firefox_profile}")
+            base_opts['cookiesfrombrowser'] = ('firefox', firefox_profile)
+        else:
+            logger.warning("未找到Firefox配置文件，将尝试不使用cookie下载")
+        
+        # 按优先级尝试不同的格式
+        formats = ['599', '600', '249', '250', '251', '140', '18']
+        logger.info(f"将尝试以下格式: {'/'.join(formats)}")
+        
+        last_error = None
+        downloaded_file = None
+        
+        for fmt in formats:
+            try:
+                logger.info(f"尝试格式: {fmt}")
+                opts = base_opts.copy()
+                opts['format'] = fmt
                 
-            return audio_path
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    video_id = info['id']
+                    downloaded_file = os.path.join(temp_dir, f"{video_id}.{info['ext']}")
+                    
+                    if not os.path.exists(downloaded_file):
+                        logger.warning(f"下载的文件不存在: {downloaded_file}")
+                        continue
+                    
+                    logger.info(f"成功下载文件: {downloaded_file}")
+                    logger.info(f"使用的格式: {fmt}")
+                    
+                    # 如果是纯音频格式，直接转换为wav
+                    if fmt in ['599', '600', '249', '250', '251', '140']:
+                        audio = AudioSegment.from_file(downloaded_file)
+                    # 如果是视频格式，提取音频
+                    else:
+                        logger.info("从视频文件提取音频...")
+                        audio = AudioSegment.from_file(downloaded_file)
+                    
+                    # 转换为单声道、16kHz的WAV格式
+                    if audio.channels > 1:
+                        audio = audio.set_channels(1)
+                    if audio.frame_rate != 16000:
+                        audio = audio.set_frame_rate(16000)
+                    
+                    # 保存为WAV文件
+                    wav_path = os.path.join(temp_dir, f"{video_id}.wav")
+                    audio.export(wav_path, format='wav')
+                    logger.info(f"成功转换为WAV格式: {wav_path}")
+                    
+                    # 删除原始下载文件
+                    if downloaded_file != wav_path:
+                        os.remove(downloaded_file)
+                        logger.info(f"已删除原始文件: {downloaded_file}")
+                    
+                    return wav_path
+                    
+            except Exception as e:
+                last_error = e
+                if 'HTTP Error 403' in str(e):
+                    logger.info(f"格式 {fmt} 下载失败: 403 错误")
+                else:
+                    logger.info(f"格式 {fmt} 下载失败: {str(e)}")
+                # 如果文件下载失败，清理文件
+                if downloaded_file and os.path.exists(downloaded_file):
+                    os.remove(downloaded_file)
+                continue
+        
+        # 如果所有格式都失败了
+        if last_error:
+            logger.error(f"所有格式都下载失败，最后的错误: {str(last_error)}")
+            if 'HTTP Error 403' in str(e):
+                logger.info("收到 403 错误，可能是由于：1) 需要登录 2) 地理限制 3) 年龄限制")
+        return None
             
     except Exception as e:
         logger.error(f"下载视频时出错: {str(e)}")
+        if 'HTTP Error 403' in str(e):
+            logger.info("收到 403 错误，可能是由于：1) 需要登录 2) 地理限制 3) 年龄限制")
         return None
 
 def split_audio(audio_path, max_duration=600, max_size=100*1024*1024):
@@ -2641,6 +2728,68 @@ def get_subtitle_strategy(language, info):
     else:
         # 其他语言：暂不处理
         return False, []
+
+def get_firefox_profile_path():
+    """获取 Firefox 默认配置文件路径"""
+    try:
+        # 首先尝试从配置文件获取
+        profile_path = get_config_value('cookies.firefox_profile')
+        if profile_path and os.path.exists(profile_path):
+            logger.info(f"使用配置文件指定的Firefox配置文件路径: {profile_path}")
+            return profile_path
+
+        # 获取Firefox配置文件根目录
+        if os.name == 'nt':  # Windows
+            firefox_dir = os.path.expandvars(r'%APPDATA%\Mozilla\Firefox')
+        else:  # Linux/Unix
+            firefox_dir = os.path.expanduser('~/.mozilla/firefox')
+
+        if not os.path.exists(firefox_dir):
+            logger.warning(f"Firefox配置目录不存在: {firefox_dir}")
+            return None
+
+        # 读取 profiles.ini
+        profiles_ini = os.path.join(firefox_dir, 'profiles.ini')
+        if not os.path.exists(profiles_ini):
+            logger.warning(f"profiles.ini不存在: {profiles_ini}")
+            return None
+
+        import configparser
+        config = configparser.ConfigParser()
+        config.read(profiles_ini)
+
+        # 查找默认配置文件
+        for section in config.sections():
+            if section.startswith('Profile') and config.getint(section, 'Default', fallback=0) == 1:
+                profile_path = config.get(section, 'Path')
+                is_relative = config.getint(section, 'IsRelative', fallback=1)
+                
+                if is_relative:
+                    profile_path = os.path.join(firefox_dir, profile_path)
+                
+                if os.path.exists(profile_path):
+                    logger.info(f"找到Firefox默认配置文件: {profile_path}")
+                    return profile_path
+
+        # 如果没有找到默认配置文件，使用第一个找到的配置文件
+        for section in config.sections():
+            if section.startswith('Profile'):
+                profile_path = config.get(section, 'Path')
+                is_relative = config.getint(section, 'IsRelative', fallback=1)
+                
+                if is_relative:
+                    profile_path = os.path.join(firefox_dir, profile_path)
+                
+                if os.path.exists(profile_path):
+                    logger.info(f"使用Firefox配置文件: {profile_path}")
+                    return profile_path
+
+        logger.warning("未找到可用的Firefox配置文件")
+        return None
+
+    except Exception as e:
+        logger.error(f"获取Firefox配置文件路径时出错: {str(e)}")
+        return None
 
 if __name__ == '__main__':
     logger.info("启动Flask服务器")
