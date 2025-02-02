@@ -749,17 +749,32 @@ def download_video(url):
         # 创建临时目录
         temp_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'temp')
         os.makedirs(temp_dir, exist_ok=True)
+        logger.info(f"开始下载视频: {url}")
+        
+        # 先尝试检查视频信息
+        try:
+            with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                info = ydl.extract_info(url, download=False)
+                logger.info(f"视频标题: {info.get('title')}")
+                if info.get('age_limit', 0) > 0:
+                    logger.info(f"视频有年龄限制: {info.get('age_limit')}+")
+                if info.get('is_live', False):
+                    logger.info("这是一个直播视频")
+                if info.get('availability', '') != 'public':
+                    logger.info(f"视频可用性: {info.get('availability', 'unknown')}")
+        except Exception as e:
+            logger.info(f"无法获取视频信息，可能需要登录: {str(e)}")
         
         # 设置下载选项
         ydl_opts = {
-            'format': '599/600/249/250/251/140/18',  # 按优先级尝试不同的音频格式
+            'format': '599/600/249/250/251/140/18',  # 按优先级尝试不同的格式，包括完整视频格式
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'wav'
             }],
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
-            'cookiesfrombrowser': ('firefox', '/root/.mozilla/firefox/Profiles/3tfynuxa.default-release'),  # 使用Firefox的cookie数据库
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0',  # 使用Firefox的UA
+            'cookiesfrombrowser': ('firefox', '/root/.mozilla/firefox/Profiles/3tfynuxa.default-release'),
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'quiet': True,
             'no_warnings': True,
             'geo_bypass': True,
@@ -769,8 +784,14 @@ def download_video(url):
                 'Accept-Language': 'en-US,en;q=0.5',
                 'Origin': 'https://www.youtube.com',
                 'Referer': 'https://www.youtube.com/'
-            }
+            },
+            'progress_hooks': [lambda d: logger.info(f"正在下载: 格式={d.get('format_id', 'unknown')}, "
+                                                   f"大小={d.get('total_bytes_estimate', 0)/1024/1024:.2f}MB, "
+                                                   f"进度={d.get('downloaded_bytes', 0)/max(d.get('total_bytes', 1), 1)*100:.1f}%")]
         }
+        
+        logger.info("使用 Firefox cookies 进行下载")
+        logger.info(f"尝试按优先级下载以下格式: {ydl_opts['format']}")
         
         # 下载视频并提取音频
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -781,11 +802,15 @@ def download_video(url):
             if not os.path.exists(audio_path):
                 logger.error(f"音频文件不存在: {audio_path}")
                 return None
-                
+            
+            logger.info(f"成功下载并转换为WAV格式: {audio_path}")
+            logger.info(f"最终使用的格式: {info.get('format_id', 'unknown')}")
             return audio_path
             
     except Exception as e:
         logger.error(f"下载视频时出错: {str(e)}")
+        if 'HTTP Error 403' in str(e):
+            logger.info("收到 403 错误，可能是由于：1) 需要登录 2) 地理限制 3) 年龄限制")
         return None
 
 def split_audio(audio_path, max_duration=600, max_size=100*1024*1024):
