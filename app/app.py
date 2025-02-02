@@ -765,13 +765,8 @@ def download_video(url):
         except Exception as e:
             logger.info(f"无法获取视频信息，可能需要登录: {str(e)}")
         
-        # 设置下载选项
-        ydl_opts = {
-            'format': '599/600/249/250/251/140/18',  # 按优先级尝试不同的格式，包括完整视频格式
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'wav'
-            }],
+        # 基础下载选项
+        base_opts = {
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
             'cookiesfrombrowser': ('firefox', '/root/.mozilla/firefox/Profiles/3tfynuxa.default-release'),
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -791,21 +786,50 @@ def download_video(url):
         }
         
         logger.info("使用 Firefox cookies 进行下载")
-        logger.info(f"尝试按优先级下载以下格式: {ydl_opts['format']}")
         
-        # 下载视频并提取音频
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            video_id = info['id']
-            audio_path = os.path.join(temp_dir, f"{video_id}.wav")
-            
-            if not os.path.exists(audio_path):
-                logger.error(f"音频文件不存在: {audio_path}")
-                return None
-            
-            logger.info(f"成功下载并转换为WAV格式: {audio_path}")
-            logger.info(f"最终使用的格式: {info.get('format_id', 'unknown')}")
-            return audio_path
+        # 按优先级尝试不同的格式
+        formats = ['599', '600', '249', '250', '251', '140', '18']
+        logger.info(f"将尝试以下格式: {'/'.join(formats)}")
+        
+        last_error = None
+        for fmt in formats:
+            try:
+                logger.info(f"尝试格式: {fmt}")
+                opts = base_opts.copy()
+                opts['format'] = fmt
+                if fmt != '18':  # 非完整视频格式需要提取音频
+                    opts['postprocessors'] = [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'wav'
+                    }]
+                
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    video_id = info['id']
+                    audio_path = os.path.join(temp_dir, f"{video_id}.wav")
+                    
+                    if not os.path.exists(audio_path):
+                        logger.warning(f"音频文件不存在，尝试下一个格式: {audio_path}")
+                        continue
+                    
+                    logger.info(f"成功下载并转换为WAV格式: {audio_path}")
+                    logger.info(f"使用的格式: {fmt}")
+                    return audio_path
+                    
+            except Exception as e:
+                last_error = e
+                if 'HTTP Error 403' in str(e):
+                    logger.info(f"格式 {fmt} 下载失败: 403 错误")
+                else:
+                    logger.info(f"格式 {fmt} 下载失败: {str(e)}")
+                continue
+        
+        # 如果所有格式都失败了
+        if last_error:
+            logger.error(f"所有格式都下载失败，最后的错误: {str(last_error)}")
+            if 'HTTP Error 403' in str(last_error):
+                logger.info("收到 403 错误，可能是由于：1) 需要登录 2) 地理限制 3) 年龄限制")
+        return None
             
     except Exception as e:
         logger.error(f"下载视频时出错: {str(e)}")
