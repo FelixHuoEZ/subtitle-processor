@@ -752,16 +752,24 @@ def download_video(url):
         
         # 设置下载选项
         ydl_opts = {
-            'format': '599/600/249/250/251/140',  # 按优先级尝试不同的音频格式
+            'format': '599/600/249/250/251/140/18',  # 按优先级尝试不同的音频格式
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'wav'
             }],
             'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
             'cookiesfrombrowser': ('firefox', '/root/.mozilla/firefox/Profiles/3tfynuxa.default-release'),  # 使用Firefox的cookie数据库
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',  # 使用Chrome的UA
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0',  # 使用Firefox的UA
             'quiet': True,
-            'no_warnings': True
+            'no_warnings': True,
+            'geo_bypass': True,
+            'no_check_certificate': True,
+            'http_headers': {
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Origin': 'https://www.youtube.com',
+                'Referer': 'https://www.youtube.com/'
+            }
         }
         
         # 下载视频并提取音频
