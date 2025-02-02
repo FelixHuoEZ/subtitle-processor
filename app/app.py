@@ -24,6 +24,7 @@ import math
 from pydub import AudioSegment
 import wave
 import yaml
+import configparser
 
 # 配置日志格式和级别
 class ColoredFormatter(logging.Formatter):
@@ -389,7 +390,7 @@ def parse_srt_content(srt_content):
     """解析SRT格式字幕内容
     
     Args:
-        srt_content (str): SRT格式的字幕内容
+        srt_content (str): SRT格式的字幕内容或转录结果
         
     Returns:
         list: 解析后的字幕列表，每个字幕包含id、start、end、duration和text字段
@@ -400,6 +401,46 @@ def parse_srt_content(srt_content):
     if not srt_content or not isinstance(srt_content, str):
         logger.error("无效的字幕内容")
         return []
+    
+    # 记录原始内容
+    logger.info(f"开始解析字幕内容，长度：{len(srt_content)}")
+    logger.debug(f"字幕内容前100个字符: {srt_content[:100]}")
+    
+    # 检查是否是转录结果（没有时间戳）
+    if not re.search(r'\d+:\d+:\d+', srt_content):
+        logger.info("检测到内容是转录结果，需要生成时间戳")
+        # 将文本分割成句子
+        sentences = split_into_sentences(srt_content)
+        if not sentences:
+            logger.error("无法分割句子或句子列表为空")
+            return []
+            
+        logger.info(f"分割得到 {len(sentences)} 个句子")
+        
+        # 生成时间戳（每个句子平均分配时间）
+        # 假设每个字0.3秒
+        total_duration = sum(len(s) * 0.3 for s in sentences)
+        logger.info(f"估算总时长：{total_duration} 秒")
+        
+        # 生成SRT格式的内容
+        srt_lines = []
+        current_time = 0
+        for i, sentence in enumerate(sentences, 1):
+            if not sentence.strip():
+                continue
+            duration = (len(sentence) / sum(len(s) for s in sentences)) * total_duration
+            end_time = min(current_time + duration, total_duration)
+            
+            srt_lines.extend([
+                str(i),
+                f"{format_time(current_time)} --> {format_time(end_time)}",
+                sentence.strip(),
+                ""
+            ])
+            current_time = end_time
+        
+        srt_content = "\n".join(srt_lines)
+        logger.info("已生成带时间戳的SRT格式内容")
         
     subtitles_list = []
     current_subtitle = {}
@@ -435,8 +476,8 @@ def parse_srt_content(srt_content):
                     
                 try:
                     start_time, end_time = time_line.split(' --> ')
-                    current_subtitle['start'] = parse_time_str(start_time.strip())
-                    current_subtitle['end'] = parse_time_str(end_time.strip())
+                    current_subtitle['start'] = parse_time(start_time.strip())
+                    current_subtitle['end'] = parse_time(end_time.strip())
                     
                     if current_subtitle['start'] is None or current_subtitle['end'] is None:
                         raise ValueError("无效的时间戳值")
@@ -481,6 +522,8 @@ def parse_srt_content(srt_content):
     
     if not subtitles_list:
         logger.warning("没有解析出任何有效字幕")
+    else:
+        logger.info(f"成功解析出 {len(subtitles_list)} 条字幕")
     
     return subtitles_list
 
@@ -857,7 +900,7 @@ def download_video(url):
         # 如果所有格式都失败了
         if last_error:
             logger.error(f"所有格式都下载失败，最后的错误: {str(last_error)}")
-            if 'HTTP Error 403' in str(e):
+            if 'HTTP Error 403' in str(last_error):
                 logger.info("收到 403 错误，可能是由于：1) 需要登录 2) 地理限制 3) 年龄限制")
         return None
             
@@ -2730,66 +2773,92 @@ def get_subtitle_strategy(language, info):
         return False, []
 
 def get_firefox_profile_path():
-    """获取 Firefox 默认配置文件路径"""
+    """获取Firefox配置文件路径"""
     try:
-        # 首先尝试从配置文件获取
-        profile_path = get_config_value('cookies.firefox_profile')
-        if profile_path and os.path.exists(profile_path):
-            logger.info(f"使用配置文件指定的Firefox配置文件路径: {profile_path}")
-            return profile_path
+        # 检查配置文件中是否有指定的cookie路径
+        if 'cookies' in app.config:
+            cookie_path = app.config['cookies']
+            if os.path.exists(cookie_path):
+                logger.info(f"使用配置的cookie路径: {cookie_path}")
+                return cookie_path
+            else:
+                logger.warning("配置路径 cookies 不存在")
 
-        # 获取Firefox配置文件根目录
-        if os.name == 'nt':  # Windows
-            firefox_dir = os.path.expandvars(r'%APPDATA%\Mozilla\Firefox')
-        else:  # Linux/Unix
-            firefox_dir = os.path.expanduser('~/.mozilla/firefox')
+        # 在Docker容器中，Firefox配置文件路径
+        firefox_config = '/root/.mozilla/firefox/profiles.ini'
+        if os.path.exists(firefox_config):
+            config = configparser.ConfigParser()
+            config.read(firefox_config)
+            
+            # 首先检查 Install 部分的默认配置
+            install_section = None
+            for section in config.sections():
+                if section.startswith('Install'):
+                    install_section = section
+                    break
+            
+            if install_section and config.has_option(install_section, 'Default'):
+                default_path = config.get(install_section, 'Default')
+                if default_path:
+                    profile_path = os.path.join('/root/.mozilla/firefox', default_path)
+                    if os.path.exists(profile_path):
+                        logger.info(f"使用Install部分指定的配置文件: {profile_path}")
+                        return profile_path
+            
+            # 如果没有找到 Install 部分的配置，遍历所有 Profile 部分
+            for section in config.sections():
+                if section.startswith('Profile'):
+                    if config.has_option(section, 'Path'):
+                        profile_path = config.get(section, 'Path')
+                        # 检查是否为相对路径
+                        if config.has_option(section, 'IsRelative') and config.getint(section, 'IsRelative', fallback=1) == 1:
+                            profile_path = os.path.join('/root/.mozilla/firefox', profile_path)
+                        
+                        # 检查是否为默认配置文件
+                        if config.has_option(section, 'Name') and config.get(section, 'Name') == 'default-release':
+                            logger.info(f"使用default-release配置文件: {profile_path}")
+                            return profile_path
+                        
+                        # 如果标记为默认配置文件
+                        if config.has_option(section, 'Default') and config.getint(section, 'Default', fallback=0) == 1:
+                            logger.info(f"使用默认配置文件: {profile_path}")
+                            return profile_path
 
-        if not os.path.exists(firefox_dir):
-            logger.warning(f"Firefox配置目录不存在: {firefox_dir}")
-            return None
-
-        # 读取 profiles.ini
-        profiles_ini = os.path.join(firefox_dir, 'profiles.ini')
-        if not os.path.exists(profiles_ini):
-            logger.warning(f"profiles.ini不存在: {profiles_ini}")
-            return None
-
-        import configparser
-        config = configparser.ConfigParser()
-        config.read(profiles_ini)
-
-        # 查找默认配置文件
-        for section in config.sections():
-            if section.startswith('Profile') and config.getint(section, 'Default', fallback=0) == 1:
-                profile_path = config.get(section, 'Path')
-                is_relative = config.getint(section, 'IsRelative', fallback=1)
-                
-                if is_relative:
-                    profile_path = os.path.join(firefox_dir, profile_path)
-                
-                if os.path.exists(profile_path):
-                    logger.info(f"找到Firefox默认配置文件: {profile_path}")
-                    return profile_path
-
-        # 如果没有找到默认配置文件，使用第一个找到的配置文件
-        for section in config.sections():
-            if section.startswith('Profile'):
-                profile_path = config.get(section, 'Path')
-                is_relative = config.getint(section, 'IsRelative', fallback=1)
-                
-                if is_relative:
-                    profile_path = os.path.join(firefox_dir, profile_path)
-                
-                if os.path.exists(profile_path):
-                    logger.info(f"使用Firefox配置文件: {profile_path}")
-                    return profile_path
-
-        logger.warning("未找到可用的Firefox配置文件")
+        logger.warning("未找到Firefox配置文件")
         return None
-
     except Exception as e:
         logger.error(f"获取Firefox配置文件路径时出错: {str(e)}")
         return None
+
+def clean_subtitle_content(content, is_funasr=False):
+    """清理字幕内容"""
+    try:
+        if not content:
+            return None
+            
+        # 如果是 FunASR 的结果，需要特殊处理
+        if is_funasr:
+            # 移除多余的标点符号
+            content = re.sub(r'[,.，。]+(?=[,.，。])', '', content)
+            # 移除重复的空格
+            content = re.sub(r'\s+', ' ', content)
+            # 移除空行
+            content = '\n'.join(line for line in content.split('\n') if line.strip())
+            return content
+            
+        # 移除空行
+        lines = content.split('\n')
+        cleaned_lines = []
+        for line in lines:
+            line = line.strip()
+            if line:
+                cleaned_lines.append(line)
+        
+        # 重新组合
+        return '\n'.join(cleaned_lines)
+    except Exception as e:
+        logger.error(f"清理字幕内容时出错: {str(e)}")
+        return content
 
 if __name__ == '__main__':
     logger.info("启动Flask服务器")
