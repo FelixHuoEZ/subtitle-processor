@@ -1,6 +1,6 @@
 flask
 requests
-yt-dlp>=2023.11.16
+yt-dlp
 chardet
 flask-cors
 pydub==0.25.1
