@@ -1688,7 +1688,7 @@ def get_available_transcribe_server():
     return selected_server['url']
 
 def sanitize_filename(filename):
-    """清理文件名，移除不安全字符"""
+    """清理文件名，移除不安全字符并限制长度"""
     # 替换Windows下的非法字符
     illegal_chars = r'[<>:"/\\|?*]'
     # 移除控制字符
@@ -1705,6 +1705,12 @@ def sanitize_filename(filename):
     # 如果文件名为空，使用默认名称
     if not clean_name:
         clean_name = 'unnamed_file'
+    
+    # 限制文件名长度（不包括扩展名）
+    name, ext = os.path.splitext(clean_name)
+    if len(name) > 100:  # 设置合理的长度限制
+        name = name[:97] + '...'  # 保留前97个字符，加上'...'
+    clean_name = name + ext
         
     return clean_name
 
