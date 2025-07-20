@@ -37,6 +37,12 @@ Thumbs.db
 # 生成的镜像文件
 *.tar
 
+# Claude Code 本地文件
+.claude/
+
+# 日志文件
+*.log
+app/*.log
 
 # 单元测试文件和脚本
 build_images.ps1
