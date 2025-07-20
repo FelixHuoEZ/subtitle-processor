@@ -13,6 +13,7 @@ import uuid
 import configparser
 import time
 import math
+import chardet
 from datetime import datetime
 from typing import Optional, Dict, List, Any, Tuple
 from pydub import AudioSegment
@@ -441,63 +442,470 @@ class VideoService:
             logger.error(f"Error splitting audio: {str(e)}")
             return [audio_path]  # Return original file as fallback
     
-    def get_subtitle_strategy(self, video_info: Dict[str, Any]) -> str:
-        """
-        Determine subtitle extraction strategy based on video info.
-        
-        Args:
-            video_info: Video information dictionary
-            
-        Returns:
-            Strategy string: 'direct' or 'transcribe'
-        """
-        try:
-            # Check if subtitles are available
-            subtitles = video_info.get('subtitles', [])
-            auto_captions = video_info.get('automatic_captions', [])
-            
-            if subtitles or auto_captions:
-                logger.info("Subtitles available - using direct extraction")
-                return 'direct'
-            else:
-                logger.info("No subtitles available - will use transcription")
-                return 'transcribe'
-                
-        except Exception as e:
-            logger.error(f"Error determining subtitle strategy: {str(e)}")
-            return 'transcribe'  # Default to transcription
     
-    def get_video_language(self, video_info: Dict[str, Any]) -> str:
+    def get_video_language(self, video_info: Dict[str, Any]) -> Optional[str]:
         """
-        Determine video language from video info.
+        Comprehensive video language detection.
         
         Args:
             video_info: Video information dictionary
             
         Returns:
-            Language code (e.g., 'en', 'zh')
+            Language code ('en', 'zh') or None
         """
         try:
-            # Try to get language from video info
-            language = video_info.get('language', '')
+            logger.info(f"开始语言检测，video_info keys: {list(video_info.keys()) if video_info else 'None'}")
             
-            if language:
-                logger.info(f"Detected video language: {language}")
-                return language
+            if not video_info:
+                logger.warning("video_info为空，跳过语言检测")
+                return None
             
-            # Fallback: guess from title or description
-            title = video_info.get('title', '').lower()
-            description = video_info.get('description', '').lower()
+            # 1. 分析标题
+            title = video_info.get('title', '')
+            logger.info(f"标题: {title[:100]}..." if len(title) > 100 else f"标题: {title}")
             
-            # Simple language detection based on content
-            chinese_chars = re.findall(r'[\u4e00-\u9fff]', title + description)
-            if len(chinese_chars) > 10:
-                logger.info("Detected Chinese language from content")
+            # 中文字符检测
+            chinese_chars = re.findall(r'[\u4e00-\u9fff]', title)
+            logger.info(f"标题中的中文字符数量: {len(chinese_chars)}")
+            
+            # 英文单词检测  
+            english_words = re.findall(r'\b[a-zA-Z]+\b', title)
+            logger.info(f"标题中的英文单词数量: {len(english_words)}")
+            
+            # 如果中文字符较多，判断为中文
+            if len(chinese_chars) >= 3:
+                logger.info("根据标题判断为中文视频")
                 return 'zh'
-            else:
-                logger.info("Defaulting to English language")
+            
+            # 如果主要是英文单词，判断为英文
+            if len(english_words) >= 3 and len(chinese_chars) == 0:
+                logger.info("根据标题判断为英文视频")
                 return 'en'
+            
+            # 2. 检查手动字幕
+            subtitles = video_info.get('subtitles', {})
+            if isinstance(subtitles, dict):
+                subtitle_langs = list(subtitles.keys())
+            elif isinstance(subtitles, list):
+                subtitle_langs = subtitles
+            else:
+                subtitle_langs = []
+                
+            logger.info(f"可用的手动字幕语言: {subtitle_langs}")
+            
+            # 检查是否有中文字幕
+            chinese_subtitle_langs = [lang for lang in subtitle_langs 
+                                    if any(x in lang.lower() for x in ['zh', 'chinese', 'china'])]
+            if chinese_subtitle_langs:
+                logger.info(f"发现中文字幕: {chinese_subtitle_langs}，判断为中文视频")
+                return 'zh'
+            
+            # 检查是否有英文字幕
+            english_subtitle_langs = [lang for lang in subtitle_langs 
+                                    if any(x in lang.lower() for x in ['en', 'english'])]
+            if english_subtitle_langs:
+                logger.info(f"发现英文字幕: {english_subtitle_langs}，判断为英文视频")
+                return 'en'
+            
+            # 3. 检查自动字幕
+            automatic_captions = video_info.get('automatic_captions', {})
+            if isinstance(automatic_captions, dict):
+                auto_caption_langs = list(automatic_captions.keys())
+            elif isinstance(automatic_captions, list):
+                auto_caption_langs = automatic_captions
+            else:
+                auto_caption_langs = []
+                
+            logger.info(f"可用的自动字幕语言: {auto_caption_langs}")
+            
+            # 检查自动字幕中的中文
+            chinese_auto_langs = [lang for lang in auto_caption_langs 
+                                if any(x in lang.lower() for x in ['zh', 'chinese', 'china'])]
+            if chinese_auto_langs:
+                logger.info(f"发现中文自动字幕: {chinese_auto_langs}，判断为中文视频")
+                return 'zh'
+            
+            # 检查自动字幕中的英文
+            english_auto_langs = [lang for lang in auto_caption_langs 
+                                if any(x in lang.lower() for x in ['en', 'english'])]
+            if english_auto_langs:
+                logger.info(f"发现英文自动字幕: {english_auto_langs}，判断为英文视频")
+                return 'en'
+            
+            # 4. 检查视频的language字段
+            video_language = video_info.get('language')
+            if video_language:
+                logger.info(f"视频language字段: {video_language}")
+                if 'zh' in video_language.lower() or 'chinese' in video_language.lower():
+                    logger.info("根据language字段判断为中文视频")
+                    return 'zh'
+                elif 'en' in video_language.lower() or 'english' in video_language.lower():
+                    logger.info("根据language字段判断为英文视频")
+                    return 'en'
+            
+            # 5. 如果都没有检测到，返回None
+            logger.info("未能确定视频语言")
+            return None
+            
+        except Exception as e:
+            logger.error(f"语言检测出错: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
+    
+    def get_subtitle_strategy(self, language: Optional[str], video_info: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """
+        Determine subtitle download strategy based on language.
+        
+        Args:
+            language: Detected video language
+            video_info: Video information dictionary
+            
+        Returns:
+            Tuple of (should_download_subtitles, language_priority_list)
+        """
+        try:
+            logger.info(f"确定字幕策略，语言: {language}")
+            
+            if language == 'zh':
+                # 中文视频：只下载手动字幕，不使用自动字幕
+                logger.info("中文视频：仅尝试下载手动字幕")
+                return True, ['zh-Hans', 'zh-Hant', 'zh', 'zh-CN']
+            elif language == 'en':
+                # 英文视频：优先手动字幕，也可以使用自动字幕
+                logger.info("英文视频：优先手动字幕，可使用自动字幕")
+                return True, ['en', 'en-US', 'en-GB']
+            else:
+                # 其他语言暂不处理
+                logger.info(f"不支持的语言: {language}，跳过字幕下载")
+                return False, []
                 
         except Exception as e:
-            logger.error(f"Error detecting video language: {str(e)}")
-            return 'en'  # Default to English
+            logger.error(f"确定字幕策略时出错: {str(e)}")
+            return False, []
+    
+    def download_subtitles(self, url: str, platform: str, video_info: Optional[Dict[str, Any]] = None) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """
+        Download subtitles for different platforms.
+        
+        Args:
+            url: Video URL
+            platform: Platform name (youtube, bilibili, acfun)
+            video_info: Video information dictionary
+            
+        Returns:
+            Tuple of (subtitle_content, video_info) or None
+        """
+        try:
+            if platform == 'youtube':
+                return self.download_youtube_subtitles(url, video_info)
+            elif platform == 'bilibili':
+                return self.download_bilibili_subtitles(url, video_info)
+            elif platform == 'acfun':
+                return self.download_acfun_subtitles(url, video_info)
+            else:
+                logger.error(f"不支持的平台: {platform}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"下载字幕时出错: {str(e)}")
+            return None
+    
+    def download_youtube_subtitles(self, url: str, video_info: Optional[Dict[str, Any]] = None, 
+                                  lang_priority: Optional[List[str]] = None) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """
+        Download YouTube subtitles with comprehensive language support.
+        
+        Args:
+            url: YouTube URL
+            video_info: Video information dictionary
+            lang_priority: Language priority list
+            
+        Returns:
+            Tuple of (subtitle_content, video_info) or None
+        """
+        try:
+            logger.info(f"开始下载YouTube字幕: {url}")
+            
+            # 创建临时目录
+            temp_dir = tempfile.mkdtemp()
+            logger.info(f"创建临时目录: {temp_dir}")
+            
+            try:
+                # 默认语言优先级
+                if not lang_priority:
+                    lang_priority = ['zh-Hans', 'zh-Hant', 'zh', 'en']
+                
+                firefox_profile = self.get_firefox_profile_path()
+                
+                # 配置yt-dlp选项
+                ydl_opts = {
+                    'writesubtitles': True,
+                    'writeautomaticsub': True,
+                    'subtitleslangs': lang_priority,
+                    'subtitlesformat': 'srt/vtt/json3/ttml',
+                    'skip_download': True,
+                    'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+                    'quiet': True,
+                    'no_warnings': True,
+                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0',
+                    'http_headers': {'Referer': 'https://www.youtube.com/'}
+                }
+                
+                if firefox_profile:
+                    ydl_opts['cookiesfrombrowser'] = ('firefox', firefox_profile)
+                    logger.info("使用Firefox cookie进行认证")
+                
+                # 下载字幕
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    
+                    if not video_info:
+                        video_info = {
+                            'id': info.get('id', ''),
+                            'title': info.get('title', ''),
+                            'uploader': info.get('uploader', ''),
+                            'upload_date': info.get('upload_date', ''),
+                            'duration': info.get('duration', 0),
+                            'view_count': info.get('view_count', 0),
+                            'description': info.get('description', '')[:500],
+                            'thumbnail': info.get('thumbnail', ''),
+                            'subtitles': list(info.get('subtitles', {}).keys()),
+                            'automatic_captions': list(info.get('automatic_captions', {}).keys()),
+                            'language': info.get('language', 'en'),
+                            'webpage_url': info.get('webpage_url', url)
+                        }
+                
+                # 查找下载的字幕文件
+                subtitle_files = []
+                for file in os.listdir(temp_dir):
+                    if any(file.endswith(f'.{lang}.{ext}') 
+                          for lang in lang_priority 
+                          for ext in ['srt', 'vtt', 'json3', 'ttml']):
+                        subtitle_files.append(os.path.join(temp_dir, file))
+                
+                logger.info(f"找到字幕文件: {subtitle_files}")
+                
+                # 优先选择手动字幕，然后选择自动字幕
+                selected_file = None
+                for lang in lang_priority:
+                    # 先找手动字幕
+                    for file in subtitle_files:
+                        if f'.{lang}.' in file and 'auto' not in file:
+                            selected_file = file
+                            logger.info(f"选择手动字幕文件: {selected_file}")
+                            break
+                    if selected_file:
+                        break
+                
+                # 如果没有手动字幕，选择自动字幕
+                if not selected_file:
+                    for lang in lang_priority:
+                        for file in subtitle_files:
+                            if f'.{lang}.' in file:
+                                selected_file = file
+                                logger.info(f"选择自动字幕文件: {selected_file}")
+                                break
+                        if selected_file:
+                            break
+                
+                if not selected_file:
+                    logger.warning("未找到合适的字幕文件")
+                    return None
+                
+                # 读取字幕内容
+                with open(selected_file, 'rb') as f:
+                    raw_content = f.read()
+                
+                # 检测编码
+                encoding = detect_file_encoding(raw_content)
+                if not encoding:
+                    encoding = 'utf-8'
+                
+                try:
+                    content = raw_content.decode(encoding)
+                except UnicodeDecodeError:
+                    try:
+                        content = raw_content.decode('utf-8')
+                    except UnicodeDecodeError:
+                        content = raw_content.decode('utf-8-sig')
+                
+                logger.info(f"成功读取字幕内容，长度: {len(content)}")
+                return content, video_info
+                
+            finally:
+                # 清理临时目录
+                try:
+                    shutil.rmtree(temp_dir)
+                    logger.debug(f"清理临时目录: {temp_dir}")
+                except:
+                    pass
+                
+        except Exception as e:
+            logger.error(f"下载YouTube字幕时出错: {str(e)}")
+            return None
+    
+    def download_bilibili_subtitles(self, url: str, video_info: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """
+        Download Bilibili subtitles.
+        
+        Args:
+            url: Bilibili URL
+            video_info: Video information dictionary
+            
+        Returns:
+            Tuple of (subtitle_content, video_info) or None
+        """
+        try:
+            logger.info(f"开始下载Bilibili字幕: {url}")
+            
+            # 中文字幕优先级
+            lang_priority = ['zh-CN', 'zh-Hans', 'zh']
+            
+            firefox_profile = self.get_firefox_profile_path()
+            temp_dir = tempfile.mkdtemp()
+            
+            try:
+                ydl_opts = {
+                    'writesubtitles': True,
+                    'subtitleslangs': lang_priority,
+                    'subtitlesformat': 'srt/vtt/json3',
+                    'skip_download': True,
+                    'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+                    'quiet': True,
+                    'no_warnings': True,
+                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'http_headers': {'Referer': 'https://www.bilibili.com/'}
+                }
+                
+                if firefox_profile:
+                    ydl_opts['cookiesfrombrowser'] = ('firefox', firefox_profile)
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.extract_info(url, download=True)
+                
+                # 查找字幕文件
+                subtitle_files = []
+                for file in os.listdir(temp_dir):
+                    if any(file.endswith(f'.{ext}') for ext in ['srt', 'vtt', 'json3']):
+                        subtitle_files.append(os.path.join(temp_dir, file))
+                
+                if not subtitle_files:
+                    logger.warning("Bilibili未找到字幕文件")
+                    return None
+                
+                # 选择第一个可用的字幕文件
+                selected_file = subtitle_files[0]
+                logger.info(f"选择Bilibili字幕文件: {selected_file}")
+                
+                # 读取内容
+                with open(selected_file, 'rb') as f:
+                    raw_content = f.read()
+                
+                encoding = detect_file_encoding(raw_content)
+                content = raw_content.decode(encoding or 'utf-8')
+                
+                logger.info(f"成功读取Bilibili字幕，长度: {len(content)}")
+                return content, video_info
+                
+            finally:
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+                    
+        except Exception as e:
+            logger.error(f"下载Bilibili字幕时出错: {str(e)}")
+            return None
+    
+    def download_acfun_subtitles(self, url: str, video_info: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
+        """
+        Download AcFun subtitles.
+        
+        Args:
+            url: AcFun URL
+            video_info: Video information dictionary
+            
+        Returns:
+            Tuple of (subtitle_content, video_info) or None
+        """
+        try:
+            logger.info(f"开始下载AcFun字幕: {url}")
+            
+            lang_priority = ['zh-CN', 'zh-Hans', 'zh']
+            firefox_profile = self.get_firefox_profile_path()
+            temp_dir = tempfile.mkdtemp()
+            
+            try:
+                ydl_opts = {
+                    'writesubtitles': True,
+                    'subtitleslangs': lang_priority,
+                    'subtitlesformat': 'srt/vtt/json3',
+                    'skip_download': True,
+                    'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+                    'quiet': True,
+                    'no_warnings': True,
+                    'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'http_headers': {'Referer': 'https://www.acfun.cn/'}
+                }
+                
+                if firefox_profile:
+                    ydl_opts['cookiesfrombrowser'] = ('firefox', firefox_profile)
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.extract_info(url, download=True)
+                
+                # 查找字幕文件
+                subtitle_files = []
+                for file in os.listdir(temp_dir):
+                    if any(file.endswith(f'.{ext}') for ext in ['srt', 'vtt', 'json3']):
+                        subtitle_files.append(os.path.join(temp_dir, file))
+                
+                if not subtitle_files:
+                    logger.warning("AcFun未找到字幕文件")
+                    return None
+                
+                selected_file = subtitle_files[0]
+                logger.info(f"选择AcFun字幕文件: {selected_file}")
+                
+                with open(selected_file, 'rb') as f:
+                    raw_content = f.read()
+                
+                encoding = detect_file_encoding(raw_content)
+                content = raw_content.decode(encoding or 'utf-8')
+                
+                logger.info(f"成功读取AcFun字幕，长度: {len(content)}")
+                return content, video_info
+                
+            finally:
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+                    
+        except Exception as e:
+            logger.error(f"下载AcFun字幕时出错: {str(e)}")
+            return None
+    
+    def sanitize_filename(self, filename: str) -> str:
+        """
+        Sanitize filename for safe filesystem operations.
+        
+        Args:
+            filename: Original filename
+            
+        Returns:
+            Sanitized filename
+        """
+        try:
+            return sanitize_filename(filename)
+        except:
+            # Fallback implementation
+            import re
+            # 移除不安全字符
+            filename = re.sub(r'[<>:"/\\|?*]', '', filename)
+            # 限制长度
+            if len(filename) > 200:
+                name, ext = os.path.splitext(filename)
+                filename = name[:200-len(ext)] + ext
+            return filename or 'subtitle'

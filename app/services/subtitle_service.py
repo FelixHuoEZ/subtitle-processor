@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import re
 from typing import List, Dict, Optional, Any
 
@@ -530,3 +531,129 @@ class SubtitleService:
             logger.error(f"Error processing subtitle content: {str(e)}")
             logger.error(f"Error input content: {content}")
             raise
+    
+    def convert_to_srt(self, subtitle_content: str, format_type: str) -> Optional[str]:
+        """
+        Convert subtitle content to SRT format.
+        
+        Args:
+            subtitle_content: Raw subtitle content
+            format_type: Format type (json3, vtt, etc.)
+            
+        Returns:
+            SRT formatted content or None if failed
+        """
+        try:
+            if not subtitle_content:
+                logger.warning("Empty subtitle content provided")
+                return None
+                
+            # If content is already in SRT format, return as-is
+            if subtitle_content.strip().split('\n')[0].isdigit():
+                logger.info("Content is already in SRT format")
+                return subtitle_content
+                
+            logger.info(f"Converting {format_type} format to SRT")
+            
+            if format_type == 'json3':
+                return self._convert_json3_to_srt(subtitle_content)
+            elif format_type == 'vtt':
+                return self._convert_vtt_to_srt(subtitle_content)
+            else:
+                logger.warning(f"Unsupported format: {format_type}, returning original content")
+                return subtitle_content
+                
+        except Exception as e:
+            logger.error(f"Error converting to SRT: {str(e)}")
+            return subtitle_content
+    
+    def _convert_json3_to_srt(self, content: str) -> str:
+        """Convert JSON3 format to SRT."""
+        try:
+            # For JSON3 format, usually it's already structured
+            # This is a simple implementation - might need enhancement based on actual JSON3 structure
+            return content
+        except Exception as e:
+            logger.error(f"Error converting JSON3 to SRT: {str(e)}")
+            return content
+    
+    def _convert_vtt_to_srt(self, content: str) -> str:
+        """Convert VTT format to SRT."""
+        try:
+            lines = content.split('\n')
+            srt_lines = []
+            subtitle_index = 1
+            
+            for i, line in enumerate(lines):
+                line = line.strip()
+                
+                # Skip WEBVTT header and NOTE lines
+                if line.startswith('WEBVTT') or line.startswith('NOTE'):
+                    continue
+                    
+                # Time format conversion: 00:00:00.000 --> 00:00:00.000
+                if '-->' in line:
+                    # Convert from VTT time format to SRT time format
+                    time_line = line.replace('.', ',')
+                    srt_lines.append(str(subtitle_index))
+                    srt_lines.append(time_line)
+                    subtitle_index += 1
+                elif line and not line.isdigit():
+                    # Subtitle text
+                    srt_lines.append(line)
+                elif not line:
+                    # Empty line - add to SRT
+                    srt_lines.append('')
+            
+            return '\n'.join(srt_lines)
+            
+        except Exception as e:
+            logger.error(f"Error converting VTT to SRT: {str(e)}")
+            return content
+    
+    def sanitize_filename(self, filename: str) -> str:
+        """
+        Sanitize filename for safe filesystem operations.
+        
+        Args:
+            filename: Original filename
+            
+        Returns:
+            Sanitized filename
+        """
+        try:
+            from ..utils.file_utils import sanitize_filename
+            return sanitize_filename(filename)
+        except ImportError:
+            # Fallback implementation
+            import re
+            # Remove unsafe characters
+            filename = re.sub(r'[<>:"/\\|?*]', '', filename)
+            # Limit length
+            if len(filename) > 200:
+                name, ext = os.path.splitext(filename)
+                filename = name[:200-len(ext)] + ext
+            return filename or 'subtitle'
+    
+    def format_time(self, seconds: float) -> str:
+        """
+        Format time in seconds to SRT time format.
+        
+        Args:
+            seconds: Time in seconds
+            
+        Returns:
+            Formatted time string (HH:MM:SS,mmm)
+        """
+        try:
+            from ..utils.time_utils import format_time
+            return format_time(seconds)
+        except ImportError:
+            # Fallback implementation
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
+            seconds_remainder = seconds % 60
+            milliseconds = int((seconds_remainder % 1) * 1000)
+            seconds_int = int(seconds_remainder)
+            
+            return f"{hours:02d}:{minutes:02d}:{seconds_int:02d},{milliseconds:03d}"

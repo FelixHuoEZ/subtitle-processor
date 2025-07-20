@@ -4,7 +4,7 @@ import logging
 import requests
 import json
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse
 
 try:
@@ -31,7 +31,12 @@ class ReadwiseService:
         return bool(self.api_token)
     
     def save_to_readwise(self, content: str, title: str, url: str, 
-                        video_info: Optional[Dict[str, Any]] = None) -> bool:
+                        video_info: Optional[Dict[str, Any]] = None, 
+                        published_date: Optional[str] = None,
+                        author: Optional[str] = None,
+                        location: str = 'new',
+                        tags: Optional[List[str]] = None,
+                        language: Optional[str] = None) -> bool:
         """
         Save content to Readwise Reader.
         
@@ -40,6 +45,11 @@ class ReadwiseService:
             title: Article title
             url: Source URL
             video_info: Optional video metadata
+            published_date: Published date string
+            author: Author name
+            location: Save location ('new', 'later', 'archive', 'feed')
+            tags: List of tags
+            language: Content language
             
         Returns:
             True if successful, False otherwise
@@ -52,12 +62,14 @@ class ReadwiseService:
             logger.info(f"Saving to Readwise: {title}")
             
             # Prepare article data
-            article_data = self._prepare_article_data(content, title, url, video_info)
+            article_data = self._prepare_article_data(content, title, url, video_info, 
+                                                    published_date, author, location, tags, language)
             
             # Check content length and split if necessary
             if len(content) > self.max_content_length:
                 logger.info("Content too long, splitting into multiple articles")
-                return self._save_long_content(content, title, url, video_info)
+                return self._save_long_content(content, title, url, video_info, 
+                                               published_date, author, location, tags, language)
             
             # Save single article
             return self._save_single_article(article_data)
@@ -67,7 +79,12 @@ class ReadwiseService:
             return False
     
     def _prepare_article_data(self, content: str, title: str, url: str, 
-                            video_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                            video_info: Optional[Dict[str, Any]] = None,
+                            published_date: Optional[str] = None,
+                            author: Optional[str] = None,
+                            location: str = 'new',
+                            tags: Optional[List[str]] = None,
+                            language: Optional[str] = None) -> Dict[str, Any]:
         """Prepare article data for Readwise API."""
         
         # Format content with metadata
@@ -80,29 +97,43 @@ class ReadwiseService:
             'content': formatted_content,
             'source': 'subtitle-processor',
             'should_clean_html': False,
-            'location': 'new'
+            'location': location
         }
         
-        # Add metadata from video info
+        # Add tags if provided
+        if tags:
+            article_data['tags'] = tags
+        
+        # Add explicit author if provided (overrides video_info)
+        if author:
+            article_data['author'] = author
+        
+        # Add explicit published_date if provided (overrides video_info)
+        if published_date:
+            article_data['published_date'] = published_date
+        
+        # Add metadata from video info (only if not already set by explicit params)
         if video_info:
-            # Add author/uploader
-            uploader = video_info.get('uploader')
-            if uploader:
-                article_data['author'] = uploader
+            # Add author/uploader (only if not explicitly provided)
+            if not author:
+                uploader = video_info.get('uploader')
+                if uploader:
+                    article_data['author'] = uploader
             
-            # Add publish date
-            upload_date = video_info.get('upload_date')
-            if upload_date:
-                try:
-                    # Convert YYYYMMDD to ISO format
-                    if len(upload_date) == 8:
-                        year = upload_date[:4]
-                        month = upload_date[4:6]
-                        day = upload_date[6:8]
-                        published_date = f"{year}-{month}-{day}T00:00:00Z"
-                        article_data['published_date'] = published_date
-                except:
-                    pass
+            # Add publish date (only if not explicitly provided)
+            if not published_date:
+                upload_date = video_info.get('upload_date')
+                if upload_date:
+                    try:
+                        # Convert YYYYMMDD to ISO format
+                        if len(upload_date) == 8:
+                            year = upload_date[:4]
+                            month = upload_date[4:6]
+                            day = upload_date[6:8]
+                            video_published_date = f"{year}-{month}-{day}T00:00:00Z"
+                            article_data['published_date'] = video_published_date
+                    except:
+                        pass
             
             # Add summary from description
             description = video_info.get('description', '')
@@ -209,7 +240,12 @@ class ReadwiseService:
             return False
     
     def _save_long_content(self, content: str, title: str, url: str, 
-                          video_info: Optional[Dict[str, Any]] = None) -> bool:
+                          video_info: Optional[Dict[str, Any]] = None,
+                          published_date: Optional[str] = None,
+                          author: Optional[str] = None,
+                          location: str = 'new',
+                          tags: Optional[List[str]] = None,
+                          language: Optional[str] = None) -> bool:
         """Save long content by splitting into multiple articles."""
         try:
             # Split content into chunks
@@ -222,7 +258,8 @@ class ReadwiseService:
                 chunk_title = f"{title} (Part {i}/{len(chunks)})"
                 
                 # Prepare article data for this chunk
-                article_data = self._prepare_article_data(chunk, chunk_title, url, video_info)
+                article_data = self._prepare_article_data(chunk, chunk_title, url, video_info,
+                                                        published_date, author, location, tags, language)
                 
                 # Add part information to content
                 part_header = f"**第 {i} 部分 (共 {len(chunks)} 部分)**\n\n"
