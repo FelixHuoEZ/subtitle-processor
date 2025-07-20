@@ -23,6 +23,7 @@ A comprehensive subtitle processing service that automatically downloads, transc
   - Support for multiple subtitle formats (SRT, VTT, JSON3)
   
 - **User Interfaces**
+  - Chrome Extension for one-click processing
   - Telegram Bot for easy access
   - Web interface for subtitle management
   - Real-time subtitle viewing and searching
@@ -62,20 +63,40 @@ A comprehensive subtitle processing service that automatically downloads, transc
    ```
 
 ### 🔧 Usage
-1. **Telegram Bot**
-   - Send video URL to the bot
-   - Receive processed subtitle file
-   
-2. **Web Interface**
-   - Access `http://localhost:5000`
-   - Upload video files or URLs
-   - View and search subtitles
 
-3. **Readwise Integration**
-   - Automatically creates articles in Readwise Reader
-   - Preserves video metadata (title, URL, publish date)
-   - Intelligently splits long content into readable segments
-   - Access transcripts alongside your other reading materials
+#### 🚀 **Three Ways to Use the Service**
+
+#### **🔧 Chrome Extension** (Recommended for browsing)
+- **Installation**: Load the `chrome-extension` folder as an unpacked extension in Chrome
+- **Usage**: 
+  - Visit any YouTube video page
+  - Click the extension icon in the toolbar
+  - Configure server URL and Readwise token
+  - Click "Extract Current Page" to process the video
+- **Best for**: Instant processing while browsing YouTube
+
+#### **🌐 Web Interface** (Best for batch processing)
+- **Access**: Open `http://localhost:5000` in your browser
+- **Features**:
+  - Upload video files or paste video URLs
+  - View and manage all processed subtitles
+  - Search through subtitle content
+  - Download subtitle files (.srt format)
+- **Best for**: Managing multiple files and detailed operations
+
+#### **💬 Telegram Bot** (Perfect for mobile)
+- **Setup**: Configure your bot token in the config file
+- **Usage**:
+  - Send video URLs directly to the bot
+  - Upload audio/video files for transcription
+  - Receive processed subtitle files automatically
+- **Best for**: On-the-go processing from mobile devices
+
+#### **📚 Readwise Integration**
+- Automatically saves transcripts to Readwise Reader
+- Preserves video metadata (title, URL, publish date)
+- Intelligently splits long content into readable segments
+- Access transcripts alongside your other reading materials
 
 ### 📝 License
 MIT License
@@ -105,6 +126,7 @@ Special thanks to:
   - 支持多种字幕格式（SRT、VTT、JSON3）
   
 - **用户界面**
+  - Chrome 浏览器插件一键处理
   - Telegram 机器人便捷访问
   - 网页字幕管理界面
   - 实时字幕查看和搜索
@@ -144,20 +166,45 @@ Special thanks to:
    ```
 
 ### 🔧 使用方法
-1. **Telegram 机器人**
-   - 向机器人发送视频 URL
-   - 接收处理好的字幕文件
-   
-2. **网页界面**
-   - 访问 `http://localhost:5000`
-   - 上传视频文件或 URL
-   - 查看和搜索字幕
 
-3. **Readwise 集成**
-   - 自动在 Readwise Reader 中创建文章
-   - 保留视频元数据（标题、URL、发布日期）
-   - 智能分割长内容为易读片段
-   - 在其他阅读材料旁边访问转录文本
+#### 🚀 **三种使用方式**
+
+#### **🔧 Chrome 浏览器插件**（浏览时推荐）
+- **安装方法**：将 `chrome-extension` 文件夹作为未打包扩展程序加载到 Chrome
+- **使用步骤**：
+  - 访问任意 YouTube 视频页面
+  - 点击工具栏中的插件图标
+  - 配置服务器地址和 Readwise Token
+  - 点击"提取当前页面"处理视频
+- **适合场景**：浏览 YouTube 时即时处理视频
+
+#### **🌐 网页界面**（批量处理首选）
+- **访问地址**：浏览器打开 `http://localhost:5000`
+- **主要功能**：
+  - 上传视频文件或粘贴视频链接
+  - 查看和管理所有已处理的字幕
+  - 在字幕内容中搜索关键词
+  - 下载字幕文件（.srt 格式）
+- **适合场景**：管理多个文件和详细操作
+
+#### **💬 Telegram 机器人**（移动端完美选择）
+- **配置方法**：在配置文件中设置机器人 Token
+- **使用方式**：
+  - 直接向机器人发送视频链接
+  - 上传音频/视频文件进行转录
+  - 自动接收处理好的字幕文件
+- **适合场景**：移动设备随时随地处理
+
+#### **📚 Readwise 集成功能**
+- 自动将转录内容保存到 Readwise Reader
+- 保留视频元数据（标题、链接、发布日期）
+- 智能分割长内容为易读片段
+- 与其他阅读材料一起管理转录文本
+
+#### **💡 使用建议**
+- **日常浏览**：使用 Chrome 插件，方便快捷
+- **批量处理**：使用网页版，功能完整
+- **移动办公**：使用 Telegram 机器人，随时可用
 
 ### 📝 许可证
 MIT 许可证
