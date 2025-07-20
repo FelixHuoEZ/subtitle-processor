@@ -1689,30 +1689,54 @@ def get_available_transcribe_server():
 
 def sanitize_filename(filename):
     """清理文件名，移除不安全字符并限制长度"""
-    # 替换Windows下的非法字符
-    illegal_chars = r'[<>:"/\\|?*]'
-    # 移除控制字符
-    control_chars = ''.join(map(chr, list(range(0, 32)) + list(range(127, 160))))
-    
-    # 创建翻译表
-    trans = str.maketrans('', '', control_chars)
-    
-    # 处理文件名
-    clean_name = re.sub(illegal_chars, '_', filename)  # 替换非法字符为下划线
-    clean_name = clean_name.translate(trans)  # 移除控制字符
-    clean_name = clean_name.strip()  # 移除首尾空白
-    
-    # 如果文件名为空，使用默认名称
-    if not clean_name:
-        clean_name = 'unnamed_file'
-    
-    # 限制文件名长度（不包括扩展名）
-    name, ext = os.path.splitext(clean_name)
-    if len(name) > 100:  # 设置合理的长度限制
-        name = name[:97] + '...'  # 保留前97个字符，加上'...'
-    clean_name = name + ext
+    try:
+        # 如果文件名为空，使用默认名称
+        if not filename:
+            return 'unnamed_file'
         
-    return clean_name
+        # 分离文件名和扩展名
+        name, ext = os.path.splitext(filename)
+        
+        # 替换特殊字符
+        name = re.sub(r'[\u3000！-～]', lambda x: chr(ord(x.group(0)) - 0xfee0), name)  # 全角转半角
+        name = re.sub(r'[\uff61-\uff9f]', lambda x: chr(ord(x.group(0)) - 0xfee0), name)  # 全角符号转半角
+        
+        # 替换Windows下的非法字符和其他不需要的字符
+        name = re.sub(r'[<>:"/\\|?*\[\]\{\}]', '', name)  # 移除Windows非法字符
+        name = re.sub(r'[\s　]+', ' ', name)  # 合并空白字符
+        name = re.sub(r'[\u2026—–\-_\|\uff5c]+', '-', name)  # 统一分隔符
+        name = re.sub(r'[-\s]+', '-', name)  # 合并连续的分隔符
+        
+        # 移除控制字符
+        control_chars = ''.join(map(chr, list(range(0, 32)) + list(range(127, 160))))
+        trans = str.maketrans('', '', control_chars)
+        name = name.translate(trans)
+        
+        # 移除首尾的特殊字符
+        name = name.strip('.-')
+        
+        # 限制文件名长度（不包括扩展名）
+        max_length = 50  # 更严格的长度限制
+        if len(name) > max_length:
+            # 保留前半部分和后半部分，中间用...连接
+            half_length = (max_length - 3) // 2
+            name = f"{name[:half_length]}...{name[-half_length:]}"
+        
+        # 如果文件名为空，使用默认名称
+        if not name:
+            name = 'unnamed_file'
+        
+        # 组合文件名
+        clean_name = name + ext.lower()  # 扩展名转小写
+        
+        logger.info(f"原始文件名: {filename}")
+        logger.info(f"处理后的文件名: {clean_name}")
+        
+        return clean_name
+        
+    except Exception as e:
+        logger.error(f"处理文件名时出错: {str(e)}")
+        return 'error_filename'
 
 def process_subtitle_content(content, is_funasr=False, translate=False, language=None, hotwords=None):
     """
