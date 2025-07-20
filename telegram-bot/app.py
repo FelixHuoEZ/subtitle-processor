@@ -92,12 +92,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
             time.sleep(5)
             return
 
-        # 如果是网络错误，给出相应提示
+        # 如果是网络错误，记录但不发送消息（避免更多网络请求）
         if isinstance(context.error, NetworkError):
-            if isinstance(update, Update) and update.effective_message:
-                await update.effective_message.reply_text(
-                    "网络连接出现问题，请稍后重试。"
-                )
+            logger.warning(f"网络错误: {context.error}")
+            # 不发送消息，避免在网络错误时进行更多网络请求
             return
 
         # 其他Telegram相关错误
@@ -603,14 +601,19 @@ def main():
         Application.builder()
         .token(TELEGRAM_TOKEN)
         .defaults(defaults)
+        .connect_timeout(20.0)  # 连接超时
+        .read_timeout(20.0)     # 读取超时
+        .write_timeout(20.0)    # 写入超时
+        .pool_timeout(20.0)     # 连接池超时
+        .get_updates_connect_timeout(30.0)  # 获取更新连接超时
+        .get_updates_read_timeout(30.0)     # 获取更新读取超时
+        .get_updates_write_timeout(30.0)    # 获取更新写入超时
+        .get_updates_pool_timeout(30.0)     # 获取更新连接池超时
     )
 
     # 如果有代理，添加代理配置
     if proxy_url:
         application_builder.proxy_url(proxy_url)
-        application_builder.connect_timeout(30.0)
-        application_builder.read_timeout(30.0)
-        application_builder.write_timeout(30.0)
         logger.info(f"使用代理: {proxy_url}")
 
     # 构建应用
@@ -627,7 +630,21 @@ def main():
 
     # 启动Bot
     logger.info("启动Telegram Bot")
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    
+    # 使用重连机制启动
+    while True:
+        try:
+            application.run_polling(
+                allowed_updates=Update.ALL_TYPES, 
+                drop_pending_updates=True,
+                close_loop=False
+            )
+        except NetworkError as e:
+            logger.error(f"网络错误，5秒后重试: {e}")
+            time.sleep(5)
+        except Exception as e:
+            logger.error(f"Bot运行异常，10秒后重试: {e}")
+            time.sleep(10)
 
 if __name__ == '__main__':
     main()
