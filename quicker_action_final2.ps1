@@ -1,12 +1,24 @@
+# ===== SRT字幕转网页查看器 增强版 =====
+# 基于原版脚本优化，增加Bilibili支持和配置选项
+
+param(
+    [string]$ServerUrl = "http://localhost:5000",
+    [switch]$Silent = $false,
+    [switch]$NoTimeline = $false
+)
+
 # 添加Windows Forms支持
 Add-Type -AssemblyName System.Windows.Forms
 
 # 设置输出编码为UTF8，以正确显示中文
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-Write-Host "=== SRT字幕转网页查看器 开始执行 ===" -ForegroundColor Green
-Write-Host "时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Green
-Write-Host ""
+if (-not $Silent) {
+    Write-Host "=== SRT字幕转网页查看器 增强版 ===" -ForegroundColor Green
+    Write-Host "时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Green
+    Write-Host "服务器: $ServerUrl" -ForegroundColor Blue
+    Write-Host ""
+}
 
 # 获取剪贴板内容
 function Get-ClipboardText {
@@ -15,7 +27,9 @@ function Get-ClipboardText {
         return $clipboardText
     }
     catch {
-        Write-Host "获取剪贴板文本失败: $_" -ForegroundColor Red
+        if (-not $Silent) {
+            Write-Host "获取剪贴板文本失败: $_" -ForegroundColor Red
+        }
         return $null
     }
 }
@@ -30,14 +44,16 @@ function Get-DroppedFiles {
         return $null
     }
     catch {
-        Write-Host "获取剪贴板文件失败: $_" -ForegroundColor Red
+        if (-not $Silent) {
+            Write-Host "获取剪贴板文件失败: $_" -ForegroundColor Red
+        }
         return $null
     }
 }
 
 # 处理文件路径列表
 function Process-FilePaths {
-    param (
+    param(
         [string[]]$paths
     )
     
@@ -48,10 +64,14 @@ function Process-FilePaths {
         if (-not $path) { continue }
         
         $path = $path.Trim()
-        Write-Host "`n处理文件: $path"
+        if (-not $Silent) {
+            Write-Host "`n处理文件: $path"
+        }
         
         if (-not (Test-Path $path)) {
-            Write-Host "文件不存在" -ForegroundColor Red
+            if (-not $Silent) {
+                Write-Host "文件不存在" -ForegroundColor Red
+            }
             $failCount++
             continue
         }
@@ -63,36 +83,46 @@ function Process-FilePaths {
             
             # 添加时间轴显示设置
             $headers = @{}
-            if ($env:QUICKER_PARAM_SHOW_TIMELINE -eq "false") {
+            if ($NoTimeline -or $env:QUICKER_PARAM_SHOW_TIMELINE -eq "false") {
                 $headers["X-Show-Timeline"] = "false"
             }
             
-            $response = Invoke-RestMethod -Uri "http://localhost:5000/upload" -Method Post -Form $form -Headers $headers
+            $response = Invoke-RestMethod -Uri "$ServerUrl/upload" -Method Post -Form $form -Headers $headers
             
             if ($response.success) {
-                Write-Host "上传成功" -ForegroundColor Green
-                $viewUrl = "http://localhost:5000$($response.url)"
-                Write-Host "查看地址: $viewUrl"
+                if (-not $Silent) {
+                    Write-Host "上传成功" -ForegroundColor Green
+                }
+                $viewUrl = "$ServerUrl$($response.url)"
+                if (-not $Silent) {
+                    Write-Host "查看地址: $viewUrl"
+                }
                 Start-Process $viewUrl
                 $successCount++
             }
             else {
-                Write-Host "上传失败: $($response.error)" -ForegroundColor Red
+                if (-not $Silent) {
+                    Write-Host "上传失败: $($response.error)" -ForegroundColor Red
+                }
                 $failCount++
             }
         }
         catch {
-            Write-Host "处理失败: $_" -ForegroundColor Red
+            if (-not $Silent) {
+                Write-Host "处理失败: $_" -ForegroundColor Red
+            }
             $failCount++
         }
     }
     
-    Write-Host "`n处理完成: 成功 $successCount 个, 失败 $failCount 个"
+    if (-not $Silent) {
+        Write-Host "`n处理完成: 成功 $successCount 个, 失败 $failCount 个"
+    }
 }
 
 # 处理SRT内容
 function Process-SrtContent {
-    param (
+    param(
         [string]$content
     )
     
@@ -105,65 +135,103 @@ function Process-SrtContent {
         Remove-Item -Path $tempFile -ErrorAction SilentlyContinue
     }
     catch {
-        Write-Host "处理SRT内容失败: $_" -ForegroundColor Red
+        if (-not $Silent) {
+            Write-Host "处理SRT内容失败: $_" -ForegroundColor Red
+        }
     }
 }
 
-# 处理YouTube URL
-function Process-YouTubeUrl {
-    param (
+# 增强的视频URL处理函数 - 支持YouTube和Bilibili
+function Process-VideoUrl {
+    param(
         [string]$url
     )
     
     try {
-        Write-Host "正在处理YouTube URL: $url" -ForegroundColor Yellow
-        $response = Invoke-RestMethod -Uri "http://localhost:5000/process_youtube" -Method Post -Body (@{
+        # 检测平台类型
+        $platform = "unknown"
+        if ($url -match "youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/") {
+            $platform = "youtube"
+        }
+        elseif ($url -match "bilibili\.com/video/|b23\.tv/") {
+            $platform = "bilibili"
+        }
+        
+        if (-not $Silent) {
+            Write-Host "正在处理 $platform URL: $url" -ForegroundColor Yellow
+        }
+        
+        # 使用统一的 /process 端点
+        $response = Invoke-RestMethod -Uri "$ServerUrl/process" -Method Post -Body (@{
             url = $url
         } | ConvertTo-Json) -ContentType "application/json"
         
-        if ($response.view_url) {
-            Write-Host "处理成功" -ForegroundColor Green
-            $viewUrl = "http://localhost:5000$($response.view_url)"
-            Write-Host "查看地址: $viewUrl"
+        if ($response.success -or $response.view_url) {
+            if (-not $Silent) {
+                Write-Host "处理成功" -ForegroundColor Green
+            }
+            
+            $viewUrl = if ($response.view_url) { 
+                "$ServerUrl$($response.view_url)" 
+            } else { 
+                "$ServerUrl/view/$($response.file_id)" 
+            }
+            
+            if (-not $Silent) {
+                Write-Host "查看地址: $viewUrl"
+            }
             Start-Process $viewUrl
+            
+            # 复制结果链接到剪贴板
+            [System.Windows.Forms.Clipboard]::SetText($viewUrl)
+            
             return $true
         }
         else {
             $errorMsg = if ($response.error) { $response.error } else { "未知错误" }
-            Write-Host "处理YouTube URL失败: $errorMsg" -ForegroundColor Red
+            if (-not $Silent) {
+                Write-Host "处理视频URL失败: $errorMsg" -ForegroundColor Red
+            }
             return $false
         }
     }
     catch {
-        Write-Host "处理YouTube URL时出错: $_" -ForegroundColor Red
+        if (-not $Silent) {
+            Write-Host "处理视频URL时出错: $_" -ForegroundColor Red
+        }
         return $false
     }
 }
 
 # 主程序入口
-Write-Host "`n=== SRT字幕转网页查看器 开始执行 ===" -ForegroundColor Green
-Write-Host "时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`n"
+if (-not $Silent) {
+    Write-Host "`n=== 开始检测输入内容 ===" -ForegroundColor Green
+}
 
 # 获取剪贴板信息
 $clipboardText = Get-ClipboardText
 $droppedFiles = Get-DroppedFiles
 
-Write-Host "剪贴板内容类型: $(if ($clipboardText) { 'Text' } else { 'None' })"
-Write-Host "剪贴板文件数量: $(if ($droppedFiles) { $droppedFiles.Count } else { '0' })"
-
-# 显示QUICKER_SELECTED_FILES内容
-Write-Host "QUICKER_SELECTED_FILES:"
-if ($env:QUICKER_SELECTED_FILES) {
-    Write-Host $env:QUICKER_SELECTED_FILES
+if (-not $Silent) {
+    Write-Host "剪贴板内容类型: $(if ($clipboardText) { 'Text' } else { 'None' })"
+    Write-Host "剪贴板文件数量: $(if ($droppedFiles) { $droppedFiles.Count } else { '0' })"
+    
+    # 显示QUICKER_SELECTED_FILES内容
+    Write-Host "QUICKER_SELECTED_FILES:"
+    if ($env:QUICKER_SELECTED_FILES) {
+        Write-Host $env:QUICKER_SELECTED_FILES
+    }
 }
 
 # 处理逻辑
 $processed = $false
 
-# 1. 检查是否是YouTube URL
-if ($clipboardText -match "youtube\.com/watch\?v=|youtu\.be/") {
-    Write-Host "`n检测到YouTube URL，开始处理..."
-    Process-YouTubeUrl -url $clipboardText
+# 1. 检查是否是视频URL (增强支持)
+if ($clipboardText -match "youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/|bilibili\.com/video/|b23\.tv/") {
+    if (-not $Silent) {
+        Write-Host "`n检测到视频URL，开始处理..."
+    }
+    Process-VideoUrl -url $clipboardText
     $processed = $true
 }
 
@@ -196,9 +264,17 @@ if (-not $processed -and $clipboardText -match "^\d+\r?\n\d{2}:\d{2}:\d{2},\d{3}
 }
 
 if (-not $processed) {
-    Write-Host "错误: 未找到有效的srt文件、YouTube URL或内容" -ForegroundColor Red
+    if (-not $Silent) {
+        Write-Host "错误: 未找到有效的srt文件、视频URL或内容" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "支持的视频平台:" -ForegroundColor Yellow
+        Write-Host "• YouTube: youtube.com/watch, youtu.be, youtube.com/shorts" -ForegroundColor Gray
+        Write-Host "• Bilibili: bilibili.com/video, b23.tv" -ForegroundColor Gray
+    }
 }
 
-Write-Host "`n=== 处理完成 ===" -ForegroundColor Green
-Write-Host "窗口保持打开，您可以检查以上信息。" -ForegroundColor Yellow
-Read-Host "按回车键关闭窗口..."
+if (-not $Silent) {
+    Write-Host "`n=== 处理完成 ===" -ForegroundColor Green
+    Write-Host "窗口保持打开，您可以检查以上信息。" -ForegroundColor Yellow
+    Read-Host "按回车键关闭窗口..."
+}
