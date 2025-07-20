@@ -6,7 +6,10 @@ import time
 import json
 from typing import Optional, Dict, List, Any
 
-from ..config.config_manager import get_config_value
+try:
+    from ..config.config_manager import get_config_value
+except ImportError:
+    from config.config_manager import get_config_value
 
 logger = logging.getLogger(__name__)
 

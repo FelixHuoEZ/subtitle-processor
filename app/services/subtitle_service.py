@@ -5,8 +5,12 @@ import logging
 import re
 from typing import List, Dict, Optional, Any
 
-from ..utils.time_utils import format_time, parse_time
-from ..config.config_manager import get_config_value
+try:
+    from ..utils.time_utils import format_time, parse_time
+    from ..config.config_manager import get_config_value
+except ImportError:
+    from utils.time_utils import format_time, parse_time
+    from config.config_manager import get_config_value
 
 logger = logging.getLogger(__name__)
 

@@ -18,8 +18,12 @@ from typing import Optional, Dict, List, Any, Tuple
 from pydub import AudioSegment
 import wave
 
-from ..config.config_manager import get_config_value
-from ..utils.file_utils import detect_file_encoding, sanitize_filename
+try:
+    from ..config.config_manager import get_config_value
+    from ..utils.file_utils import detect_file_encoding, sanitize_filename
+except ImportError:
+    from config.config_manager import get_config_value
+    from utils.file_utils import detect_file_encoding, sanitize_filename
 
 logger = logging.getLogger(__name__)
 

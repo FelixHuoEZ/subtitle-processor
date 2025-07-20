@@ -10,6 +10,26 @@ logger = logging.getLogger(__name__)
 view_bp = Blueprint('view', __name__)
 
 
+@view_bp.route('/')
+def index():
+    """Main page."""
+    return "Subtitle Processing Service - Refactored Version"
+
+
+@view_bp.route('/health')
+def health():
+    """Health check endpoint."""
+    try:
+        return jsonify({
+            'status': 'healthy',
+            'message': 'Subtitle processing service is running',
+            'version': 'refactored'
+        })
+    except Exception as e:
+        logger.error(f"Health check error: {str(e)}")
+        return jsonify({'error': 'Health check failed'}), 500
+
+
 @view_bp.route('/view/')
 def list_files():
     """List all processed files."""

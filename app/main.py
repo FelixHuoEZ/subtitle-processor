@@ -1,17 +1,31 @@
 """Main Flask application factory and configuration."""
 
 import os
+import sys
 import json
 import logging
 from flask import Flask
 from flask_cors import CORS
 
-from .config.config_manager import get_config_manager
-from .utils.logging_utils import setup_logging
-from .services import (
-    SubtitleService, VideoService, TranscriptionService, 
-    TranslationService, ReadwiseService
-)
+# Add the parent directory to Python path for imports
+if __name__ == '__main__':
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+try:
+    from .config.config_manager import get_config_manager
+    from .utils.logging_utils import setup_logging
+    from .services import (
+        SubtitleService, VideoService, TranscriptionService, 
+        TranslationService, ReadwiseService
+    )
+except ImportError:
+    # For direct execution
+    from config.config_manager import get_config_manager
+    from utils.logging_utils import setup_logging
+    from services import (
+        SubtitleService, VideoService, TranscriptionService, 
+        TranslationService, ReadwiseService
+    )
 
 # Setup logging
 logger = setup_logging()
@@ -58,7 +72,10 @@ def create_app():
 def register_blueprints(app):
     """Register Flask blueprints."""
     try:
-        from .routes import upload_bp, view_bp, process_bp
+        try:
+            from .routes import upload_bp, view_bp, process_bp
+        except ImportError:
+            from routes import upload_bp, view_bp, process_bp
         
         app.register_blueprint(upload_bp)
         app.register_blueprint(view_bp)
@@ -98,7 +115,10 @@ def register_simple_routes(app):
 
 def get_config_value(key_path, default=None):
     """Get configuration value using dot-separated path."""
-    from .config.config_manager import get_config_value as _get_config_value
+    try:
+        from .config.config_manager import get_config_value as _get_config_value
+    except ImportError:
+        from config.config_manager import get_config_value as _get_config_value
     return _get_config_value(key_path, default)
 
 
