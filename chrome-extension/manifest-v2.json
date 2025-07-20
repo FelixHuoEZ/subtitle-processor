@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Video Subtitle Processor",
+  "version": "2.0",
+  "description": "Quick video processing for YouTube and Bilibili with right-click support",
+  "permissions": [
+    "activeTab",
+    "contextMenus", 
+    "notifications"
+  ],
+  "host_permissions": [
+    "http://localhost:5000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "commands": {
+    "process-current-video": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+P"
+      },
+      "description": "Process current video page"
+    }
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "images/icon.png"
+  },
+  "icons": {
+    "16": "images/icon.png",
+    "48": "images/icon.png", 
+    "128": "images/icon.png"
+  }
+}

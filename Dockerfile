@@ -29,9 +29,8 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 # 复制应用文件
-COPY app/app.py .
-COPY app/templates ./templates/
-COPY app/* ./
+COPY app/ ./app/
+COPY config/ ./config/
 
 # 创建必要的目录
 RUN mkdir -p uploads videos
@@ -46,6 +45,9 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 # 暴露端口
 EXPOSE 5000
 EXPOSE 5900
+
+# 设置工作目录到app
+WORKDIR /app/app
 
 # 使用supervisor启动所有服务
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
