@@ -113,11 +113,11 @@ class TranscriptionService:
                 return None
             
             transcribe_url = server['url']
-            if not transcribe_url.endswith('/transcribe'):
+            if not transcribe_url.endswith('/recognize'):
                 if '/asr' in transcribe_url:
-                    transcribe_url = transcribe_url.replace('/asr', '/funasr/v1/transcribe')
+                    transcribe_url = transcribe_url.replace('/asr', '/recognize')
                 else:
-                    transcribe_url = f"{transcribe_url}/funasr/v1/transcribe"
+                    transcribe_url = f"{transcribe_url}/recognize"
             
             logger.info(f"Using transcription server: {server['name']} ({transcribe_url})")
             
