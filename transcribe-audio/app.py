@@ -51,6 +51,17 @@ app.config['UPLOAD_FOLDER'] = '/app/uploads'
 # 全局模型变量
 model = None
 
+# 全局进度跟踪
+current_progress = {
+    "status": "idle",
+    "progress": 0,
+    "total_chunks": 0,
+    "current_chunk": 0,
+    "message": "等待处理...",
+    "start_time": None,
+    "estimated_time": None
+}
+
 # 设置请求超时时间（5分钟）
 app.config['TIMEOUT'] = 300
 
@@ -336,6 +347,42 @@ def device_info():
     }
     return jsonify(device_info)
 
+@app.route('/progress')
+def get_progress():
+    """获取当前转录进度"""
+    global current_progress
+    
+    # 计算预估剩余时间
+    if current_progress["start_time"] and current_progress["current_chunk"] > 0:
+        elapsed_time = time.time() - current_progress["start_time"]
+        avg_time_per_chunk = elapsed_time / current_progress["current_chunk"]
+        remaining_chunks = current_progress["total_chunks"] - current_progress["current_chunk"]
+        estimated_remaining = avg_time_per_chunk * remaining_chunks
+        current_progress["estimated_time"] = estimated_remaining
+    
+    return jsonify(current_progress)
+
+def update_progress(status, current_chunk=None, total_chunks=None, message=None):
+    """更新进度信息"""
+    global current_progress
+    
+    current_progress["status"] = status
+    if current_chunk is not None:
+        current_progress["current_chunk"] = current_chunk
+    if total_chunks is not None:
+        current_progress["total_chunks"] = total_chunks
+    if message is not None:
+        current_progress["message"] = message
+    
+    if total_chunks and total_chunks > 0:
+        current_progress["progress"] = (current_progress["current_chunk"] / total_chunks) * 100
+    
+    if status == "processing" and current_progress["start_time"] is None:
+        current_progress["start_time"] = time.time()
+    elif status == "completed" or status == "error":
+        current_progress["start_time"] = None
+        current_progress["estimated_time"] = None
+
 def convert_audio_to_wav(input_path, target_sample_rate=16000):
     """将音频转换为WAV格式并重采样"""
     try:
@@ -409,25 +456,46 @@ def normalize_audio(audio_data):
 
 def process_recognition_result(result):
     """处理识别结果，支持字符串和列表格式"""
-    if isinstance(result, str):
-        return result.strip()
-    elif isinstance(result, list):
-        # 如果是列表，可能包含多个识别结果或时间戳信息
-        text_parts = []
-        for item in result:
-            if isinstance(item, dict):
-                # 如果是字典格式，提取文本部分
-                text = item.get('text', '') or item.get('result', '')
-                if text:
-                    text_parts.append(text)
-            elif isinstance(item, str):
-                text_parts.append(item)
-        return ' '.join(filter(None, text_parts)).strip()
-    elif result is None:
+    try:
+        logger.debug(f"处理识别结果: {type(result)} - {result}")
+        
+        if isinstance(result, str):
+            return result.strip()
+        elif isinstance(result, list):
+            if len(result) == 0:
+                logger.warning("识别结果列表为空")
+                return ""
+            
+            # 如果是列表，可能包含多个识别结果或时间戳信息
+            text_parts = []
+            for i, item in enumerate(result):
+                try:
+                    if isinstance(item, dict):
+                        # 如果是字典格式，提取文本部分
+                        text = item.get('text', '') or item.get('result', '') or item.get('sentence', '')
+                        if text:
+                            text_parts.append(text)
+                    elif isinstance(item, str):
+                        text_parts.append(item)
+                    else:
+                        logger.debug(f"列表项 {i}: 未知格式 {type(item)} - {item}")
+                except Exception as e:
+                    logger.warning(f"处理列表项 {i} 时出错: {str(e)}")
+                    continue
+                    
+            return ' '.join(filter(None, text_parts)).strip()
+        elif isinstance(result, dict):
+            # 处理字典格式的结果
+            text = result.get('text', '') or result.get('result', '') or result.get('sentence', '')
+            return text.strip() if text else ""
+        elif result is None:
+            return ""
+        else:
+            logger.warning(f"未知的识别结果格式: {type(result)} - {result}")
+            return str(result) if result else ""
+    except Exception as e:
+        logger.error(f"处理识别结果时出错: {str(e)}")
         return ""
-    else:
-        logger.warning(f"未知的识别结果格式: {type(result)}")
-        return str(result)
 
 def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000, hotwords=None):
     """分块处理音频数据
@@ -447,6 +515,7 @@ def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000, hotwords=N
         
         # 如果音频太短，直接处理整个音频
         if total_len < chunk_size:
+            update_progress("processing", 0, 1, "处理短音频...")
             try:
                 with torch.no_grad():
                     # print(f"\n处理短音频 (长度: {total_len/sample_rate:.2f}秒)")
@@ -466,17 +535,22 @@ def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000, hotwords=N
                     processed_result = process_recognition_result(result)
                     if processed_result:
                         results.append(processed_result)
+                    update_progress("processing", 1, 1, "短音频处理完成")
             except Exception as e:
                 print(f"处理短音频时出错: {str(e)}")
+                update_progress("error", message=f"短音频处理错误: {str(e)}")
         else:
             # 分块处理长音频
             overlap = int(0.5 * sample_rate)  # 0.5秒重叠
             total_chunks = (total_len + chunk_size - 1)//chunk_size
             print(f"\n开始处理音频，总共 {total_chunks} 个块")
+            update_progress("processing", 0, total_chunks, f"开始处理 {total_chunks} 个音频块...")
             
             for i in range(0, total_len, chunk_size - overlap):
                 chunk = audio_data[i:min(i+chunk_size, total_len)]
                 chunk_num = i//chunk_size + 1
+                
+                update_progress("processing", chunk_num, total_chunks, f"正在处理第 {chunk_num}/{total_chunks} 个音频块...")
                 
                 # 检查音频块的有效性
                 chunk_max = np.max(np.abs(chunk))
@@ -515,6 +589,7 @@ def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000, hotwords=N
         
         final_result = " ".join(results)
         print("\n音频处理完成！")
+        update_progress("completed", message="音频处理完成！")
         return final_result
         
     except Exception as e:
@@ -527,7 +602,11 @@ def recognize_audio():
     temp_files = []  # 用于跟踪需要清理的临时文件
     
     try:
+        # 初始化进度
+        update_progress("starting", 0, 0, "开始处理音频文件...")
+        
         if 'audio' not in request.files:
+            update_progress("error", message="没有找到音频文件")
             return jsonify({"error": "没有找到音频文件"}), 400
             
         audio_file = request.files['audio']
@@ -578,14 +657,19 @@ def recognize_audio():
                 # 如果分块识别失败，尝试整体识别
                 try:
                     with torch.no_grad():
-                        result = model.generate(
+                        logger.info("开始整体音频识别...")
+                        raw_result = model.generate(
                             input=audio_data, 
                             sample_rate=sample_rate,
-                            hotwords=hotwords if hotwords else None
+                            hotword=hotwords if hotwords else None
                         )
-                        result = process_recognition_result(result)
+                        logger.debug(f"整体识别原始结果: {type(raw_result)} - {raw_result}")
+                        result = process_recognition_result(raw_result)
+                        logger.info(f"整体识别处理后结果: {result}")
                 except Exception as e:
                     logger.error(f"整体识别失败: {str(e)}")
+                    import traceback
+                    logger.error(f"整体识别错误堆栈: {traceback.format_exc()}")
                     result = ""
             
             logger.info("音频识别完成")

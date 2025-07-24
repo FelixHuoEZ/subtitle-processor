@@ -103,6 +103,26 @@ class TranscriptionService:
             file_size = os.path.getsize(audio_path)
             logger.info(f"Transcribing audio file: {audio_path} ({file_size / (1024*1024):.2f} MB)")
             
+            # Check if file is too small (less than 1KB suggests empty or invalid file)
+            if file_size < 1024:
+                logger.error(f"Audio file too small ({file_size} bytes), likely invalid")
+                return None
+                
+            # Validate audio file format
+            try:
+                with wave.open(audio_path, 'rb') as test_wav:
+                    frames = test_wav.getnframes()
+                    sample_rate = test_wav.getframerate()
+                    duration = frames / float(sample_rate)
+                    logger.info(f"Audio validation: {duration:.2f}s duration, {sample_rate}Hz sample rate, {frames} frames")
+                    
+                    if duration < 0.1:
+                        logger.warning(f"Audio duration too short: {duration:.2f}s")
+                        return None
+            except Exception as e:
+                logger.error(f"Audio file validation failed: {str(e)}")
+                return None
+            
             if hotwords:
                 logger.info(f"Using hotwords: {hotwords}")
             
@@ -130,7 +150,8 @@ class TranscriptionService:
                 data['hotwords'] = json.dumps(hotwords)
             
             try:
-                # Make transcription request
+                # Make transcription request with better error handling
+                logger.info(f"Sending transcription request to {transcribe_url} with timeout {self.timeout}s")
                 response = requests.post(
                     transcribe_url,
                     files=files,
@@ -163,10 +184,23 @@ class TranscriptionService:
                             logger.warning(f"Could not get audio info: {str(e)}")
                     
                     return result
+                elif response.status_code == 400:
+                    error_text = response.text
+                    logger.error(f"Transcription failed - Bad Request (400): {error_text}")
+                    if "silent" in error_text.lower() or "empty" in error_text.lower():
+                        logger.warning("Audio appears to be silent or empty, returning empty result")
+                        return {"text": "", "status": "silent_audio", "audio_info": {"duration_seconds": 0}}
+                    return None
                 else:
                     logger.error(f"Transcription failed with status {response.status_code}: {response.text}")
                     return None
                     
+            except requests.exceptions.Timeout:
+                logger.error(f"Transcription request timed out after {self.timeout} seconds")
+                return None
+            except requests.exceptions.ConnectionError as e:
+                logger.error(f"Connection error during transcription: {str(e)}")
+                return None
             except requests.RequestException as e:
                 logger.error(f"Transcription request failed: {str(e)}")
                 return None
@@ -304,3 +338,31 @@ class TranscriptionService:
             status[name] = self.check_server_health(url)
         
         return status
+    
+    def get_transcription_progress(self) -> Optional[Dict[str, Any]]:
+        """
+        Get current transcription progress from the active server.
+        
+        Returns:
+            Progress information or None if not available
+        """
+        try:
+            server = self.get_available_transcribe_server()
+            if not server:
+                return None
+            
+            progress_url = server['url'].replace('/asr', '/progress').replace('/recognize', '/progress')
+            if not progress_url.endswith('/progress'):
+                if '/asr' in progress_url or '/recognize' in progress_url:
+                    progress_url = '/'.join(progress_url.split('/')[:-1]) + '/progress'
+                else:
+                    progress_url = f"{progress_url}/progress"
+            
+            response = requests.get(progress_url, timeout=5)
+            if response.status_code == 200:
+                return response.json()
+            
+            return None
+        except Exception as e:
+            logger.debug(f"Could not get transcription progress: {str(e)}")
+            return None

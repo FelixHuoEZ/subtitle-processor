@@ -14,71 +14,10 @@ process_bp = Blueprint('process', __name__)
 
 @process_bp.route('/process_youtube', methods=['POST'])
 def process_youtube():
-    """Process YouTube video URL."""
-    try:
-        data = request.get_json()
-        if not data or 'url' not in data:
-            return jsonify({'error': 'URL is required'}), 400
-        
-        url = data['url']
-        logger.info(f"Processing YouTube URL: {url}")
-        
-        # Get services from app
-        video_service = current_app.video_service
-        subtitle_service = current_app.subtitle_service
-        transcription_service = current_app.transcription_service
-        
-        # Get video information
-        video_info = video_service.get_youtube_info(url)
-        if not video_info:
-            return jsonify({'error': 'Failed to get video information'}), 400
-        
-        # Determine processing strategy
-        strategy = video_service.get_subtitle_strategy(video_info)
-        
-        result = {
-            'file_id': str(uuid.uuid4()),
-            'url': url,
-            'video_info': video_info,
-            'strategy': strategy,
-            'timestamp': datetime.now().isoformat(),
-            'status': 'processing'
-        }
-        
-        if strategy == 'direct':
-            # Try to download subtitles directly
-            logger.info("Attempting direct subtitle extraction")
-            # TODO: Implement direct subtitle download
-            result['message'] = 'Direct subtitle extraction not yet implemented in refactored version'
-            result['status'] = 'pending'
-        else:
-            # Use transcription
-            logger.info("Using transcription approach")
-            # TODO: Implement transcription workflow
-            result['message'] = 'Transcription workflow not yet implemented in refactored version'
-            result['status'] = 'pending'
-        
-        # Save file info
-        files_info_path = os.path.join(current_app.config['UPLOAD_FOLDER'], 'files_info.json')
-        
-        if os.path.exists(files_info_path):
-            with open(files_info_path, 'r', encoding='utf-8') as f:
-                files_info = json.load(f)
-        else:
-            files_info = {}
-        
-        files_info[result['file_id']] = result
-        
-        with open(files_info_path, 'w', encoding='utf-8') as f:
-            json.dump(files_info, f, ensure_ascii=False, indent=2)
-        
-        logger.info(f"YouTube processing initiated for: {video_info.get('title', 'Unknown')}")
-        
-        return jsonify(result)
-    
-    except Exception as e:
-        logger.error(f"Error processing YouTube URL: {str(e)}")
-        return jsonify({'error': 'Processing failed'}), 500
+    """Process YouTube video URL - redirect to general process."""
+    # 重定向到通用处理函数，保持向后兼容性
+    logger.info("process_youtube被调用，重定向到process_general")
+    return process_general()
 
 
 @process_bp.route('/process', methods=['POST'])
@@ -201,30 +140,48 @@ def process_general():
             with open(files_info_path, 'w', encoding='utf-8') as f:
                 json.dump(files_info, f, ensure_ascii=False, indent=2)
             
-            # 发送到Readwise
+            # 发送到Readwise - 使用处理后的view URL而不是原始URL
+            readwise_saved = False
             try:
                 if video_info:
-                    readwise_service.save_to_readwise(
+                    # 从配置获取video_domain，构造完整的view URL
+                    try:
+                        from ..config.config_manager import get_config_value
+                        video_domain = get_config_value('servers.video_domain', 'http://localhost:5000')
+                    except ImportError:
+                        from config.config_manager import get_config_value
+                        video_domain = get_config_value('servers.video_domain', 'http://localhost:5000')
+                    
+                    view_url = f"{video_domain}/view/{file_id}"
+                    logger.info(f"发送到Readwise使用的URL: {view_url} (而非原始URL: {url})")
+                    
+                    readwise_saved = readwise_service.save_to_readwise(
                         title=video_info.get('title', 'Video Transcript'),
                         content=srt_content,
-                        url=url,
+                        url=view_url,  # 使用view URL而非原始URL
                         published_date=video_info.get('published_date'),
                         author=video_info.get('uploader'),
                         tags=tags,
                         language=language,
                         location=location
                     )
-                    logger.info("成功发送转录内容到Readwise")
+                    if readwise_saved:
+                        logger.info("成功发送转录内容到Readwise")
+                    else:
+                        logger.warning("Readwise保存返回False")
             except Exception as e:
                 logger.error(f"发送转录内容到Readwise失败: {str(e)}")
+                readwise_saved = False
                 
             return jsonify({
                 'success': True,
+                'file_id': file_id,
                 'video_info': video_info,
                 'subtitle_content': srt_content,
                 'filename': file_info['filename'],
                 'view_url': file_info['url'],
-                'source': 'transcription'
+                'source': 'transcription',
+                'readwise_saved': readwise_saved
             })
             
         # 如果有字幕，根据平台确定字幕格式并转换
@@ -302,6 +259,7 @@ def process_general():
             json.dump(files_info, f, ensure_ascii=False, indent=2)
         
         # 发送到Readwise
+        readwise_saved = False
         try:
             # 将字幕列表转换为纯文本
             subtitle_text = []
@@ -326,11 +284,22 @@ def process_general():
             
             logger.info(f"正在发送内容到Readwise: {video_title}")
             
-            # 发送到Readwise
-            success = readwise_service.save_to_readwise(
+            # 发送到Readwise - 使用处理后的view URL而不是原始URL
+            # 从配置获取video_domain，构造完整的view URL
+            try:
+                from ..config.config_manager import get_config_value
+                video_domain = get_config_value('servers.video_domain', 'http://localhost:5000')
+            except ImportError:
+                from config.config_manager import get_config_value
+                video_domain = get_config_value('servers.video_domain', 'http://localhost:5000')
+            
+            view_url = f"{video_domain}/view/{file_id}"
+            logger.info(f"发送到Readwise使用的URL: {view_url} (而非原始URL: {video_url})")
+            
+            readwise_saved = readwise_service.save_to_readwise(
                 title=video_title,
                 content=html_content,
-                url=video_url,
+                url=view_url,  # 使用view URL而非原始URL
                 published_date=video_date,
                 author=video_author,
                 location=location,
@@ -338,22 +307,25 @@ def process_general():
                 language=language
             )
             
-            if success:
+            if readwise_saved:
                 logger.info("成功发送到Readwise")
             else:
                 logger.error("发送到Readwise失败")
             
         except Exception as e:
             logger.error(f"发送到Readwise失败: {str(e)}")
+            readwise_saved = False
         
         # 返回结果
         return jsonify({
             'success': True,
+            'file_id': file_info['id'],
             'video_info': video_info,
             'subtitle_content': srt_content,
             'filename': file_info['filename'],
             'view_url': file_info['url'],
-            'source': 'subtitle'
+            'source': 'subtitle',
+            'readwise_saved': readwise_saved
         })
         
     except Exception as e:

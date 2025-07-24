@@ -127,6 +127,7 @@ app = create_app()
 
 
 if __name__ == '__main__':
-    # Development server
-    debug_mode = os.environ.get('FLASK_ENV') == 'development'
+    # Development server - Enable debug mode
+    debug_mode = True  # Always enable debug mode for better troubleshooting
+    logger.info(f"Starting Flask server with debug mode: {debug_mode}")
     app.run(host='0.0.0.0', port=5000, debug=debug_mode)

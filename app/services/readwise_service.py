@@ -59,11 +59,14 @@ class ReadwiseService:
             return False
         
         try:
-            logger.info(f"Saving to Readwise: {title}")
+            logger.info(f"开始发送内容到Readwise: {title}")
+            logger.info(f"Readwise URL: {url}")
+            logger.info(f"内容长度: {len(content)} 字符")
             
             # Prepare article data
             article_data = self._prepare_article_data(content, title, url, video_info, 
                                                     published_date, author, location, tags, language)
+            logger.info(f"准备的文章数据: 标题={article_data.get('title')}, URL={article_data.get('url')}, 位置={article_data.get('location')}")
             
             # Check content length and split if necessary
             if len(content) > self.max_content_length:
@@ -75,7 +78,8 @@ class ReadwiseService:
             return self._save_single_article(article_data)
             
         except Exception as e:
-            logger.error(f"Error saving to Readwise: {str(e)}")
+            logger.error(f"❌ 保存到Readwise时发生错误: {str(e)}")
+            logger.exception("详细错误堆栈:")
             return False
     
     def _prepare_article_data(self, content: str, title: str, url: str, 
@@ -213,10 +217,18 @@ class ReadwiseService:
     def _save_single_article(self, article_data: Dict[str, Any]) -> bool:
         """Save a single article to Readwise."""
         try:
+            logger.info(f"正在发送文章到Readwise API: {article_data.get('title')}")
+            logger.info(f"API URL: {self.api_base_url}/save/")
+            
             headers = {
                 'Authorization': f'Token {self.api_token}',
                 'Content-Type': 'application/json'
             }
+            
+            # Log article data (excluding full content for brevity)
+            log_data = {k: v for k, v in article_data.items() if k != 'content'}
+            log_data['content_length'] = len(article_data.get('content', ''))
+            logger.info(f"发送的数据: {log_data}")
             
             response = requests.post(
                 f'{self.api_base_url}/save/',
@@ -225,18 +237,27 @@ class ReadwiseService:
                 timeout=30
             )
             
+            logger.info(f"Readwise API响应状态码: {response.status_code}")
+            
             if response.status_code in [200, 201]:
-                logger.info("Successfully saved to Readwise")
+                logger.info("✅ 成功发送到Readwise!")
                 result = response.json()
+                logger.info(f"Readwise响应数据: {result}")
                 if 'url' in result:
-                    logger.info(f"Readwise article URL: {result['url']}")
+                    logger.info(f"📝 Readwise文章URL: {result['url']}")
                 return True
             else:
-                logger.error(f"Readwise API error: {response.status_code} {response.text}")
+                logger.error(f"❌ Readwise API错误: {response.status_code} {response.text}")
+                try:
+                    error_detail = response.json()
+                    logger.error(f"错误详情: {error_detail}")
+                except:
+                    pass
                 return False
                 
         except requests.RequestException as e:
-            logger.error(f"Readwise request failed: {str(e)}")
+            logger.error(f"❌ Readwise请求失败: {str(e)}")
+            logger.exception("详细错误信息:")
             return False
     
     def _save_long_content(self, content: str, title: str, url: str, 
