@@ -2,7 +2,7 @@
 
 import os
 import logging
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, redirect
 from .config.config_manager import ConfigManager, get_config_value
 from .services.logging_service import LoggingService
 from .services.file_service import FileService
@@ -32,6 +32,17 @@ def create_app(config_path=None):
     
     # 初始化日志服务
     logging_service = LoggingService()
+    
+    # 设置根日志级别为DEBUG，确保所有模块的日志都能输出
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.DEBUG)
+    
+    # 创建控制台处理器确保所有日志都输出到控制台
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
     
     logger.info("启动字幕处理服务应用")
     
@@ -248,6 +259,47 @@ def register_main_routes(app):
         except Exception as e:
             logger.error(f"获取API信息失败: {str(e)}")
             return jsonify({'error': str(e)}), 500
+
+    @app.route('/process', methods=['GET', 'POST', 'OPTIONS'])
+    def process_main():
+        """处理主路由 - 重定向到 /process/"""
+        if request.method == 'OPTIONS':
+            # 处理 CORS 预检请求
+            response = jsonify({'status': 'ok'})
+            response.headers.add('Access-Control-Allow-Origin', '*')
+            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+            response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+            return response
+        elif request.method == 'POST':
+            # POST请求：检查是否包含视频URL，如果是则处理，否则返回端点信息
+            if request.is_json:
+                data = request.get_json()
+                logger.info(f"收到POST请求数据: {data}")
+                if data and 'url' in data:
+                    logger.info(f"转发到upload/url端点: {data.get('url')}")
+                    # 转发到upload/url端点处理
+                    from flask import current_app
+                    with current_app.test_request_context('/upload/url', method='POST', json=data, headers={'Content-Type': 'application/json'}):
+                        from .routes.upload_routes import upload_url
+                        return upload_url()
+                        
+            # 如果不包含URL，返回处理信息
+            return jsonify({
+                'service': 'Video and Audio Processing Service',
+                'message': 'Use specific endpoints for processing',
+                'endpoints': {
+                    'video_processing': '/process/video/<process_id>',
+                    'audio_transcription': '/process/audio/<file_id>',
+                    'subtitle_translation': '/process/translate/<file_id>',
+                    'readwise_creation': '/process/readwise/<file_id>',
+                    'status_check': '/process/status/<task_id>',
+                    'upload_url': '/upload/url'
+                },
+                'status': 'ready'
+            })
+        else:
+            # GET请求重定向到带斜杠的版本
+            return redirect('/process/', code=301)
 
 
 def main():
