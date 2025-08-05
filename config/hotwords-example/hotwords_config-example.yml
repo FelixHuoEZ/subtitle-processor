@@ -1,0 +1,37 @@
+# 热词配置示例文件
+# 请复制此文件到 config/hotwords/hotwords_config.yml 并根据需要修改
+
+hotwords:
+  # 生成策略配置
+  strategy:
+    enabled_methods:
+      - "category_based"      # 基于分类的热词
+      - "title_extraction"    # 从标题提取
+      - "tag_based"          # 基于用户标签
+      - "learned"            # 机器学习热词
+    
+    max_hotwords: 20         # 最大热词数量
+    min_keyword_length: 2    # 最小关键词长度
+    
+  # 权重配置
+  weights:
+    category_based: 0.4      # 分类热词权重
+    title_extraction: 0.3    # 标题提取权重  
+    tag_based: 0.2          # 标签热词权重
+    learned: 0.1            # 学习热词权重
+
+  # 分类映射规则
+  category_mapping:
+    keywords:
+      science: ["科学", "技术", "实验", "研究", "理论"]
+      medical: ["医学", "健康", "疾病", "治疗", "药物", "症状"]
+      news: ["新闻", "事件", "政治", "社会", "国际"]
+      finance: ["金融", "经济", "股票", "投资", "市场"]
+      technology: ["人工智能", "编程", "软件", "硬件", "互联网"]
+      
+    channels:
+      science: ["科普", "实验室", "研究院"]
+      medical: ["医生", "医院", "健康"]
+      news: ["新闻", "时事", "媒体"]
+      finance: ["财经", "投资", "金融"]
+      technology: ["科技", "程序", "开发"]

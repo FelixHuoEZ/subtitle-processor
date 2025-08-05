@@ -244,9 +244,15 @@ class VideoService:
             tuple: (是否应该下载字幕, 语言优先级列表)
         """
         try:
-            # 获取可用字幕语言
+            # 获取可用字幕语言，确保是字典类型
             available_subtitles = info.get('subtitles', {})
             available_auto = info.get('automatic_captions', {})
+            
+            # 如果不是字典类型，设为空字典
+            if not isinstance(available_subtitles, dict):
+                available_subtitles = {}
+            if not isinstance(available_auto, dict):
+                available_auto = {}
             
             logger.info(f"可用字幕: {list(available_subtitles.keys())}")
             logger.info(f"可用自动字幕: {list(available_auto.keys())}")
@@ -312,6 +318,7 @@ class VideoService:
             logger.info(f"开始下载视频: {url}")
             
             # 先尝试检查视频信息
+            info = None
             try:
                 with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
                     info = ydl.extract_info(url, download=False)
@@ -324,6 +331,23 @@ class VideoService:
                         logger.info(f"视频可用性: {info.get('availability', 'unknown')}")
             except Exception as e:
                 logger.info(f"无法获取视频信息，可能需要登录: {str(e)}")
+                info = None
+            
+            # 记录预期的视频ID（用于后续文件查找）
+            expected_video_id = None
+            if info:
+                expected_video_id = info.get('id')
+            else:
+                # 尝试从URL中提取视频ID
+                try:
+                    if 'youtu.be/' in url:
+                        expected_video_id = url.split('youtu.be/')[-1].split('?')[0]
+                    elif 'youtube.com/watch?v=' in url:
+                        expected_video_id = url.split('v=')[1].split('&')[0]
+                except:
+                    pass
+            
+            logger.info(f"预期视频ID: {expected_video_id}")
             
             # 基础下载选项
             base_opts = {
@@ -366,11 +390,8 @@ class VideoService:
                     with yt_dlp.YoutubeDL(opts) as ydl:
                         ydl.download([url])
                     
-                    # 查找下载的文件
-                    for file in os.listdir(temp_dir):
-                        if file.startswith(info.get('id', '')) if info else True:
-                            downloaded_file = os.path.join(temp_dir, file)
-                            break
+                    # 改进的文件查找逻辑
+                    downloaded_file = self._find_downloaded_file(temp_dir, expected_video_id)
                     
                     if downloaded_file and os.path.exists(downloaded_file):
                         logger.info(f"下载成功: {downloaded_file}")
@@ -382,6 +403,14 @@ class VideoService:
             
             if not downloaded_file:
                 logger.error("所有下载尝试都失败了")
+                # 列出临时目录中的文件用于调试
+                try:
+                    files = os.listdir(temp_dir)
+                    logger.error(f"临时目录中的文件: {files}")
+                    if files:
+                        logger.error("文件存在但未被正确识别，这可能是文件查找逻辑的问题")
+                except Exception as e:
+                    logger.error(f"无法列出临时目录文件: {str(e)}")
                 return None
             
             # 转换为音频格式
@@ -391,6 +420,54 @@ class VideoService:
             logger.error(f"下载视频时出错: {str(e)}")
             return None
     
+    def _find_downloaded_file(self, temp_dir: str, expected_video_id: Optional[str]) -> Optional[str]:
+        """改进的下载文件查找逻辑"""
+        try:
+            if not os.path.exists(temp_dir):
+                logger.error(f"临时目录不存在: {temp_dir}")
+                return None
+            
+            files = os.listdir(temp_dir)
+            logger.info(f"临时目录中的文件: {files}")
+            
+            if not files:
+                logger.warning("临时目录中没有文件")
+                return None
+            
+            # 策略1: 如果有预期的视频ID，优先匹配
+            if expected_video_id:
+                for file in files:
+                    if file.startswith(expected_video_id):
+                        file_path = os.path.join(temp_dir, file)
+                        logger.info(f"通过视频ID匹配到文件: {file_path}")
+                        return file_path
+            
+            # 策略2: 查找最新创建的文件
+            files_with_time = []
+            for file in files:
+                file_path = os.path.join(temp_dir, file)
+                try:
+                    mtime = os.path.getmtime(file_path)
+                    files_with_time.append((file_path, mtime))
+                except OSError:
+                    continue
+            
+            if files_with_time:
+                # 按修改时间排序，选择最新的文件
+                files_with_time.sort(key=lambda x: x[1], reverse=True)
+                newest_file = files_with_time[0][0]
+                logger.info(f"选择最新的文件: {newest_file}")
+                return newest_file
+            
+            # 策略3: 如果都失败了，返回第一个文件
+            first_file = os.path.join(temp_dir, files[0])
+            logger.info(f"回退到第一个文件: {first_file}")
+            return first_file
+            
+        except Exception as e:
+            logger.error(f"查找下载文件时发生错误: {str(e)}")
+            return None
+
     def _convert_to_audio(self, video_file: str, output_dir: str) -> Optional[str]:
         """将视频转换为音频格式"""
         try:

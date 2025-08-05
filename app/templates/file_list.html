@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+
+{% block title %}文件列表{% endblock %}
+
+{% block content %}
+<div class="container">
+    <h1>文件列表</h1>
+    
+    <!-- 筛选和排序 -->
+    <div class="row mb-3">
+        <div class="col-md-6">
+            <form method="GET" class="d-flex">
+                <select name="type" class="form-select me-2">
+                    <option value="">所有类型</option>
+                    <option value="video" {% if current_type == 'video' %}selected{% endif %}>视频</option>
+                    <option value="audio" {% if current_type == 'audio' %}selected{% endif %}>音频</option>
+                    <option value="subtitle" {% if current_type == 'subtitle' %}selected{% endif %}>字幕</option>
+                </select>
+                <select name="sort" class="form-select me-2">
+                    <option value="time_desc" {% if current_sort == 'time_desc' %}selected{% endif %}>最新</option>
+                    <option value="time_asc" {% if current_sort == 'time_asc' %}selected{% endif %}>最旧</option>
+                    <option value="name_asc" {% if current_sort == 'name_asc' %}selected{% endif %}>名称A-Z</option>
+                    <option value="name_desc" {% if current_sort == 'name_desc' %}selected{% endif %}>名称Z-A</option>
+                    <option value="size_desc" {% if current_sort == 'size_desc' %}selected{% endif %}>大小↓</option>
+                    <option value="size_asc" {% if current_sort == 'size_asc' %}selected{% endif %}>大小↑</option>
+                </select>
+                <button type="submit" class="btn btn-primary">应用</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- 文件列表 -->
+    {% if files %}
+    <div class="row">
+        {% for file in files %}
+        <div class="col-md-6 col-lg-4 mb-3">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">{{ file.name }}</h5>
+                    <p class="card-text">
+                        <small class="text-muted">
+                            类型: {{ file.type }}<br>
+                            大小: {{ file.size_mb }}MB<br>
+                            时间: {{ file.upload_time }}
+                        </small>
+                    </p>
+                    <a href="{{ url_for('view.file_detail', file_id=file.id) }}" class="btn btn-primary btn-sm">查看详情</a>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    
+    <!-- 分页 -->
+    {% if pagination and pagination.total > pagination.per_page %}
+    <nav aria-label="分页导航">
+        <ul class="pagination justify-content-center">
+            {% if pagination.has_prev %}
+            <li class="page-item">
+                <a class="page-link" href="{{ url_for('view.index', page=pagination.page-1, type=current_type, sort=current_sort) }}">上一页</a>
+            </li>
+            {% endif %}
+            
+            {% for page_num in range(1, pagination.total_pages + 1) %}
+                {% if page_num == pagination.page %}
+                <li class="page-item active">
+                    <span class="page-link">{{ page_num }}</span>
+                </li>
+                {% else %}
+                <li class="page-item">
+                    <a class="page-link" href="{{ url_for('view.index', page=page_num, type=current_type, sort=current_sort) }}">{{ page_num }}</a>
+                </li>
+                {% endif %}
+            {% endfor %}
+            
+            {% if pagination.has_next %}
+            <li class="page-item">
+                <a class="page-link" href="{{ url_for('view.index', page=pagination.page+1, type=current_type, sort=current_sort) }}">下一页</a>
+            </li>
+            {% endif %}
+        </ul>
+    </nav>
+    {% endif %}
+    
+    {% else %}
+    <div class="alert alert-info">
+        <h4>暂无文件</h4>
+        <p>还没有上传任何文件。<a href="{{ url_for('upload.upload_file') }}">立即上传</a></p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

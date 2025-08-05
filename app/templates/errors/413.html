@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}文件过大 - 413{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+    <div class="row justify-content-center">
+        <div class="col-md-6 text-center">
+            <div class="card">
+                <div class="card-body">
+                    <h1 class="display-1 text-muted">413</h1>
+                    <h2 class="card-title">文件过大</h2>
+                    <p class="card-text text-muted">
+                        您上传的文件超过了最大允许大小限制。
+                    </p>
+                    <div class="alert alert-warning" role="alert">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        最大文件大小限制: <strong>500MB</strong>
+                    </div>
+                    <p class="text-muted small">
+                        请选择较小的文件或考虑压缩文件后重新上传。
+                    </p>
+                    <div class="d-grid gap-2">
+                        <a href="{{ url_for('upload.upload_file') }}" class="btn btn-primary">
+                            <i class="fas fa-upload"></i> 重新上传
+                        </a>
+                        <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">
+                            <i class="fas fa-home"></i> 返回首页
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

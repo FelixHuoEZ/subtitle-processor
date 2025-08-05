@@ -8,6 +8,7 @@ import subprocess
 import requests
 from typing import Dict, Any, Optional, List
 from ..config.config_manager import get_config_value
+from .hotword_service import HotwordService
 
 logger = logging.getLogger(__name__)
 
@@ -17,27 +18,18 @@ class TranscriptionService:
     
     def __init__(self):
         """初始化转录服务"""
-        self.funasr_server = get_config_value('servers.funasr', 'http://localhost:10095')
+        self.funasr_server = get_config_value('servers.transcribe.default_url', 'http://transcribe-audio:10095')
         self.funasr_servers = self._load_transcribe_servers()
         self.openai_api_key = get_config_value('tokens.openai.api_key', '')
         self.openai_base_url = get_config_value('tokens.openai.base_url', 'https://api.openai.com/v1')
-        self.default_hotwords = self._load_default_hotwords()
+        self.hotword_service = HotwordService()
+        self.default_hotwords = self.hotword_service.get_default_hotwords()
     
-    def _load_default_hotwords(self) -> List[str]:
-        """加载默认热词列表"""
-        try:
-            hotwords = get_config_value('transcription.hotwords', [])
-            if isinstance(hotwords, list):
-                return hotwords
-            return []
-        except Exception as e:
-            logger.warning(f"加载热词失败: {str(e)}")
-            return []
     
     def _load_transcribe_servers(self) -> List[Dict[str, Any]]:
         """加载转录服务器列表"""
         try:
-            servers_config = get_config_value('servers.transcribe_servers', [])
+            servers_config = get_config_value('servers.transcribe.servers', [])
             if not servers_config:
                 # 使用默认服务器
                 return [{'url': self.funasr_server, 'status': 'unknown'}]
@@ -50,7 +42,9 @@ class TranscriptionService:
                     servers.append({
                         'url': server_config.get('url', ''),
                         'status': 'unknown',
-                        'weight': server_config.get('weight', 1)
+                        'priority': server_config.get('priority', 999),
+                        'weight': server_config.get('weight', 1),
+                        'name': server_config.get('name', 'Unknown')
                     })
             
             logger.info(f"加载了 {len(servers)} 个转录服务器")
@@ -86,15 +80,21 @@ class TranscriptionService:
                 logger.error("没有可用的转录服务器")
                 return None
             
-            # 按权重选择服务器（如果有权重配置）
-            if any('weight' in server for server in available_servers):
+            # 按优先级选择服务器（优先级数字越小越优先）
+            if any('priority' in server for server in available_servers):
+                # 按优先级排序，选择优先级最高的（数字最小的）
+                available_servers.sort(key=lambda x: x.get('priority', 999))
+                selected_server = available_servers[0]
+                logger.debug(f"按优先级选择服务器，优先级: {selected_server.get('priority', 'N/A')}")
+            elif any('weight' in server for server in available_servers):
                 import random
                 weights = [server.get('weight', 1) for server in available_servers]
                 selected_server = random.choices(available_servers, weights=weights)[0]
+                logger.debug("按权重随机选择服务器")
             else:
-                # 随机选择一个可用服务器
-                import random
-                selected_server = random.choice(available_servers)
+                # 选择第一个可用服务器
+                selected_server = available_servers[0]
+                logger.debug("选择第一个可用服务器")
             
             logger.info(f"选择转录服务器: {selected_server['url']}")
             return selected_server['url']
@@ -103,12 +103,20 @@ class TranscriptionService:
             logger.error(f"获取可用转录服务器失败: {str(e)}")
             return self.funasr_server  # 返回默认服务器
     
-    def transcribe_audio(self, audio_file: str, hotwords: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+    def transcribe_audio(self, 
+                        audio_file: str, 
+                        hotwords: Optional[List[str]] = None,
+                        video_info: Optional[Dict[str, Any]] = None,
+                        tags: Optional[List[str]] = None,
+                        platform: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """转录音频文件
         
         Args:
             audio_file: 音频文件路径
-            hotwords: 热词列表，提高识别准确率
+            hotwords: 用户指定的热词列表，提高识别准确率
+            video_info: 视频信息字典，包含标题、频道等
+            tags: 用户标签列表
+            platform: 视频平台名称
             
         Returns:
             dict: 转录结果，包含文本和时间戳信息
@@ -120,9 +128,33 @@ class TranscriptionService:
                 logger.error(f"音频文件不存在: {audio_file}")
                 return None
             
-            # 使用热词
-            final_hotwords = hotwords or self.default_hotwords
-            logger.info(f"使用热词: {final_hotwords}")
+            # 智能生成热词
+            if hotwords:
+                # 如果用户指定了热词，优先使用
+                final_hotwords = hotwords
+                logger.info(f"使用用户指定热词: {final_hotwords}")
+            else:
+                # 基于视频信息智能生成热词
+                title = video_info.get('title') if video_info else None
+                channel_name = video_info.get('uploader') if video_info else None
+                
+                generated_hotwords = self.hotword_service.generate_hotwords(
+                    title=title,
+                    tags=tags,
+                    channel_name=channel_name,
+                    platform=platform
+                )
+                
+                # 合并生成的热词和默认热词
+                final_hotwords = generated_hotwords + self.default_hotwords
+                # 去重并限制数量
+                final_hotwords = list(dict.fromkeys(final_hotwords))[:20]
+                
+                logger.info(f"智能生成热词 ({len(generated_hotwords)} 个): {generated_hotwords}")
+                logger.info(f"最终使用热词 ({len(final_hotwords)} 个): {final_hotwords}")
+            
+            # 【关键日志】记录最终使用的热词
+            logger.warning(f"🔥 TranscriptionService最终使用热词 ({len(final_hotwords)}个): {final_hotwords}")
             
             # 首先尝试FunASR转录
             result = self._transcribe_with_funasr(audio_file, final_hotwords)
@@ -166,22 +198,30 @@ class TranscriptionService:
         """转录单个音频文件"""
         try:
             # 准备文件和参数
-            files = {'file': open(audio_file, 'rb')}
-            data = {
-                'hotwords': json.dumps(hotwords) if hotwords else '[]',
-                'task': 'asr',
-                'chunk_size': '960',
-                'timestamp_granularity': 'word'
-            }
-            
-            # 发送转录请求
-            url = f"{server_url.rstrip('/')}/transcribe"
-            response = requests.post(url, files=files, data=data, timeout=300)
-            files['file'].close()
+            with open(audio_file, 'rb') as f:
+                files = {'audio': f}
+                hotword_str = ','.join(hotwords) if hotwords else ''
+                data = {
+                    'hotwords': hotword_str,
+                }
+                
+                # 【关键日志】记录发送给FunASR的热词
+                if hotwords:
+                    logger.warning(f"🔥 发送给FunASR的热词 ({len(hotwords)}个): {hotwords}")
+                    logger.warning(f"🔥 热词字符串格式: '{hotword_str}'")
+                else:
+                    logger.warning("🔥 没有热词发送给FunASR")
+                
+                # 发送转录请求
+                url = f"{server_url.rstrip('/')}/recognize"
+                logger.warning(f"🔥 发送FunASR请求到: {url}")
+                response = requests.post(url, files=files, data=data, timeout=300)
             
             if response.status_code == 200:
                 result = response.json()
-                logger.debug(f"FunASR响应: {result}")
+                logger.info(f"FunASR响应状态: 200")
+                logger.info(f"FunASR响应类型: {type(result)}")
+                logger.info(f"FunASR响应内容: {str(result)}")
                 
                 # 解析结果
                 return self._parse_funasr_result(result, audio_file)
@@ -333,8 +373,13 @@ class TranscriptionService:
             text_content = ""
             timestamp_info = None
             
-            if 'result' in result:
-                # 标准FunASR结果格式
+            # 首先检查是否直接有text字段（新格式）
+            if 'text' in result:
+                text_content = result.get('text', '')
+                timestamp_info = result.get('timestamp', [])
+                logger.info(f"从直接text字段获取文本: {text_content[:100]}...")
+            elif 'result' in result:
+                # 标准FunASR结果格式（旧格式）
                 asr_result = result['result']
                 
                 if isinstance(asr_result, dict):
@@ -350,6 +395,9 @@ class TranscriptionService:
                         timestamp_info = first_result.get('timestamp', [])
                     else:
                         text_content = str(first_result)
+                logger.info(f"从result字段获取文本: {text_content[:100]}...")
+            else:
+                logger.warning(f"未找到text或result字段，可用字段: {list(result.keys())}")
             
             # 构造标准化结果
             parsed_result = {

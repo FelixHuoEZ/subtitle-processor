@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+
+{% block title %}文件详情 - {{ file.name }}{% endblock %}
+
+{% block content %}
+<div class="container">
+    <nav aria-label="breadcrumb">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="{{ url_for('view.index') }}">文件列表</a></li>
+            <li class="breadcrumb-item active">{{ file.name }}</li>
+        </ol>
+    </nav>
+
+    <div class="row">
+        <div class="col-md-8">
+            <h1>{{ file.name }}</h1>
+            
+            {% if file.type == 'video' %}
+            <!-- 视频播放器 -->
+            <div class="card mb-4">
+                <div class="card-body">
+                    <video controls class="w-100" style="max-height: 400px;">
+                        <source src="{{ url_for('view.serve_file', file_id=file.id) }}" type="video/mp4">
+                        您的浏览器不支持视频播放。
+                    </video>
+                </div>
+            </div>
+            {% elif file.type == 'audio' %}
+            <!-- 音频播放器 -->
+            <div class="card mb-4">
+                <div class="card-body">
+                    <audio controls class="w-100">
+                        <source src="{{ url_for('view.serve_file', file_id=file.id) }}" type="audio/mpeg">
+                        您的浏览器不支持音频播放。
+                    </audio>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- 操作按钮 -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5>文件操作</h5>
+                </div>
+                <div class="card-body">
+                    <div class="btn-group mb-2" role="group">
+                        <a href="{{ url_for('view.download_file', file_id=file.id) }}" class="btn btn-primary">
+                            <i class="fas fa-download"></i> 下载
+                        </a>
+                        {% if file.type in ['video', 'audio'] %}
+                        <a href="{{ url_for('process.transcribe_audio', file_id=file.id) }}" class="btn btn-success">
+                            <i class="fas fa-microphone"></i> 转录字幕
+                        </a>
+                        {% endif %}
+                        {% if file.type == 'subtitle' %}
+                        <a href="{{ url_for('process.translate_subtitle', file_id=file.id) }}" class="btn btn-info">
+                            <i class="fas fa-language"></i> 翻译字幕
+                        </a>
+                        <a href="{{ url_for('process.create_readwise', file_id=file.id) }}" class="btn btn-warning">
+                            <i class="fas fa-book"></i> 创建Readwise
+                        </a>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+
+            {% if file.type == 'subtitle' and file.content %}
+            <!-- 字幕内容预览 -->
+            <div class="card">
+                <div class="card-header">
+                    <h5>字幕内容预览</h5>
+                </div>
+                <div class="card-body">
+                    <div style="max-height: 400px; overflow-y: auto;">
+                        <pre>{{ file.content[:1000] }}{% if file.content|length > 1000 %}...{% endif %}</pre>
+                    </div>
+                    {% if file.content|length > 1000 %}
+                    <small class="text-muted">显示前1000个字符，<a href="{{ url_for('view.serve_file', file_id=file.id) }}">查看完整内容</a></small>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+
+        <div class="col-md-4">
+            <!-- 文件信息 -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5>文件信息</h5>
+                </div>
+                <div class="card-body">
+                    <table class="table table-sm">
+                        <tr>
+                            <td><strong>类型:</strong></td>
+                            <td>{{ file.type }}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>大小:</strong></td>
+                            <td>{{ file.size_mb }} MB</td>
+                        </tr>
+                        <tr>
+                            <td><strong>上传时间:</strong></td>
+                            <td>{{ file.upload_time }}</td>
+                        </tr>
+                        {% if file.duration %}
+                        <tr>
+                            <td><strong>时长:</strong></td>
+                            <td>{{ file.duration }}</td>
+                        </tr>
+                        {% endif %}
+                        {% if file.format %}
+                        <tr>
+                            <td><strong>格式:</strong></td>
+                            <td>{{ file.format }}</td>
+                        </tr>
+                        {% endif %}
+                    </table>
+                    
+                    {% if file.description %}
+                    <h6>描述</h6>
+                    <p class="text-muted">{{ file.description }}</p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- 相关文件 -->
+            {% if related_files %}
+            <div class="card">
+                <div class="card-header">
+                    <h5>相关文件</h5>
+                </div>
+                <div class="card-body">
+                    {% for related in related_files %}
+                    <div class="mb-2">
+                        <a href="{{ url_for('view.file_detail', file_id=related.id) }}" class="text-decoration-none">
+                            <small class="badge bg-secondary">{{ related.type }}</small>
+                            {{ related.name }}
+                        </a>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}页面未找到 - 404{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+    <div class="row justify-content-center">
+        <div class="col-md-6 text-center">
+            <div class="card">
+                <div class="card-body">
+                    <h1 class="display-1 text-muted">404</h1>
+                    <h2 class="card-title">页面未找到</h2>
+                    <p class="card-text text-muted">
+                        抱歉，您访问的页面不存在或已被移动。
+                    </p>
+                    <div class="d-grid gap-2">
+                        <a href="{{ url_for('index') }}" class="btn btn-primary">
+                            <i class="fas fa-home"></i> 返回首页
+                        </a>
+                        <a href="{{ url_for('view.index') }}" class="btn btn-outline-secondary">
+                            <i class="fas fa-list"></i> 查看文件列表
+                        </a>
+                        <a href="{{ url_for('upload.upload_file') }}" class="btn btn-outline-success">
+                            <i class="fas fa-upload"></i> 上传文件
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}服务器错误 - 500{% endblock %}
+
+{% block content %}
+<div class="container mt-5">
+    <div class="row justify-content-center">
+        <div class="col-md-6 text-center">
+            <div class="card">
+                <div class="card-body">
+                    <h1 class="display-1 text-muted">500</h1>
+                    <h2 class="card-title">服务器内部错误</h2>
+                    <p class="card-text text-muted">
+                        抱歉，服务器遇到了一个内部错误，无法完成您的请求。
+                    </p>
+                    <p class="text-muted small">
+                        如果问题持续存在，请联系管理员。
+                    </p>
+                    <div class="d-grid gap-2">
+                        <a href="{{ url_for('index') }}" class="btn btn-primary">
+                            <i class="fas fa-home"></i> 返回首页
+                        </a>
+                        <button onclick="history.back()" class="btn btn-outline-secondary">
+                            <i class="fas fa-arrow-left"></i> 返回上一页
+                        </button>
+                        <a href="{{ url_for('health_check') }}" class="btn btn-outline-info">
+                            <i class="fas fa-heart"></i> 检查服务状态
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

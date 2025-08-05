@@ -29,8 +29,10 @@ class SubtitleService:
         """
         try:
             logger.info("开始解析字幕内容")
-            logger.debug(f"输入结果类型: {type(result)}")
-            logger.debug(f"输入结果内容: {result}")
+            logger.info(f"输入结果类型: {type(result)}")
+            logger.info(f"输入结果是否为None: {result is None}")
+            if result is not None:
+                logger.info(f"输入结果内容: {json.dumps(result, ensure_ascii=False, indent=2) if isinstance(result, dict) else str(result)}")
             
             text_content = None
             timestamps = None
@@ -54,12 +56,20 @@ class SubtitleService:
                 
                 # 获取文本内容
                 if 'text' in result:
+                    logger.info(f"找到text字段，类型: {type(result['text'])}")
+                    logger.info(f"text字段原始值: {repr(result['text'])}")
                     if isinstance(result['text'], str):
                         text_content = result['text']
-                        logger.debug(f"获取到文本内容: {text_content[:200]}...")
+                        logger.info(f"成功提取文本内容，长度: {len(text_content)}")
+                        logger.info(f"文本内容前200字符: {text_content[:200]}")
                     else:
                         logger.error(f"text字段不是字符串类型: {type(result['text'])}")
+                        logger.error(f"text字段值: {result['text']}")
                         return None
+                else:
+                    logger.error(f"结果中没有text字段，可用字段: {list(result.keys())}")
+                    logger.error(f"完整结果内容: {result}")
+                    return None
                 
                 # 获取时间戳
                 if 'timestamp' in result:
@@ -75,12 +85,18 @@ class SubtitleService:
             # 如果没有文本内容，无法生成字幕
             if not text_content:
                 logger.error("无法获取有效的文本内容")
+                logger.error(f"text_content值: {repr(text_content)}")
+                logger.error(f"原始result类型: {type(result)}")
+                logger.error(f"原始result内容: {result}")
                 return None
             
             # 清理文本内容
+            logger.info(f"清理前文本内容长度: {len(text_content)}")
             text_content = text_content.strip()
+            logger.info(f"清理后文本内容长度: {len(text_content)}")
             if not text_content:
-                logger.error("文本内容为空")
+                logger.error("清理后文本内容为空")
+                logger.error(f"清理后text_content值: {repr(text_content)}")
                 return None
             
             # 生成SRT格式
