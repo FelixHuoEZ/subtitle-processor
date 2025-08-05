@@ -28,10 +28,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# 复制应用文件
-COPY app/app.py .
-COPY app/templates ./templates/
-COPY app/* ./
+# 复制应用文件 - 新模块化架构
+COPY app/ ./app/
+COPY run_app.py .
+COPY test_app_startup.py .
 
 # 创建必要的目录
 RUN mkdir -p uploads videos

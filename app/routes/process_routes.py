@@ -27,6 +27,30 @@ translation_service = TranslationService()
 readwise_service = ReadwiseService()
 
 
+@process_bp.route('/', methods=['GET', 'OPTIONS'])
+def process_index():
+    """处理服务主页"""
+    if request.method == 'OPTIONS':
+        # 处理 CORS 预检请求
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+        return response
+    
+    return jsonify({
+        'service': 'Video and Audio Processing Service',
+        'endpoints': {
+            'video_processing': '/process/video/<process_id>',
+            'audio_transcription': '/process/audio/<file_id>',
+            'subtitle_translation': '/process/translate/<file_id>',
+            'readwise_creation': '/process/readwise/<file_id>',
+            'status_check': '/process/status/<task_id>'
+        },
+        'status': 'ready'
+    })
+
+
 @process_bp.route('/video/<process_id>')
 def process_video(process_id):
     """视频处理页面"""

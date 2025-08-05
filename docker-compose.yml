@@ -24,6 +24,7 @@ services:
       # - /share/docker/subtitle-processor/config:/app/config
       # - /share/docker/subtitle-processor/models:/app/models
       # - /share/docker/subtitle-processor/firefox_profile:/root/.mozilla/firefox  # Firefox 配置目录
+      - ./app:/app/app  # 映射应用代码
       - ./uploads:/app/uploads
       - ./videos:/app/videos
       - ./outputs:/app/outputs
@@ -32,7 +33,7 @@ services:
       - ./firefox_profile:/root/.mozilla/firefox  # Firefox 配置目录
     environment:
       - TZ=Asia/Shanghai
-      - FLASK_APP=app.py
+      - FLASK_APP=run_app.py
       - FLASK_ENV=development
       # 只对外部请求使用代理
       # - NO_PROXY=transcribe-audio,localhost,127.0.0.1

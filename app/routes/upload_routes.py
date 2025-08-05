@@ -218,7 +218,13 @@ def upload_url():
                             # 进行音频转录
                             logger.info(f"第2.1步：调用转录服务，音频文件: {audio_file}")
                             logger.info(f"音频文件是否存在: {os.path.exists(audio_file)}")
-                            transcription_result = transcription_service.transcribe_audio(audio_file, [])
+                            transcription_result = transcription_service.transcribe_audio(
+                                audio_file=audio_file,
+                                hotwords=None,
+                                video_info=task_info.get('video_info', {}),
+                                tags=task_info.get('tags', []),
+                                platform=platform
+                            )
                             logger.info(f"第2.1步完成：转录结果是否为None: {transcription_result is None}")
                             
                             if transcription_result is None:

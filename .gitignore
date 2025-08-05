@@ -8,6 +8,9 @@ config/readwise_token-backup.txt
 config/telegram_token-backup.txt
 config/transcribe_servers-backup.json
 
+# 热词配置文件（隐私保护）
+config/hotwords/
+
 # 数据目录
 uploads/
 videos/
