@@ -93,9 +93,22 @@ class HotwordPostProcessor:
     
     def _segment_text(self, text):
         """分词处理，保持原有格式"""
-        # 使用正则表达式分割，保持标点符号和空格
-        tokens = re.findall(r'\S+|\s+', text)
-        return tokens
+        try:
+            import jieba
+            # 使用jieba进行中文分词
+            words = list(jieba.cut(text))
+            logger.warning(f"🔥 分词结果: {words}")
+            return words
+        except ImportError:
+            # 如果jieba不可用，使用改进的正则表达式分词
+            # 按标点符号分割，同时保留中文字符序列
+            import re
+            # 匹配中文字符、英文单词、数字、标点符号
+            tokens = re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z]+|\d+|[^\w\s]|\s+', text)
+            # 过滤空白tokens
+            tokens = [token for token in tokens if token.strip()]
+            logger.warning(f"🔥 正则分词结果: {tokens}")
+            return tokens
     
     def _find_best_hotword_match(self, word, hotwords):
         """找到最佳匹配的热词"""
@@ -113,6 +126,19 @@ class HotwordPostProcessor:
             # 精确匹配
             if clean_word == hotword:
                 return (hotword, 1.0)
+            
+            # 子串匹配 - 特别适用于中文复合词
+            if hotword in clean_word or clean_word in hotword:
+                # 计算子串匹配的相似度
+                if len(hotword) <= len(clean_word):
+                    substring_similarity = len(hotword) / len(clean_word) * 0.9  # 给子串匹配稍低权重
+                else:
+                    substring_similarity = len(clean_word) / len(hotword) * 0.9
+                
+                if substring_similarity > best_similarity:
+                    best_similarity = substring_similarity
+                    best_match = hotword
+                    logger.warning(f"🔥 子串匹配: '{clean_word}' <-> '{hotword}' (相似度: {substring_similarity:.3f})")
             
             # 模糊匹配
             similarity = difflib.SequenceMatcher(None, clean_word.lower(), hotword.lower()).ratio()

@@ -589,9 +589,17 @@ def main():
     # 创建应用并配置代理
     proxy_url = PROXY.replace('http://', 'http://') if PROXY else None
     
-    # 创建默认配置
+    # 创建默认配置 - 修复时区警告
+    from zoneinfo import ZoneInfo
+    try:
+        timezone = ZoneInfo('Asia/Shanghai')
+    except:
+        # 回退到pytz
+        import pytz
+        timezone = pytz.timezone('Asia/Shanghai')
+    
     defaults = telegram.ext.Defaults(
-        tzinfo=pytz.timezone('Asia/Shanghai'),  # 使用中国时区
+        tzinfo=timezone,  # 使用新的时区API
         parse_mode=telegram.constants.ParseMode.HTML,
         link_preview_options=telegram.LinkPreviewOptions(is_disabled=True),
         disable_notification=False,
@@ -605,13 +613,26 @@ def main():
         .defaults(defaults)
     )
 
-    # 如果有代理，添加代理配置
+    # 如果有代理，添加代理配置 - 修复新版本API
     if proxy_url:
-        application_builder.proxy_url(proxy_url)
-        application_builder.connect_timeout(30.0)
-        application_builder.read_timeout(30.0)
-        application_builder.write_timeout(30.0)
-        logger.info(f"使用代理: {proxy_url}")
+        try:
+            # 新版本API
+            application_builder.proxy(proxy_url)
+            application_builder.connect_timeout(30.0)
+            application_builder.read_timeout(30.0)
+            application_builder.write_timeout(30.0)
+            logger.info(f"使用代理: {proxy_url}")
+        except AttributeError:
+            # 如果新API不存在，尝试旧API
+            try:
+                application_builder.proxy_url(proxy_url)
+                application_builder.connect_timeout(30.0)
+                application_builder.read_timeout(30.0)
+                application_builder.write_timeout(30.0)
+                logger.info(f"使用代理 (旧API): {proxy_url}")
+            except AttributeError:
+                logger.warning(f"无法设置代理，当前版本不支持: {proxy_url}")
+                # 不使用代理继续运行
 
     # 构建应用
     application = application_builder.build()
