@@ -124,6 +124,7 @@ class ReadwiseService:
         """
         try:
             if not self.enabled:
+                logger.warning("Readwise服务未启用，跳过文章创建")
                 return None
             
             video_info = subtitle_data.get('video_info', {})
@@ -131,13 +132,25 @@ class ReadwiseService:
             
             # 添加详细的调试信息
             logger.info("=== 开始创建Readwise文章 ===")
+            logger.info(f"Readwise服务启用状态: {self.enabled}")
             logger.info(f"视频信息存在: {bool(video_info)}")
+            logger.info(f"字幕内容存在: {bool(subtitle_content)}")
             logger.info(f"字幕内容长度: {len(subtitle_content)} 字符")
             logger.info(f"字幕内容前200字符: {subtitle_content[:200]}...")
             
-            if not video_info or not subtitle_content:
-                logger.error("字幕数据不完整")
+            # 详细检查数据完整性
+            if not video_info:
+                logger.error("❌ 数据验证失败：video_info为空或None")
+                logger.error(f"subtitle_data.keys(): {list(subtitle_data.keys())}")
                 return None
+            
+            if not subtitle_content:
+                logger.error("❌ 数据验证失败：subtitle_content为空或None")
+                logger.error(f"subtitle_content值: {repr(subtitle_content)}")
+                logger.error(f"subtitle_data.keys(): {list(subtitle_data.keys())}")
+                return None
+            
+            logger.info("✅ 数据验证通过，继续处理")
             
             # 构造文章标题
             title = video_info.get('title', '未知视频标题')
@@ -628,12 +641,20 @@ class ReadwiseService:
                 logger.info("Readwise服务未启用")
                 return False
             
-            result = self._make_request('GET', '/documents/?limit=1')
-            if result is not None:
+            # 使用save端点测试连接，但不提供数据（应该返回400但证明连接正常）
+            url = f"{self.base_url}/save/"
+            headers = {
+                'Authorization': f'Token {self.api_token}',
+                'Content-Type': 'application/json'
+            }
+            
+            response = requests.get(url, headers=headers, timeout=10)
+            # 如果返回405（方法不允许），说明端点存在，连接正常
+            if response.status_code in [200, 400, 405]:
                 logger.info("Readwise连接测试成功")
                 return True
             else:
-                logger.error("Readwise连接测试失败")
+                logger.error(f"Readwise连接测试失败: {response.status_code} - {response.text}")
                 return False
                 
         except Exception as e:

@@ -196,16 +196,30 @@ def upload_url():
                         
                         # 发送到Readwise Reader
                         logger.info(f"第3步：开始发送内容到Readwise Reader: {process_id}")
+                        
+                        # 添加调试信息
+                        logger.debug(f"调试信息(有字幕) - task_info关键字段:")
+                        logger.debug(f"  - video_info存在: {bool(task_info.get('video_info'))}")
+                        logger.debug(f"  - subtitle_content存在: {bool(task_info.get('subtitle_content'))}")
+                        logger.debug(f"  - subtitle_content长度: {len(task_info.get('subtitle_content', ''))}")
+                        logger.debug(f"  - tags: {task_info.get('tags')}")
+                        
                         try:
+                            logger.info(f"调用readwise_service.create_article_from_subtitle(有字幕)...")
                             readwise_result = readwise_service.create_article_from_subtitle(task_info)
+                            logger.info(f"Readwise调用返回结果(有字幕): {readwise_result}")
+                            
                             if readwise_result:
                                 task_info['readwise_article_id'] = readwise_result.get('id')
                                 task_info['readwise_url'] = readwise_result.get('url')
                                 logger.info(f"第3步完成：Readwise文章创建成功: {process_id} -> {readwise_result.get('id')}")
                             else:
                                 logger.warning(f"第3步失败：Readwise文章创建失败: {process_id}")
+                                logger.warning(f"readwise_service返回了None或False(有字幕): {readwise_result}")
                         except Exception as e:
                             logger.error(f"第3步错误：发送到Readwise失败: {process_id} - {str(e)}")
+                            import traceback
+                            logger.error(f"异常堆栈(有字幕): {traceback.format_exc()}")
                         
                         logger.info(f"=== 视频处理流程完成 === {process_id}")
                     # 如果需要转录且有音频文件，进行转录
@@ -260,16 +274,34 @@ def upload_url():
                                     
                                     # 发送到Readwise Reader
                                     logger.info(f"第3步：开始发送内容到Readwise Reader: {process_id}")
+                                    
+                                    # 添加详细的调试信息
+                                    logger.debug(f"调试信息 - task_info关键字段:")
+                                    logger.debug(f"  - video_info存在: {bool(task_info.get('video_info'))}")
+                                    logger.debug(f"  - subtitle_content存在: {bool(task_info.get('subtitle_content'))}")
+                                    logger.debug(f"  - subtitle_content长度: {len(task_info.get('subtitle_content', ''))}")
+                                    logger.debug(f"  - tags: {task_info.get('tags')}")
+                                    if task_info.get('video_info'):
+                                        vi = task_info['video_info']
+                                        logger.debug(f"  - video_info.title: {vi.get('title', 'None')}")
+                                        logger.debug(f"  - video_info.uploader: {vi.get('uploader', 'None')}")
+                                    
                                     try:
+                                        logger.info(f"调用readwise_service.create_article_from_subtitle...")
                                         readwise_result = readwise_service.create_article_from_subtitle(task_info)
+                                        logger.info(f"Readwise调用返回结果: {readwise_result}")
+                                        
                                         if readwise_result:
                                             task_info['readwise_article_id'] = readwise_result.get('id')
                                             task_info['readwise_url'] = readwise_result.get('url')
                                             logger.info(f"第3步完成：Readwise文章创建成功: {process_id} -> {readwise_result.get('id')}")
                                         else:
                                             logger.warning(f"第3步失败：Readwise文章创建失败: {process_id}")
+                                            logger.warning(f"readwise_service返回了None或False: {readwise_result}")
                                     except Exception as e:
                                         logger.error(f"第3步错误：发送到Readwise失败: {process_id} - {str(e)}")
+                                        import traceback
+                                        logger.error(f"异常堆栈: {traceback.format_exc()}")
                                     
                                     logger.info(f"=== 视频处理流程完成 === {process_id}")
                                 else:
@@ -294,16 +326,30 @@ def upload_url():
                         
                         # 尝试发送基本信息到Readwise
                         logger.info(f"第3步：发送基本视频信息到Readwise Reader: {process_id}")
+                        
+                        # 添加调试信息
+                        logger.debug(f"调试信息(基本信息) - task_info关键字段:")
+                        logger.debug(f"  - video_info存在: {bool(task_info.get('video_info'))}")
+                        logger.debug(f"  - subtitle_content存在: {bool(task_info.get('subtitle_content'))}")
+                        logger.debug(f"  - subtitle_content长度: {len(task_info.get('subtitle_content', ''))}")
+                        logger.debug(f"  - tags: {task_info.get('tags')}")
+                        
                         try:
+                            logger.info(f"调用readwise_service.create_article_from_subtitle(基本信息)...")
                             readwise_result = readwise_service.create_article_from_subtitle(task_info)
+                            logger.info(f"Readwise调用返回结果(基本信息): {readwise_result}")
+                            
                             if readwise_result:
                                 task_info['readwise_article_id'] = readwise_result.get('id')
                                 task_info['readwise_url'] = readwise_result.get('url')
                                 logger.info(f"第3步完成：Readwise文章(基本信息)创建成功: {process_id} -> {readwise_result.get('id')}")
                             else:
                                 logger.warning(f"第3步失败：Readwise文章(基本信息)创建失败: {process_id}")
+                                logger.warning(f"readwise_service返回了None或False(基本信息): {readwise_result}")
                         except Exception as e:
                             logger.error(f"第3步错误：发送基本信息到Readwise失败: {process_id} - {str(e)}")
+                            import traceback
+                            logger.error(f"异常堆栈(基本信息): {traceback.format_exc()}")
                         
                         logger.info(f"=== 视频处理流程完成(仅基本信息) === {process_id}")
                 else:
