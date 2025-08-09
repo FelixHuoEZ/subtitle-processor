@@ -16,6 +16,10 @@ import datetime
 import pytz
 import re
 import yaml
+import threading
+import asyncio
+from flask import Flask
+from threading import Thread
 
 # 配置日志
 logging.basicConfig(
@@ -76,14 +80,92 @@ TAGS_HELP_MESSAGE = "请输入标签，多个标签用逗号分隔（例如：'y
 # 用户状态存储
 user_states = {}
 
+# 全局变量追踪应用状态
+last_activity = time.time()
+is_bot_healthy = True
+
+# 健康检查Flask应用
+health_app = Flask(__name__)
+
+@health_app.route('/health')
+def health_check():
+    """健康检查端点"""
+    global last_activity, is_bot_healthy
+    
+    current_time = time.time()
+    time_since_activity = current_time - last_activity
+    
+    # 如果超过10分钟没有活动且bot状态不健康，返回错误
+    if time_since_activity > 600 and not is_bot_healthy:
+        return "Bot unhealthy - no activity for too long", 500
+        
+    return "OK", 200
+
+def start_health_server():
+    """启动健康检查服务器"""
+    health_app.run(host='0.0.0.0', port=8081, debug=False, use_reloader=False)
+
+def update_activity():
+    """更新最后活动时间"""
+    global last_activity, is_bot_healthy
+    last_activity = time.time()
+    is_bot_healthy = True  # 有活动时重置健康状态
+
+def connection_monitor(application):
+    """监控连接状态并在需要时重启"""
+    def monitor_loop():
+        global is_bot_healthy, last_activity
+        while True:
+            try:
+                current_time = time.time()
+                time_since_activity = current_time - last_activity
+                
+                # 如果超过30分钟没有活动，尝试发送测试请求
+                if time_since_activity > 1800:  # 30分钟
+                    logger.warning("长时间无活动，执行连接测试")
+                    try:
+                        # 简单的连接测试 - 检查bot对象是否正常
+                        if application and application.bot:
+                            update_activity()
+                        else:
+                            is_bot_healthy = False
+                    except Exception as e:
+                        logger.error(f"连接测试失败: {str(e)}")
+                        is_bot_healthy = False
+                        
+                        # 如果连续失败，强制退出让Docker重启
+                        if time_since_activity > 3600:  # 1小时
+                            logger.critical("连接长时间失败，触发容器重启")
+                            os._exit(1)
+                
+                # 如果状态不健康超过5分钟，强制重启
+                if not is_bot_healthy and time_since_activity > 300:
+                    logger.critical("Bot状态不健康超过5分钟，触发容器重启")
+                    os._exit(1)
+                    
+                time.sleep(60)  # 每分钟检查一次
+                
+            except Exception as e:
+                logger.error(f"连接监控器异常: {str(e)}")
+                time.sleep(60)
+    
+    monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
+    monitor_thread.start()
+    logger.info("连接监控器已启动")
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理错误的回调函数"""
+    global is_bot_healthy
     logger.error("Exception while handling an update:", exc_info=context.error)
+    
+    # 更新活动时间
+    update_activity()
     
     try:
         # 如果是Conflict错误，尝试重置更新
         if isinstance(context.error, Conflict):
             logger.warning("检测到冲突错误，可能有多个bot实例在运行")
+            is_bot_healthy = False
             if isinstance(update, Update) and update.effective_message:
                 await update.effective_message.reply_text(
                     "检测到系统异常，正在尝试恢复..."
@@ -92,8 +174,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
             time.sleep(5)
             return
 
-        # 如果是网络错误，给出相应提示
+        # 如果是网络错误，标记为不健康状态
         if isinstance(context.error, NetworkError):
+            logger.warning("网络错误，标记bot为不健康状态")
+            is_bot_healthy = False
             if isinstance(update, Update) and update.effective_message:
                 await update.effective_message.reply_text(
                     "网络连接出现问题，请稍后重试。"
@@ -102,6 +186,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
         # 其他Telegram相关错误
         if isinstance(context.error, TelegramError):
+            logger.warning("Telegram错误，标记bot为不健康状态")
+            is_bot_healthy = False
             if isinstance(update, Update) and update.effective_message:
                 await update.effective_message.reply_text(
                     "Telegram服务暂时不可用，请稍后重试。"
@@ -116,9 +202,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception as e:
         logger.error(f"Error in error handler: {str(e)}")
         logger.error(traceback.format_exc())
+        is_bot_healthy = False
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """发送启动消息"""
+    update_activity()  # 更新活动时间
     await update.message.reply_text(
         'Hi! 发送YouTube视频链接给我，我会帮你处理字幕。\n'
         '支持的格式:\n'
@@ -354,6 +442,7 @@ async def tags_timeout(context: CallbackContext) -> None:
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理用户消息"""
+    update_activity()  # 更新活动时间
     user_id = update.effective_user.id
     user_state = user_states.get(user_id)
 
@@ -585,6 +674,11 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     logger.info("正在初始化Telegram Bot...")
+    
+    # 启动健康检查服务器
+    health_thread = Thread(target=start_health_server, daemon=True)
+    health_thread.start()
+    logger.info("健康检查服务器已启动在端口8081")
 
     # 创建应用并配置代理
     proxy_url = PROXY.replace('http://', 'http://') if PROXY else None
@@ -618,17 +712,19 @@ def main():
         try:
             # 新版本API
             application_builder.proxy(proxy_url)
-            application_builder.connect_timeout(30.0)
-            application_builder.read_timeout(30.0)
-            application_builder.write_timeout(30.0)
+            application_builder.connect_timeout(60.0)  # 增加连接超时
+            application_builder.read_timeout(60.0)     # 增加读取超时
+            application_builder.write_timeout(60.0)    # 增加写入超时
+            application_builder.pool_timeout(60.0)     # 连接池超时
             logger.info(f"使用代理: {proxy_url}")
         except AttributeError:
             # 如果新API不存在，尝试旧API
             try:
                 application_builder.proxy_url(proxy_url)
-                application_builder.connect_timeout(30.0)
-                application_builder.read_timeout(30.0)
-                application_builder.write_timeout(30.0)
+                application_builder.connect_timeout(60.0)
+                application_builder.read_timeout(60.0)
+                application_builder.write_timeout(60.0)
+                application_builder.pool_timeout(60.0)
                 logger.info(f"使用代理 (旧API): {proxy_url}")
             except AttributeError:
                 logger.warning(f"无法设置代理，当前版本不支持: {proxy_url}")
@@ -636,6 +732,9 @@ def main():
 
     # 构建应用
     application = application_builder.build()
+    
+    # 启动连接监控器
+    connection_monitor(application)
 
     # 添加错误处理器
     application.add_error_handler(error_handler)
@@ -646,9 +745,23 @@ def main():
     # 处理普通消息
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # 启动Bot
+    # 启动Bot - 添加重连机制
     logger.info("启动Telegram Bot")
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    
+    # 设置轮询参数以增强连接稳定性
+    polling_kwargs = {
+        'allowed_updates': Update.ALL_TYPES,
+        'drop_pending_updates': True,
+        'timeout': 30,          # 轮询超时30秒
+        'bootstrap_retries': 5  # 启动重试次数
+    }
+    
+    try:
+        application.run_polling(**polling_kwargs)
+    except Exception as e:
+        logger.error(f"Bot polling失败: {str(e)}")
+        # 可以在这里添加重启逻辑
+        raise
 
 if __name__ == '__main__':
     main()
