@@ -484,41 +484,97 @@ class VideoService:
                 # 验证音频格式是否符合要求
                 try:
                     audio = AudioSegment.from_file(video_file)
-                    if audio.frame_rate == 16000 and audio.channels == 1:
+                    current_rate = audio.frame_rate
+                    current_channels = audio.channels
+                    logger.info(f"当前音频格式: {current_rate}Hz, {current_channels}声道")
+                    
+                    if current_rate == 16000 and current_channels == 1:
                         logger.info(f"音频格式已符合要求，无需转换: {audio_file}")
                         return audio_file
                     else:
-                        logger.info(f"需要调整音频格式: 当前{audio.frame_rate}Hz, {audio.channels}声道")
-                        # 创建临时文件进行转换
-                        temp_file = os.path.join(output_dir, f"{base_name}_temp.wav")
-                        audio = audio.set_frame_rate(16000).set_channels(1)
-                        audio.export(temp_file, format="wav")
-                        # 替换原文件
-                        os.replace(temp_file, audio_file)
-                        logger.info(f"音频格式调整完成: {audio_file}")
-                        return audio_file
+                        logger.info(f"需要调整音频格式: {current_rate}Hz -> 16000Hz, {current_channels}声道 -> 1声道")
+                        
+                        # 使用安全的临时文件转换方案
+                        import uuid
+                        import shutil
+                        
+                        temp_file = os.path.join(output_dir, f"{base_name}_format_temp_{uuid.uuid4().hex[:8]}.wav")
+                        backup_file = audio_file + f"_backup_{uuid.uuid4().hex[:8]}"
+                        
+                        try:
+                            # 备份原文件
+                            shutil.copy2(audio_file, backup_file)
+                            logger.info(f"原文件已备份: {backup_file}")
+                            
+                            # 格式转换
+                            converted_audio = audio.set_frame_rate(16000).set_channels(1)
+                            converted_audio.export(temp_file, format="wav")
+                            
+                            # 验证转换结果
+                            if not os.path.exists(temp_file) or os.path.getsize(temp_file) == 0:
+                                raise Exception("格式转换失败，临时文件无效")
+                            
+                            # 替换原文件
+                            os.remove(audio_file)
+                            shutil.move(temp_file, audio_file)
+                            
+                            # 清理备份
+                            if os.path.exists(backup_file):
+                                os.remove(backup_file)
+                            
+                            logger.info(f"音频格式调整完成: {audio_file}")
+                            return audio_file
+                            
+                        except Exception as conversion_error:
+                            logger.error(f"格式调整失败: {str(conversion_error)}")
+                            
+                            # 恢复备份
+                            if os.path.exists(backup_file):
+                                try:
+                                    if os.path.exists(audio_file):
+                                        os.remove(audio_file)
+                                    shutil.move(backup_file, audio_file)
+                                    logger.info("已恢复原文件")
+                                except Exception as restore_error:
+                                    logger.error(f"恢复原文件失败: {str(restore_error)}")
+                            
+                            # 清理临时文件
+                            for cleanup_file in [temp_file, backup_file]:
+                                if os.path.exists(cleanup_file):
+                                    try:
+                                        os.remove(cleanup_file)
+                                    except:
+                                        pass
+                            
+                            raise conversion_error
+                            
                 except Exception as check_error:
                     logger.warning(f"检查音频格式时出错: {str(check_error)}")
+                    # 格式检查失败，继续正常的转换流程
             
-            # 使用ffmpeg转换（如果pydub不可用）
-            try:
-                cmd = [
-                    'ffmpeg', '-i', video_file, 
-                    '-vn', '-acodec', 'pcm_s16le', 
-                    '-ar', '16000', '-ac', '1', 
-                    audio_file, '-y'
-                ]
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode == 0:
-                    logger.info(f"音频转换成功: {audio_file}")
-                    # 只在文件不同时删除原文件
-                    if video_file != audio_file and os.path.exists(video_file):
-                        os.remove(video_file)
-                    return audio_file
-                else:
-                    logger.error(f"ffmpeg转换失败: {result.stderr}")
-            except Exception as ffmpeg_error:
-                logger.warning(f"ffmpeg转换失败: {str(ffmpeg_error)}")
+            # 对于同名文件，跳过FFmpeg直接使用pydub（避免FFmpeg的同名文件问题）
+            if video_file == audio_file:
+                logger.info(f"同名文件检测到，跳过FFmpeg直接使用pydub处理: {audio_file}")
+            else:
+                # 使用ffmpeg转换（仅对不同名文件）
+                try:
+                    cmd = [
+                        'ffmpeg', '-i', video_file, 
+                        '-vn', '-acodec', 'pcm_s16le', 
+                        '-ar', '16000', '-ac', '1', 
+                        audio_file, '-y'
+                    ]
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode == 0:
+                        logger.info(f"ffmpeg音频转换成功: {audio_file}")
+                        # 只在文件不同时删除原文件
+                        if video_file != audio_file and os.path.exists(video_file):
+                            os.remove(video_file)
+                        return audio_file
+                    else:
+                        logger.error(f"ffmpeg转换失败: {result.stderr}")
+                except Exception as ffmpeg_error:
+                    logger.warning(f"ffmpeg转换失败: {str(ffmpeg_error)}")
             
             # 尝试使用pydub
             try:
@@ -533,41 +589,116 @@ class VideoService:
                     audio = audio.set_frame_rate(16000).set_channels(1)
                     
                     if video_file == audio_file:
-                        # 如果输入输出文件相同，先导出到临时文件，再替换
-                        temp_audio_file = audio_file + "_temp"
+                        # 如果输入输出文件相同，使用更安全的临时文件处理方案
+                        import tempfile
+                        import shutil
+                        import uuid
+                        
+                        # 生成唯一的临时文件名，避免冲突
+                        temp_suffix = f"_temp_{uuid.uuid4().hex[:8]}"
+                        temp_audio_file = audio_file + temp_suffix
+                        backup_file = audio_file + "_backup_" + uuid.uuid4().hex[:8]
+                        
+                        logger.info(f"同名文件转换: {audio_file}")
+                        logger.info(f"临时文件: {temp_audio_file}")
+                        logger.info(f"备份文件: {backup_file}")
+                        
+                        success = False
                         try:
+                            # 步骤1: 先备份原文件
+                            if os.path.exists(audio_file):
+                                shutil.copy2(audio_file, backup_file)
+                                logger.info(f"原文件已备份: {backup_file}")
+                            
+                            # 步骤2: 导出到临时文件
+                            logger.info("开始导出到临时文件...")
                             audio.export(temp_audio_file, format="wav")
                             
-                            # 验证临时文件是否创建成功
+                            # 步骤3: 验证临时文件
                             if not os.path.exists(temp_audio_file):
                                 raise Exception(f"临时文件创建失败: {temp_audio_file}")
                             
-                            # 尝试使用os.replace，如果失败则使用备用方案
+                            temp_size = os.path.getsize(temp_audio_file)
+                            if temp_size == 0:
+                                raise Exception(f"临时文件为空: {temp_audio_file}")
+                            
+                            logger.info(f"临时文件创建成功: {temp_audio_file} ({temp_size} bytes)")
+                            
+                            # 步骤4: 多重替换策略
+                            replacement_success = False
+                            
+                            # 策略1: 直接os.replace
                             try:
-                                os.replace(temp_audio_file, audio_file)
-                                logger.info(f"pydub转换成功(同名文件,os.replace): {audio_file}")
-                            except Exception as replace_error:
-                                logger.warning(f"os.replace失败，尝试备用方案: {str(replace_error)}")
-                                # 备用方案：先删除原文件，再移动临时文件
                                 if os.path.exists(audio_file):
                                     os.remove(audio_file)
-                                import shutil
-                                shutil.move(temp_audio_file, audio_file)
-                                logger.info(f"pydub转换成功(同名文件,shutil.move): {audio_file}")
+                                os.rename(temp_audio_file, audio_file)
+                                replacement_success = True
+                                logger.info(f"pydub转换成功(同名文件,os.rename): {audio_file}")
+                            except Exception as rename_error:
+                                logger.warning(f"os.rename失败: {str(rename_error)}")
+                                
+                                # 策略2: shutil.move
+                                try:
+                                    if os.path.exists(audio_file):
+                                        os.remove(audio_file)
+                                    shutil.move(temp_audio_file, audio_file)
+                                    replacement_success = True
+                                    logger.info(f"pydub转换成功(同名文件,shutil.move): {audio_file}")
+                                except Exception as move_error:
+                                    logger.warning(f"shutil.move失败: {str(move_error)}")
+                                    
+                                    # 策略3: 复制+删除
+                                    try:
+                                        if os.path.exists(audio_file):
+                                            os.remove(audio_file)
+                                        shutil.copy2(temp_audio_file, audio_file)
+                                        os.remove(temp_audio_file)
+                                        replacement_success = True
+                                        logger.info(f"pydub转换成功(同名文件,copy+delete): {audio_file}")
+                                    except Exception as copy_error:
+                                        logger.error(f"所有替换策略均失败: {str(copy_error)}")
                             
-                            # 验证最终文件是否存在
+                            if not replacement_success:
+                                raise Exception("所有文件替换策略均失败")
+                            
+                            # 步骤5: 验证最终文件
                             if not os.path.exists(audio_file):
                                 raise Exception(f"最终音频文件不存在: {audio_file}")
-                                
+                            
+                            final_size = os.path.getsize(audio_file)
+                            if final_size == 0:
+                                raise Exception(f"最终音频文件为空: {audio_file}")
+                            
+                            logger.info(f"最终文件验证成功: {audio_file} ({final_size} bytes)")
+                            success = True
+                            
                         except Exception as temp_error:
                             logger.error(f"同名文件处理失败: {str(temp_error)}")
-                            # 清理临时文件
-                            if os.path.exists(temp_audio_file):
+                            
+                            # 恢复备份文件
+                            if os.path.exists(backup_file):
                                 try:
-                                    os.remove(temp_audio_file)
-                                except:
-                                    pass
-                            raise
+                                    if os.path.exists(audio_file):
+                                        os.remove(audio_file)
+                                    shutil.move(backup_file, audio_file)
+                                    logger.info(f"已恢复备份文件: {audio_file}")
+                                except Exception as restore_error:
+                                    logger.error(f"恢复备份文件失败: {str(restore_error)}")
+                            
+                            raise temp_error
+                            
+                        finally:
+                            # 清理临时文件和备份文件
+                            for cleanup_file in [temp_audio_file, backup_file]:
+                                if os.path.exists(cleanup_file):
+                                    try:
+                                        os.remove(cleanup_file)
+                                        logger.debug(f"清理临时文件: {cleanup_file}")
+                                    except Exception as cleanup_error:
+                                        logger.warning(f"清理文件失败 {cleanup_file}: {str(cleanup_error)}")
+                            
+                            if success:
+                                logger.info(f"同名文件转换完成: {audio_file}")
                     else:
                         # 正常导出到不同文件
                         audio.export(audio_file, format="wav")
