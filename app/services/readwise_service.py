@@ -170,8 +170,28 @@ class ReadwiseService:
             else:
                 logger.info("✅ 格式化后的内容不含时间戳")
             
-            # 构造URL
-            url = video_info.get('webpage_url') or video_info.get('url')
+            # 构造URL - 支持自定义域名替换
+            original_url = video_info.get('webpage_url') or video_info.get('url')
+            
+            # 检查是否配置了自定义域名，如果是YouTube链接则进行转换
+            from ..config.config_manager import get_config_value
+            video_domain = get_config_value('servers.video_domain')
+            
+            if video_domain and original_url and 'youtube.com' in original_url:
+                # 从URL提取视频ID
+                video_id = None
+                if 'watch?v=' in original_url:
+                    video_id = original_url.split('v=')[1].split('&')[0]
+                elif 'youtu.be/' in original_url:
+                    video_id = original_url.split('youtu.be/')[1].split('?')[0]
+                
+                if video_id:
+                    url = f"{video_domain}/view/{video_id}"
+                    logger.info(f"URL转换: {original_url} -> {url}")
+                else:
+                    url = original_url
+            else:
+                url = original_url
             
             # 获取用户指定的标签（从subtitle_data中获取，比如Telegram传递的）
             user_tags = subtitle_data.get('tags', [])
