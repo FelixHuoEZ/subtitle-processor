@@ -6,6 +6,7 @@ import re
 import logging
 import requests
 import yt_dlp
+import time
 from datetime import datetime
 from typing import Dict, Any, Optional, Tuple, List
 from ..config.config_manager import get_config_value
@@ -38,10 +39,14 @@ class VideoService:
             'logger': QuietLogger(),
             'quiet': True,
             'no_warnings': True,
-            'cookiesfrombrowser': ('firefox', '/root/.mozilla/firefox/Profiles/3tfynuxa.default-release'),
-            'cookiefile': '/tmp/cookies.txt',
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0',
-            'http_headers': {'Referer': 'https://www.youtube.com/'}
+            'http_headers': {'Referer': 'https://www.youtube.com/'},
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['mweb'],  # 使用mweb客户端配合PO Token
+                    'po_token': 'auto',  # 自动获取PO Token
+                }
+            }
         }
     
     def get_video_info(self, url: str, platform: str) -> Optional[Dict[str, Any]]:
@@ -74,6 +79,8 @@ class VideoService:
     def get_youtube_info(self, url: str) -> Optional[Dict[str, Any]]:
         """获取YouTube视频信息"""
         try:
+            # 添加率限制防止IP被封
+            time.sleep(2)
             with yt_dlp.YoutubeDL(self.yt_dlp_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 
@@ -320,7 +327,18 @@ class VideoService:
             # 先尝试检查视频信息
             info = None
             try:
-                with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                # 添加率限制防止IP被封
+                time.sleep(2)
+                temp_opts = {
+                    'quiet': True,
+                    'extractor_args': {
+                        'youtube': {
+                            'player_client': ['mweb'],
+                            'po_token': 'auto'
+                        }
+                    }
+                }
+                with yt_dlp.YoutubeDL(temp_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                     logger.info(f"视频标题: {info.get('title')}")
                     if info.get('age_limit', 0) > 0:
@@ -357,6 +375,12 @@ class VideoService:
                 'no_warnings': True,
                 'geo_bypass': True,
                 'no_check_certificate': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['mweb'],
+                        'po_token': 'auto'
+                    }
+                },
                 'http_headers': {
                     'Accept': '*/*',
                     'Accept-Language': 'en-US,en;q=0.5',
@@ -384,6 +408,8 @@ class VideoService:
             for attempt in format_attempts:
                 try:
                     logger.info(f"尝试下载: {attempt['desc']}")
+                    # 添加率限制防止IP被封
+                    time.sleep(3)
                     opts = base_opts.copy()
                     opts['format'] = attempt['format']
                     
@@ -803,6 +829,8 @@ class VideoService:
     def download_youtube_subtitles(self, url: str, lang_priority: List[str]) -> Optional[str]:
         """下载YouTube字幕"""
         try:
+            # 添加率限制防止IP被封
+            time.sleep(2)
             with yt_dlp.YoutubeDL(self.yt_dlp_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 
