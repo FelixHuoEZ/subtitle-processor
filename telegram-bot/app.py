@@ -18,7 +18,7 @@ import re
 import yaml
 import threading
 import asyncio
-from flask import Flask
+from flask import Flask, request, jsonify
 from threading import Thread
 
 # 配置日志
@@ -80,26 +80,61 @@ TAGS_HELP_MESSAGE = "请输入标签，多个标签用逗号分隔（例如：'y
 # 用户状态存储
 user_states = {}
 
-# 全局变量追踪应用状态
+# 全局变量追踪应用状态与心跳指标
 last_activity = time.time()
 is_bot_healthy = True
+last_update_id = None
+last_update_at = 0.0
+last_heartbeat_ok = None  # None=未知, True/False=最近一次心跳结果
+last_heartbeat_at = 0.0
+last_ping_ms = None
+consecutive_heartbeat_failures = 0
 
 # 健康检查Flask应用
 health_app = Flask(__name__)
 
 @health_app.route('/health')
 def health_check():
-    """健康检查端点"""
-    global last_activity, is_bot_healthy
-    
+    """健康检查端点（支持 ?deep=1 返回详细JSON）"""
+    global last_activity, is_bot_healthy, last_update_at, last_update_id, last_heartbeat_ok, last_ping_ms, last_heartbeat_at
+
     current_time = time.time()
     time_since_activity = current_time - last_activity
-    
-    # 如果超过10分钟没有活动且bot状态不健康，返回错误
-    if time_since_activity > 600 and not is_bot_healthy:
-        return "Bot unhealthy - no activity for too long", 500
-        
-    return "OK", 200
+    time_since_update = current_time - (last_update_at or 0)
+    time_since_heartbeat = current_time - (last_heartbeat_at or 0)
+
+    # 判定阈值（秒）
+    idle_warn = 15 * 60
+    idle_fail = 30 * 60
+    hb_stale_warn = 5 * 60
+    hb_stale_fail = 10 * 60
+
+    unhealthy_reasons = []
+    if time_since_activity > idle_fail:
+        unhealthy_reasons.append('idle>30m')
+    if last_heartbeat_ok is False and time_since_heartbeat > 60:
+        unhealthy_reasons.append('heartbeat_failed')
+    if time_since_heartbeat > hb_stale_fail:
+        unhealthy_reasons.append('heartbeat_stale')
+    if not is_bot_healthy:
+        unhealthy_reasons.append('flag_unhealthy')
+
+    status_code = 503 if unhealthy_reasons else 200
+
+    if request.args.get('deep') == '1':
+        return jsonify({
+            'status': 'unhealthy' if unhealthy_reasons else 'healthy',
+            'reasons': unhealthy_reasons,
+            'time_since_activity_sec': int(time_since_activity),
+            'time_since_update_sec': int(time_since_update),
+            'time_since_heartbeat_sec': int(time_since_heartbeat),
+            'last_update_id': last_update_id,
+            'last_heartbeat_ok': last_heartbeat_ok,
+            'last_ping_ms': last_ping_ms,
+        }), status_code
+
+    # 兼容旧探活：仅返回文本，但遵循状态码
+    return ("OK" if status_code == 200 else "UNHEALTHY"), status_code
 
 def start_health_server():
     """启动健康检查服务器"""
@@ -111,6 +146,17 @@ def update_activity():
     last_activity = time.time()
     is_bot_healthy = True  # 有活动时重置健康状态
 
+def record_update(update: object = None):
+    """记录最近一次更新的元信息并刷新活动时间"""
+    global last_update_at, last_update_id
+    update_activity()
+    last_update_at = time.time()
+    try:
+        if isinstance(update, Update):
+            last_update_id = getattr(update, 'update_id', None)
+    except Exception:
+        pass
+
 def connection_monitor(application):
     """监控连接状态并在需要时重启"""
     def monitor_loop():
@@ -120,23 +166,19 @@ def connection_monitor(application):
                 current_time = time.time()
                 time_since_activity = current_time - last_activity
                 
-                # 如果超过30分钟没有活动，尝试发送测试请求
+                # 若超过30分钟无活动，仅告警；是否重启交由心跳判定
                 if time_since_activity > 1800:  # 30分钟
                     logger.warning("长时间无活动，执行连接测试")
-                    try:
-                        # 简单的连接测试 - 检查bot对象是否正常
-                        if application and application.bot:
-                            update_activity()
-                        else:
-                            is_bot_healthy = False
-                    except Exception as e:
-                        logger.error(f"连接测试失败: {str(e)}")
-                        is_bot_healthy = False
-                        
-                        # 如果连续失败，强制退出让Docker重启
-                        if time_since_activity > 3600:  # 1小时
-                            logger.critical("连接长时间失败，触发容器重启")
-                            os._exit(1)
+
+                # 心跳失败与陈旧性综合判定
+                if (last_heartbeat_ok is False and (current_time - last_heartbeat_at) > 60) or \
+                   ((current_time - last_heartbeat_at) > 600):
+                    is_bot_healthy = False
+
+                # 如果状态不健康超过5分钟，强制重启
+                if not is_bot_healthy and time_since_activity > 300:
+                    logger.critical("Bot状态不健康超过5分钟，触发容器重启")
+                    os._exit(1)
                 
                 # 如果状态不健康超过5分钟，强制重启
                 if not is_bot_healthy and time_since_activity > 300:
@@ -159,7 +201,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error("Exception while handling an update:", exc_info=context.error)
     
     # 更新活动时间
-    update_activity()
+    record_update(update)
     
     try:
         # 如果是Conflict错误，尝试重置更新
@@ -206,7 +248,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """发送启动消息"""
-    update_activity()  # 更新活动时间
+    record_update(update)  # 更新活动时间与update信息
     await update.message.reply_text(
         'Hi! 发送YouTube视频链接给我，我会帮你处理字幕。\n'
         '支持的格式:\n'
@@ -442,7 +484,7 @@ async def tags_timeout(context: CallbackContext) -> None:
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理用户消息"""
-    update_activity()  # 更新活动时间
+    record_update(update)  # 更新活动时间与update信息
     user_id = update.effective_user.id
     user_state = user_states.get(user_id)
 
@@ -517,6 +559,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理用户发送的视频URL"""
     try:
+        record_update(update)
         # 获取消息文本
         message_text = update.message.text.strip()
         
@@ -735,6 +778,42 @@ def main():
     
     # 启动连接监控器
     connection_monitor(application)
+
+    # 周期性心跳检查与状态日志
+    async def ping_telegram(context: ContextTypes.DEFAULT_TYPE):
+        global last_heartbeat_ok, last_ping_ms, last_heartbeat_at, consecutive_heartbeat_failures, is_bot_healthy
+        start_ts = time.time()
+        try:
+            await context.bot.get_me()
+            last_heartbeat_ok = True
+            last_heartbeat_at = time.time()
+            last_ping_ms = int((last_heartbeat_at - start_ts) * 1000)
+            consecutive_heartbeat_failures = 0
+        except Exception as e:
+            last_heartbeat_ok = False
+            last_heartbeat_at = time.time()
+            last_ping_ms = None
+            consecutive_heartbeat_failures += 1
+            logger.warning(f"心跳失败 #{consecutive_heartbeat_failures}: {type(e).__name__}: {e}")
+            if consecutive_heartbeat_failures >= 3:
+                is_bot_healthy = False
+
+    async def log_status(context: ContextTypes.DEFAULT_TYPE):
+        now = time.time()
+        logger.info(
+            "Bot状态: healthy=%s, idle=%ss, since_update=%ss, hb_ok=%s, hb_age=%ss, ping_ms=%s, last_update_id=%s",
+            is_bot_healthy,
+            int(now - last_activity),
+            int(now - (last_update_at or 0)),
+            last_heartbeat_ok,
+            int(now - (last_heartbeat_at or 0)),
+            last_ping_ms,
+            last_update_id,
+        )
+
+    # 安排周期任务
+    application.job_queue.run_repeating(ping_telegram, interval=120, first=10)
+    application.job_queue.run_repeating(log_status, interval=300, first=60)
 
     # 添加错误处理器
     application.add_error_handler(error_handler)
