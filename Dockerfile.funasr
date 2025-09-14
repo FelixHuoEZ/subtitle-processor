@@ -1,12 +1,15 @@
 FROM registry.cn-hangzhou.aliyuncs.com/funasr_repo/funasr:funasr-runtime-sdk-online-cpu-0.1.10
 
-# 安装必要的包
-RUN apt-get update && \
-    apt-get install -y \
-    wget \
-    git \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+# 安装必要的包（切换镜像源并增加重试以提升稳定性）
+RUN set -eux; \
+    sed -i 's|http://archive.ubuntu.com/ubuntu/|http://mirrors.aliyun.com/ubuntu/|g' /etc/apt/sources.list; \
+    sed -i 's|http://security.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g' /etc/apt/sources.list || true; \
+    apt-get -o Acquire::Retries=5 update; \
+    DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+      wget \
+      git \
+      ffmpeg; \
+    rm -rf /var/lib/apt/lists/*
 
 # 安装 huggingface_hub
 RUN pip install --no-cache-dir huggingface_hub
