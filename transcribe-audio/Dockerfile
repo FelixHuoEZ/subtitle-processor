@@ -5,7 +5,8 @@ ENV PYTHON_VERSION=3.9
 ENV DEBIAN_FRONTEND=noninteractive
 
 # 安装Python和系统依赖
-RUN apt-get update && \
+RUN sed -i 's|http://ports.ubuntu.com/ubuntu-ports/|https://mirrors.aliyun.com/ubuntu-ports/|g' /etc/apt/sources.list && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
     python${PYTHON_VERSION} \
     python3-pip \
@@ -30,9 +31,15 @@ WORKDIR /app
 COPY requirements.txt .
 
 # 安装Python依赖
-RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir torch==2.0.1+cu118 torchaudio==2.0.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118 && \
-    pip install --no-cache-dir onnx onnxconverter-common && \
+RUN set -eux; \
+    pip install --no-cache-dir -r requirements.txt; \
+    ARCH="$(dpkg --print-architecture)"; \
+    if [ "${ARCH}" = "amd64" ]; then \
+        pip install --no-cache-dir torch==2.0.1+cu118 torchaudio==2.0.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118; \
+    else \
+        pip install --no-cache-dir torchaudio==2.0.2; \
+    fi; \
+    pip install --no-cache-dir onnx onnxconverter-common; \
     pip install --no-cache-dir "funasr @ git+https://github.com/alibaba-damo-academy/FunASR.git"
 
 # 复制应用程序文件

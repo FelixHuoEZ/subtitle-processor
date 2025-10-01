@@ -1,22 +1,23 @@
-version: '3.8'
+version: "3.8"
 
 services:
   subtitle-processor:
-    build:  # 直接运行、不构建的时候，注释掉
+    build: # 直接运行、不构建的时候，注释掉
       context: .
     image: subtitle-processor:latest
     container_name: subtitle-processor
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    # deploy 部分仅在具备 NVIDIA GPU runtime 时启用
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
     ports:
-      - "5000:5000"  # Web 界面
-      - "5001:5900"  # VNC 服务端口
+      - "6000:5000" # Web 界面 (临时映射到宿主6000)
+      - "5001:5900" # VNC 服务端口
     volumes:
       # - /share/docker/subtitle-processor/uploads:/app/uploads
       # - /share/docker/subtitle-processor/videos:/app/videos
@@ -24,13 +25,13 @@ services:
       # - /share/docker/subtitle-processor/config:/app/config
       # - /share/docker/subtitle-processor/models:/app/models
       # - /share/docker/subtitle-processor/firefox_profile:/root/.mozilla/firefox  # Firefox 配置目录
-      - ./app:/app/app  # 映射应用代码
+      - ./app:/app/app # 映射应用代码
       - ./uploads:/app/uploads
       - ./videos:/app/videos
       - ./outputs:/app/outputs
       - ./config:/app/config
       - ./models:/app/models
-      - ./firefox_profile:/root/.mozilla/firefox  # Firefox 配置目录
+      - ./firefox_profile:/root/.mozilla/firefox # Firefox 配置目录
     environment:
       - TZ=Asia/Shanghai
       - FLASK_APP=run_app.py
@@ -46,25 +47,25 @@ services:
       - srt-network
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      - deeplx
+    # depends_on:
+    #   - deeplx
 
   transcribe-audio:
-    build:  # 直接运行、不构建的时候，注释掉
+    build: # 直接运行、不构建的时候，注释掉
       context: ./transcribe-audio
       dockerfile: Dockerfile
     image: transcribe-audio:latest
     container_name: transcribe-audio
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
     ports:
-      - "10095:10095"  # API 服务端口
+      - "10095:10095" # API 服务端口
     volumes:
       # - /share/docker/subtitle-processor/uploads:/app/uploads
       # - /share/docker/subtitle-processor/videos:/app/videos
@@ -98,22 +99,22 @@ services:
     networks:
       - srt-network
 
-  deeplx:
-    image: ghcr.io/owo-network/deeplx:latest
-    container_name: deeplx
-    restart: unless-stopped
-    ports:
-      - "1188:1188"
-    networks:
-      - srt-network
+  # deeplx:
+  #   image: ghcr.io/owo-network/deeplx:latest
+  #   container_name: deeplx
+  #   restart: unless-stopped
+  #   ports:
+  #     - "1188:1188"
+  #   networks:
+  #     - srt-network
 
   telegram-bot:
-    build:  # 直接运行、不构建的时候，注释掉
+    build: # 直接运行、不构建的时候，注释掉
       context: ./telegram-bot
       dockerfile: Dockerfile
     image: telegram-bot:latest
     container_name: telegram-bot
-    restart: always  # 改为always，确保任何情况下都重启
+    restart: always # 改为always，确保任何情况下都重启
     environment:
       - TZ=Asia/Shanghai
       - SUBTITLE_PROCESSOR_URL=http://subtitle-processor:5000
@@ -127,11 +128,15 @@ services:
       - ./config:/app/config
       # - /share/docker/subtitle-processor/config:/app/config
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import requests; requests.get('http://localhost:8081/health', timeout=10)\" || exit 1"]
-      interval: 60s        # 每60秒检查一次
-      timeout: 10s         # 检查超时10秒
-      retries: 3           # 失败3次后认为不健康
-      start_period: 60s    # 启动后60秒开始检查
+      test:
+        [
+          "CMD-SHELL",
+          'python -c "import requests; requests.get(''http://localhost:8081/health'', timeout=10)" || exit 1',
+        ]
+      interval: 60s # 每60秒检查一次
+      timeout: 10s # 检查超时10秒
+      retries: 3 # 失败3次后认为不健康
+      start_period: 60s # 启动后60秒开始检查
     logging:
       driver: json-file
       options:

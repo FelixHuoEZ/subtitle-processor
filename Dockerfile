@@ -5,7 +5,9 @@ RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
     pip config set install.trusted-host mirrors.aliyun.com
 
 # 配置apt并安装系统依赖
-RUN echo "deb https://mirrors.aliyun.com/debian/ bookworm main non-free-firmware" > /etc/apt/sources.list && \
+# 移除默认的 debian.sources 以避免 trixie 测试源导致 404
+RUN rm -f /etc/apt/sources.list.d/debian.sources && \
+    echo "deb https://mirrors.aliyun.com/debian/ bookworm main non-free-firmware" > /etc/apt/sources.list && \
     echo "deb https://mirrors.aliyun.com/debian-security bookworm-security main non-free-firmware" >> /etc/apt/sources.list && \
     echo "deb https://mirrors.aliyun.com/debian/ bookworm-updates main non-free-firmware" >> /etc/apt/sources.list && \
     apt-get clean && \
