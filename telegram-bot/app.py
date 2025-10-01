@@ -18,6 +18,7 @@ import re
 import yaml
 import threading
 import asyncio
+from typing import Any, Dict
 from flask import Flask, request, jsonify
 from threading import Thread
 
@@ -46,18 +47,59 @@ def load_config():
         return None
 
 # 加载配置
-config = load_config()
-if not config:
-    logger.error("配置加载失败，使用空配置")
-    config = {}
+config: Dict[str, Any] = load_config() or {}
+
+
+def _get_bool(value: Any, default: bool = False) -> bool:
+    """将配置值转换为布尔值"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+    return default
+
+
+def _normalize_path(path: str) -> str:
+    """确保 webhook 路径以单个斜杠开头"""
+    if not path:
+        return '/telegram/webhook'
+    return '/' + path.strip('/')
+
 
 # 获取配置
 TELEGRAM_TOKEN = config.get('tokens', {}).get('telegram')
 SUBTITLE_PROCESSOR_URL = os.getenv('SUBTITLE_PROCESSOR_URL', 'http://subtitle-processor:5000')
 SERVER_DOMAIN = config.get('servers', {}).get('domain')
+TELEGRAM_SETTINGS = config.get('telegram', {}) if isinstance(config.get('telegram'), dict) else {}
+WEBHOOK_CONFIG = TELEGRAM_SETTINGS.get('webhook', {}) if isinstance(TELEGRAM_SETTINGS.get('webhook'), dict) else {}
+
+WEBHOOK_ENABLED = _get_bool(os.getenv('TELEGRAM_WEBHOOK_ENABLED', WEBHOOK_CONFIG.get('enabled', False)))
+WEBHOOK_LISTEN = os.getenv('TELEGRAM_WEBHOOK_LISTEN', WEBHOOK_CONFIG.get('listen', '0.0.0.0'))
+WEBHOOK_PORT = int(os.getenv('TELEGRAM_WEBHOOK_PORT', WEBHOOK_CONFIG.get('port', 8082)))
+WEBHOOK_PATH = _normalize_path(os.getenv('TELEGRAM_WEBHOOK_PATH', WEBHOOK_CONFIG.get('path', '/telegram/webhook')))
+WEBHOOK_SECRET_TOKEN = os.getenv('TELEGRAM_WEBHOOK_SECRET', WEBHOOK_CONFIG.get('secret_token'))
+WEBHOOK_DROP_PENDING = _get_bool(os.getenv('TELEGRAM_WEBHOOK_DROP_PENDING', WEBHOOK_CONFIG.get('drop_pending_updates', True)), True)
+
+DEFAULT_PUBLIC_URL = None
+if SERVER_DOMAIN:
+    DEFAULT_PUBLIC_URL = f"{SERVER_DOMAIN.rstrip('/')}{WEBHOOK_PATH}"
+
+WEBHOOK_PUBLIC_URL = os.getenv('TELEGRAM_WEBHOOK_URL', WEBHOOK_CONFIG.get('public_url') or DEFAULT_PUBLIC_URL)
 
 logger.info(f"使用的SUBTITLE_PROCESSOR_URL: {SUBTITLE_PROCESSOR_URL}")
 logger.info(f"使用的SERVER_DOMAIN: {SERVER_DOMAIN}")
+logger.info(
+    "Webhook配置: enabled=%s, public_url=%s, listen=%s, port=%s, path=%s",
+    WEBHOOK_ENABLED,
+    WEBHOOK_PUBLIC_URL,
+    WEBHOOK_LISTEN,
+    WEBHOOK_PORT,
+    WEBHOOK_PATH,
+)
 
 # 获取环境变量
 PROXY = os.getenv('ALL_PROXY') or os.getenv('HTTPS_PROXY') or os.getenv('HTTP_PROXY')
@@ -824,23 +866,67 @@ def main():
     # 处理普通消息
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # 启动Bot - 添加重连机制
+    # 启动Bot - 支持Webhook或Polling
     logger.info("启动Telegram Bot")
-    
-    # 设置轮询参数以增强连接稳定性
-    polling_kwargs = {
-        'allowed_updates': Update.ALL_TYPES,
-        'drop_pending_updates': True,
-        'timeout': 30,          # 轮询超时30秒
-        'bootstrap_retries': 5  # 启动重试次数
-    }
-    
-    try:
-        application.run_polling(**polling_kwargs)
-    except Exception as e:
-        logger.error(f"Bot polling失败: {str(e)}")
-        # 可以在这里添加重启逻辑
-        raise
+
+    use_webhook = WEBHOOK_ENABLED and WEBHOOK_PUBLIC_URL
+    if WEBHOOK_ENABLED and not WEBHOOK_PUBLIC_URL:
+        logger.error("已启用Webhook但未提供public_url，自动回退到Polling模式")
+        use_webhook = False
+
+    if use_webhook:
+        logger.info(
+            "以Webhook模式运行: url=%s listen=%s port=%s path=%s",
+            WEBHOOK_PUBLIC_URL,
+            WEBHOOK_LISTEN,
+            WEBHOOK_PORT,
+            WEBHOOK_PATH,
+        )
+        try:
+            application.run_webhook(
+                listen=WEBHOOK_LISTEN,
+                port=WEBHOOK_PORT,
+                url_path=WEBHOOK_PATH.strip('/'),
+                webhook_url=WEBHOOK_PUBLIC_URL,
+                bootstrap_retries=5,
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=WEBHOOK_DROP_PENDING,
+                secret_token=WEBHOOK_SECRET_TOKEN,
+            )
+        except Exception as e:
+            logger.error(f"Webhook模式启动失败，尝试回退到Polling: {e}")
+            use_webhook = False
+
+    if not use_webhook:
+        # 设置轮询参数以增强连接稳定性
+        polling_kwargs = {
+            'allowed_updates': Update.ALL_TYPES,
+            'drop_pending_updates': True,
+            'timeout': 30,          # 轮询超时30秒
+            'bootstrap_retries': 5  # 启动重试次数
+        }
+
+        try:
+            try:
+                asyncio.run(application.bot.delete_webhook(drop_pending_updates=True))
+                logger.info("已清理Telegram Webhook设置，准备进入Polling模式")
+            except RuntimeError as err:
+                logger.debug(f"异步清理Webhook遇到运行时错误，将使用新事件循环: {err}")
+                loop = asyncio.new_event_loop()
+                try:
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(application.bot.delete_webhook(drop_pending_updates=True))
+                    logger.info("通过辅助事件循环清理Webhook设置")
+                finally:
+                    loop.close()
+                    asyncio.set_event_loop(None)
+            except TelegramError as err:
+                logger.warning(f"清理Webhook失败: {err}")
+
+            application.run_polling(**polling_kwargs)
+        except Exception as e:
+            logger.error(f"Bot polling失败: {str(e)}")
+            raise
 
 if __name__ == '__main__':
     main()

@@ -32,6 +32,17 @@ servers:
         priority: 2
         description: Example Server 2
 
+# Telegram Bot Settings
+telegram:
+  webhook:
+    enabled: false            # 设置为 true 启用 Webhook 模式
+    listen: 0.0.0.0           # Webhook 监听地址
+    port: 8082                # Webhook 监听端口
+    path: /telegram/webhook   # Webhook 路径（必须保证全局唯一）
+    public_url: https://your.domain.com/telegram/webhook  # Telegram 可访问的公网地址
+    drop_pending_updates: true  # 启动时是否丢弃积压的消息
+    secret_token: change_me    # 可选：Webhook 验证 token
+
 # Translation Settings
 translation:
   max_retries: 3

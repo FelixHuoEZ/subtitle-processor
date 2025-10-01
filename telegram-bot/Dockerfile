@@ -2,6 +2,12 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
+# Switch apt sources to faster mirror before installing dependencies
+RUN rm -f /etc/apt/sources.list.d/debian.sources \
+    && echo "deb https://mirrors.aliyun.com/debian trixie main non-free-firmware" > /etc/apt/sources.list \
+    && echo "deb https://mirrors.aliyun.com/debian trixie-updates main non-free-firmware" >> /etc/apt/sources.list \
+    && echo "deb https://mirrors.aliyun.com/debian-security trixie-security main non-free-firmware" >> /etc/apt/sources.list
+
 # Install timezone data without pulling curl (network mirror may block curl deps)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tzdata \
