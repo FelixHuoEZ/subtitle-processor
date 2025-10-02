@@ -22,8 +22,36 @@ set -euo pipefail
 
 # IMAGE_PREFIX can include registry/namespace (e.g. registry.gitlab.com/org/project).
 # When omitted the images are tagged locally without a registry prefix.
+# Auto-load images.env if present and IMAGE_PREFIX not preset
+if [[ -z "${IMAGE_PREFIX:-}" && -f "${PWD}/images.env" ]]; then
+  echo "INFO: Loading environment from images.env"
+  set -a
+  # shellcheck disable=SC1091
+  source "${PWD}/images.env"
+  set +a
+fi
+
 if [[ -z "${IMAGE_PREFIX:-}" ]]; then
   echo "WARN: IMAGE_PREFIX not set; images will be tagged locally only." >&2
+fi
+IMAGE_PREFIX=${IMAGE_PREFIX:-}
+
+# Ensure we have a writable Docker config directory when running inside sandboxes
+if [[ -z "${DOCKER_CONFIG:-}" ]]; then
+  export DOCKER_CONFIG="${PWD}/.docker"
+  mkdir -p "${DOCKER_CONFIG}"
+fi
+
+BUILDKIT_CONFIG_PATH=""
+if [[ -n "${IMAGE_PREFIX}" ]]; then
+  REGISTRY_HOST="${IMAGE_PREFIX%%/*}"
+  if [[ "${REGISTRY_HOST}" == *:* ]]; then
+    BUILDKIT_CONFIG_PATH="${DOCKER_CONFIG}/buildkitd.toml"
+    cat >"${BUILDKIT_CONFIG_PATH}" <<EOF
+[registry."${REGISTRY_HOST}"]
+  insecure = true
+EOF
+  fi
 fi
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -54,6 +82,18 @@ check_buildx() {
     echo "ERROR: docker buildx not available. Install Docker Buildx plugin or Docker 20.10+." >&2
     exit 1
   fi
+
+  if docker buildx inspect repo-builder >/dev/null 2>&1; then
+    docker buildx rm repo-builder >/dev/null 2>&1 || true
+  fi
+
+  echo "Creating buildx builder 'repo-builder' (docker-container driver)"
+  local create_cmd=(docker buildx create --name repo-builder --driver docker-container --driver-opt network=host --driver-opt env.BUILDKIT_TLS_INSECURE_SKIP_VERIFY=1)
+  if [[ -n "${BUILDKIT_CONFIG_PATH}" ]]; then
+    create_cmd+=(--config "${BUILDKIT_CONFIG_PATH}")
+  fi
+  create_cmd+=(--use)
+  "${create_cmd[@]}" >/dev/null
 }
 
 trim() {
