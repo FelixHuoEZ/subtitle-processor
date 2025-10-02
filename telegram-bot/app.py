@@ -907,22 +907,6 @@ def main():
         }
 
         try:
-            try:
-                asyncio.run(application.bot.delete_webhook(drop_pending_updates=True))
-                logger.info("已清理Telegram Webhook设置，准备进入Polling模式")
-            except RuntimeError as err:
-                logger.debug(f"异步清理Webhook遇到运行时错误，将使用新事件循环: {err}")
-                loop = asyncio.new_event_loop()
-                try:
-                    asyncio.set_event_loop(loop)
-                    loop.run_until_complete(application.bot.delete_webhook(drop_pending_updates=True))
-                    logger.info("通过辅助事件循环清理Webhook设置")
-                finally:
-                    loop.close()
-                    asyncio.set_event_loop(None)
-            except TelegramError as err:
-                logger.warning(f"清理Webhook失败: {err}")
-
             application.run_polling(**polling_kwargs)
         except Exception as e:
             logger.error(f"Bot polling失败: {str(e)}")

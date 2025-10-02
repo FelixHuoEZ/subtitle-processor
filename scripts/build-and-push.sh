@@ -12,6 +12,7 @@ set -euo pipefail
 #   PUSH           If 'true' (default) the script pushes after build. Set to 'false' to skip push.
 #   PLATFORMS      Target platforms for buildx (default: linux/amd64).
 #   LOAD           When PUSH=false, set LOAD=true to load the image into local Docker (uses --load).
+#   EXTRA_TAGS     Optional comma separated extra tags to publish (e.g. "latest,prod").
 #   DOCKERFILE_*   Optional overrides for dockerfile path per service (see map below).
 #
 # Services and build contexts:
@@ -40,6 +41,7 @@ if [[ "${PUSH}" == "true" ]]; then
 else
   LOAD=${LOAD:-true}
 fi
+EXTRA_TAGS=${EXTRA_TAGS:-}
 
 SERVICES=(
   "subtitle-processor=.:Dockerfile"
@@ -54,16 +56,37 @@ check_buildx() {
   fi
 }
 
+trim() {
+  local value="$1"
+  # shellcheck disable=SC2001
+  value="$(echo "$value" | sed -e 's/^\s*//' -e 's/\s*$//')"
+  printf '%s' "$value"
+}
+
 build_service() {
   local name="$1" context="$2" dockerfile="$3"
   local repo_path="${name}"
   if [[ -n "${IMAGE_PREFIX}" ]]; then
     repo_path="${IMAGE_PREFIX}/${name}"
   fi
-  local image_repo="${repo_path}:${IMAGE_TAG}"
+  local tags=("${repo_path}:${IMAGE_TAG}")
 
-  echo "==> Building ${image_repo}"
-  local cmd=(docker buildx build "${context}" --platform "${PLATFORMS}" -t "${image_repo}" -f "${context}/${dockerfile}")
+  if [[ -n "${EXTRA_TAGS}" ]]; then
+    IFS=',' read -r -a extra_raw <<< "${EXTRA_TAGS}"
+    for item in "${extra_raw[@]}"; do
+      local cleaned
+      cleaned=$(trim "$item")
+      if [[ -n "$cleaned" ]]; then
+        tags+=("${repo_path}:${cleaned}")
+      fi
+    done
+  fi
+
+  echo "==> Building ${tags[*]}"
+  local cmd=(docker buildx build "${context}" --platform "${PLATFORMS}" -f "${context}/${dockerfile}")
+  for tag in "${tags[@]}"; do
+    cmd+=(-t "${tag}")
+  done
 
   if [[ "${PUSH}" == "true" ]]; then
     cmd+=(--push)
@@ -71,7 +94,10 @@ build_service() {
     # Ensure single platform when loading locally
     if [[ "${PLATFORMS}" != "linux/amd64" ]]; then
       echo "WARN: --load only supports single-platform builds; overriding PLATFORMS to linux/amd64 for local load." >&2
-      cmd=(docker buildx build "${context}" --platform linux/amd64 -t "${image_repo}" -f "${context}/${dockerfile}")
+      cmd=(docker buildx build "${context}" --platform linux/amd64 -f "${context}/${dockerfile}")
+      for tag in "${tags[@]}"; do
+        cmd+=(-t "${tag}")
+      done
     fi
     cmd+=(--load)
     echo "NOTE: PUSH=false, image will be loaded into local Docker engine." >&2

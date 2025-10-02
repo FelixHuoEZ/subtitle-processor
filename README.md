@@ -75,6 +75,7 @@ A comprehensive subtitle processing service that automatically downloads, transc
    ```bash
    cp images.env.example images.env
    # Edit images.env to set IMAGE_PREFIX (e.g. docker.io/myteam) and IMAGE_TAG
+   # Optionally set EXTRA_TAGS=latest if you also want a latest tag
    set -a; source images.env; set +a
    ./scripts/build-and-push.sh
    ```
@@ -190,6 +191,7 @@ Special thanks to:
    ```bash
    cp images.env.example images.env
    # 编辑 images.env，设置 IMAGE_PREFIX（如 docker.io/myteam）和 IMAGE_TAG
+   # 如需同时推送 latest，可设置 EXTRA_TAGS=latest
    set -a; source images.env; set +a
    ./scripts/build-and-push.sh
    ```
