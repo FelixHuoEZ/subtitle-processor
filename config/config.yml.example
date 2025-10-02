@@ -1,6 +1,17 @@
+# Application Configuration
+app:
+  name: "Subtitle Processor"
+  version: "2.0.0"
+  secret_key: "replace-with-secure-secret"
+  debug: false
+  max_file_size: 524288000  # 500MB in bytes
+  upload_folder: "/app/uploads"
+  output_folder: "/app/outputs"
+
 # API Tokens
 tokens:
-  readwise: your_readwise_token_here
+  readwise:
+    api_token: your_readwise_token_here
   telegram: your_telegram_bot_token_here
   deepl: your_deepl_token_here
   openai:
@@ -17,11 +28,11 @@ tokens:
 
 # Server Configuration
 servers:
-  domain: http://your.domain.com  # 添加服务器域名配置
-  video_domain: http://video.domain.com
+  domain: http://your.domain.com
+  # video_domain: http://video.domain.com
   transcribe:
-    default_url: http://localhost:9000/asr
-    timeout: 30
+    default_url: http://transcribe-audio:10095
+    timeout: 300
     servers:
       - name: server1
         url: http://server1.example.com:10095
@@ -32,16 +43,16 @@ servers:
         priority: 2
         description: Example Server 2
 
-# Telegram Bot Settings
+# Telegram webhook configuration
 telegram:
   webhook:
-    enabled: false            # 设置为 true 启用 Webhook 模式
-    listen: 0.0.0.0           # Webhook 监听地址
-    port: 8082                # Webhook 监听端口
-    path: /telegram/webhook   # Webhook 路径（必须保证全局唯一）
-    public_url: https://your.domain.com/telegram/webhook  # Telegram 可访问的公网地址
-    drop_pending_updates: true  # 启动时是否丢弃积压的消息
-    secret_token: change_me    # 可选：Webhook 验证 token
+    enabled: true
+    listen: 0.0.0.0
+    port: 8082
+    path: /telegram/webhook
+    public_url: https://subtitle-telegram-bot.example.com/telegram/webhook
+    drop_pending_updates: true
+    # secret_token: change_me
 
 # Translation Settings
 translation:

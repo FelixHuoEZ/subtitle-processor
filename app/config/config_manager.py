@@ -83,7 +83,7 @@ class ConfigManager:
         except Exception as e:
             logger.error(f"加载配置文件失败: {str(e)}")
             self.config = {}
-        
+
         if not self.config:
             logger.error("配置加载失败，使用空配置")
             self.config = {}
