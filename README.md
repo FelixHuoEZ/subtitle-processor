@@ -6,9 +6,9 @@
 > **注意**：本 README 完全由 AI 生成，仅供参考。
 
 ### Recent Updates
-- Added optional webhook mode for the Telegram bot so multiple hosts can share one token via a single webhook endpoint.
-- Introduced multi-host image distribution workflow and `scripts/build-and-push.sh` helper for pushing to private registries.
-- Parameterised Docker images in `docker-compose.yml` for easier deployment across different machines.
+- `scripts/build-and-push.sh` now reuses persistent BuildKit caches, pushes multi-arch manifests, and reloads the host architecture locally without an extra `docker pull`.
+- Updated Telegram deployment guidance: keep a single webhook-facing bot instance and let other nodes run only the processing services to avoid duplicate replies.
+- Documented the image distribution workflow and `.env` overrides for easier rollout across multiple machines.
 
 <a name="english"></a>
 ## 🌍 English
@@ -37,8 +37,8 @@ A comprehensive subtitle processing service that automatically downloads, transc
   - Metadata tracking
   - Timeline visualization
 - **Deployment Flexibility**
-  - Telegram Webhook mode for shared multi-host processing
-  - Build script for pushing images to private registries
+  - Telegram webhook via a single entrypoint, worker nodes run processing-only stack
+  - Build script with persistent cache/export to push and reload images quickly
   - `.env` overrides for image tags per environment
 
 - **Readwise Integration**
@@ -95,6 +95,16 @@ A comprehensive subtitle processing service that automatically downloads, transc
    docker compose up -d --no-build
    ```
 
+### 🤖 Telegram Deployment (Single Entry)
+- Choose **one** machine (for example the NAS that fronts Caddy) to run the `telegram-bot` service with webhook enabled. Configure `telegram.webhook.public_url` (or `TELEGRAM_WEBHOOK_*` envs) **only** on this host so it remains the sole webhook endpoint.
+- On additional worker machines, keep running `subtitle-processor` and `transcribe-audio` but skip the bot service. You can do this by launching only the needed services:
+  ```bash
+  docker compose up -d subtitle-processor transcribe-audio
+  ```
+  or by commenting out the `telegram-bot` section in their local `docker-compose.yml`. Alternatively, set `TELEGRAM_BOT_ENABLED=false` in the worker’s environment so the bot container stays in health-check mode without handling messages.
+- The worker nodes will still take part in transcription because the primary bot forwards requests to them via the shared FunASR server list in `config/config.yml`.
+- This “single entry + multiple workers” layout prevents Telegram from redelivering the same webhook to different instances, eliminating duplicate replies in chats.
+
 ### 🔧 Usage
 1. **Telegram Bot**
    - Send video URL to the bot
@@ -128,9 +138,9 @@ Special thanks to:
 一个综合性的字幕处理服务，可以自动下载、转录和管理来自各种平台的视频字幕。提供 Telegram 机器人接口和网页管理门户。
 
 ### 最近更新
-- 新增 Telegram Webhook 模式，可让多台机器通过统一入口协同处理同一个机器人。
-- 提供 `scripts/build-and-push.sh` 脚本与镜像分发流程，方便推送到自建镜像仓库。
-- 在 `docker-compose.yml` 中支持通过 `.env` 指定镜像，简化多环境部署。
+- `scripts/build-and-push.sh` 支持持续化 BuildKit 缓存，多架构推送后会自动在本机加载当前架构镜像，无需再执行 `docker pull`。
+- Telegram 部署改为“单入口 + 多工作节点”模式，避免同一条消息被多个 bot 实例重复回复。
+- 文档补充镜像分发与 `.env` 覆盖指引，便于多机器快速上线。
 
 ### 🚀 功能特点
 - **多平台支持**
@@ -153,8 +163,8 @@ Special thanks to:
   - 元数据跟踪
   - 时间轴可视化
 - **部署灵活性**
-  - 支持 Telegram Webhook，多机共享同一机器人
-  - 提供构建推送脚本，便于发布到私有仓库
+  - Telegram 仅在单一入口启用 webhook，其他节点专注处理任务
+  - 构建脚本带持久缓存，提高推送/本地加载效率
   - 通过 `.env` 覆盖镜像标签，适配不同环境
 
 - **Readwise 集成**
@@ -185,6 +195,16 @@ Special thanks to:
    ```bash
    docker-compose up --build
    ```
+
+### 🤖 Telegram 单入口部署
+- 仅在一台机器（例如承载 Caddy 的 NAS）运行 `telegram-bot` 并启用 webhook，在该节点的配置文件或环境变量中填写 `telegram.webhook.public_url`。
+- 其他工作节点只运行 `subtitle-processor` 与 `transcribe-audio`：
+  ```bash
+  docker compose up -d subtitle-processor transcribe-audio
+  ```
+-  或在它们的 `docker-compose.yml` 中注释掉 `telegram-bot` 服务，避免重复响应；也可以在环境变量中设置 `TELEGRAM_BOT_ENABLED=false`，使该容器仅提供健康检查而不处理消息。
+- 所有节点共享 `config/config.yml` 内的转录服务器列表，主节点收到请求后仍会委派后端 FunASR 服务执行转录。
+- 该拓扑阻止 Telegram 将同一条 webhook 投递给多台实例，从根源上消除重复回复。
 
 ### 🧩 多机快速分发 Docker 镜像
 1. 在构建机器上生成并推送镜像：

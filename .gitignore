@@ -39,6 +39,8 @@ Thumbs.db
 
 # 生成的镜像文件
 *.tar
+.docker/
+.image-cache/
 
 
 # 单元测试文件和脚本

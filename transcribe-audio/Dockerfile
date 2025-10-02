@@ -1,36 +1,33 @@
 FROM nvidia/cuda:11.8.0-base-ubuntu22.04
+ARG TARGETARCH
+ARG UBUNTU_RELEASE=jammy
 
 # 设置Python版本
 ENV PYTHON_VERSION=3.9
 ENV DEBIAN_FRONTEND=noninteractive
 
 # 安装Python和系统依赖
-RUN set -eux; \
-    find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -print0 \
-      | xargs -0 sed -i \
-        -e 's|http://archive.ubuntu.com/ubuntu|https://mirrors.aliyun.com/ubuntu|g' \
-        -e 's|https://archive.ubuntu.com/ubuntu|https://mirrors.aliyun.com/ubuntu|g' \
-        -e 's|http://security.ubuntu.com/ubuntu|https://mirrors.aliyun.com/ubuntu|g' \
-        -e 's|https://security.ubuntu.com/ubuntu|https://mirrors.aliyun.com/ubuntu|g' \
-        -e 's|http://ports.ubuntu.com/ubuntu-ports|https://mirrors.aliyun.com/ubuntu|g' \
-        -e 's|https://ports.ubuntu.com/ubuntu-ports|https://mirrors.aliyun.com/ubuntu|g'; \
+RUN --mount=type=cache,id=apt-cache-${TARGETARCH},target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=apt-lists-${TARGETARCH},target=/var/lib/apt/lists,sharing=locked \
+    set -eux; \
+    if [ "${TARGETARCH}" = "arm64" ]; then \
+        BASE_URL="https://mirrors.aliyun.com/ubuntu-ports"; \
+    else \
+        BASE_URL="https://mirrors.aliyun.com/ubuntu"; \
+    fi; \
+    printf "deb %s %s main restricted universe multiverse\n" "${BASE_URL}" "${UBUNTU_RELEASE}" > /etc/apt/sources.list; \
+    printf "deb %s %s-updates main restricted universe multiverse\n" "${BASE_URL}" "${UBUNTU_RELEASE}" >> /etc/apt/sources.list; \
+    printf "deb %s %s-backports main restricted universe multiverse\n" "${BASE_URL}" "${UBUNTU_RELEASE}" >> /etc/apt/sources.list; \
+    printf "deb %s %s-security main restricted universe multiverse\n" "${BASE_URL}" "${UBUNTU_RELEASE}" >> /etc/apt/sources.list; \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-    python${PYTHON_VERSION} \
-    python3-pip \
-    python3-setuptools \
-    ffmpeg \
-    git \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/* \
-    || (sleep 2 && apt-get update && apt-get install -y --no-install-recommends \
-    python${PYTHON_VERSION} \
-    python3-pip \
-    python3-setuptools \
-    ffmpeg \
-    git \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*)
+        python${PYTHON_VERSION} \
+        python3-pip \
+        python3-setuptools \
+        ffmpeg \
+        git \
+        build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
 # 设置工作目录
 WORKDIR /app

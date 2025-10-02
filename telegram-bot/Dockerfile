@@ -1,4 +1,5 @@
 FROM python:3.9-slim
+ARG TARGETARCH
 
 WORKDIR /app
 
@@ -9,7 +10,9 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && echo "deb https://mirrors.aliyun.com/debian-security trixie-security main non-free-firmware" >> /etc/apt/sources.list
 
 # Install timezone data without pulling curl (network mirror may block curl deps)
-RUN apt-get update \
+RUN --mount=type=cache,id=apt-cache-${TARGETARCH},target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=apt-lists-${TARGETARCH},target=/var/lib/apt/lists,sharing=locked \
+    apt-get update \
     && apt-get install -y --no-install-recommends tzdata \
     && rm -rf /var/lib/apt/lists/*
 
