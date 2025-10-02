@@ -109,6 +109,7 @@ services:
   #     - srt-network
 
   telegram-bot:
+    profiles: [telegram]
     build: # 直接运行、不构建的时候，注释掉
       context: ./telegram-bot
       dockerfile: Dockerfile
@@ -124,6 +125,7 @@ services:
       - TELEGRAM_WEBHOOK_PORT=8082
       - TELEGRAM_WEBHOOK_LISTEN=0.0.0.0
       - TELEGRAM_WEBHOOK_PATH=/telegram/webhook
+      - TELEGRAM_BOT_ENABLED=${TELEGRAM_BOT_ENABLED:-true}
       # - NO_PROXY=subtitle-processor,localhost,127.0.0.1
       # - ALL_PROXY=http://host.docker.internal:20172
       # - HTTP_PROXY=http://host.docker.internal:20172

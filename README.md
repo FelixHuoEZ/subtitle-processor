@@ -7,6 +7,7 @@
 
 ### Recent Updates
 - `scripts/build-and-push.sh` now reuses persistent BuildKit caches, pushes multi-arch manifests, and reloads the host architecture locally without an extra `docker pull`.
+- Telegram webhook handlers now acknowledge requests immediately and move heavy subtitle generation into background tasks, preventing duplicate retries.
 - Updated Telegram deployment guidance: keep a single webhook-facing bot instance and let other nodes run only the processing services to avoid duplicate replies.
 - Documented the image distribution workflow and `.env` overrides for easier rollout across multiple machines.
 
@@ -96,14 +97,19 @@ A comprehensive subtitle processing service that automatically downloads, transc
    ```
 
 ### 🤖 Telegram Deployment (Single Entry)
-- Choose **one** machine (for example the NAS that fronts Caddy) to run the `telegram-bot` service with webhook enabled. Configure `telegram.webhook.public_url` (or `TELEGRAM_WEBHOOK_*` envs) **only** on this host so it remains the sole webhook endpoint.
+- Choose **one** machine (for example the NAS that fronts Caddy) to run the `telegram-bot` service with webhook enabled. Configure `telegram.webhook.public_url` (or `TELEGRAM_WEBHOOK_*` envs) **only** on this host so it remains the sole webhook endpoint. Start the stack with the Telegram profile:
+  ```bash
+  docker compose --profile telegram up -d
+  ```
 - On additional worker machines, keep running `subtitle-processor` and `transcribe-audio` but skip the bot service. You can do this by launching only the needed services:
+  The default profile starts only processing services, so a plain `docker compose up -d` works. You can also explicitly target services:
   ```bash
   docker compose up -d subtitle-processor transcribe-audio
   ```
-  or by commenting out the `telegram-bot` section in their local `docker-compose.yml`. Alternatively, set `TELEGRAM_BOT_ENABLED=false` in the worker’s environment so the bot container stays in health-check mode without handling messages.
+  or comment out the `telegram-bot` section in the worker’s compose file. Setting `TELEGRAM_BOT_ENABLED=false` in the worker’s environment keeps the container in health-check mode if you ever need the image present.
 - The worker nodes will still take part in transcription because the primary bot forwards requests to them via the shared FunASR server list in `config/config.yml`.
 - This “single entry + multiple workers” layout prevents Telegram from redelivering the same webhook to different instances, eliminating duplicate replies in chats.
+- Each webhook is acknowledged immediately and the heavy lifting runs in background tasks, so Telegram never retries the same update due to timeouts.
 
 ### 🔧 Usage
 1. **Telegram Bot**
@@ -139,6 +145,7 @@ Special thanks to:
 
 ### 最近更新
 - `scripts/build-and-push.sh` 支持持续化 BuildKit 缓存，多架构推送后会自动在本机加载当前架构镜像，无需再执行 `docker pull`。
+- Telegram Webhook 立即返回，并将字幕处理放到后台执行，避免因为重试导致的重复回复。
 - Telegram 部署改为“单入口 + 多工作节点”模式，避免同一条消息被多个 bot 实例重复回复。
 - 文档补充镜像分发与 `.env` 覆盖指引，便于多机器快速上线。
 
@@ -197,14 +204,19 @@ Special thanks to:
    ```
 
 ### 🤖 Telegram 单入口部署
-- 仅在一台机器（例如承载 Caddy 的 NAS）运行 `telegram-bot` 并启用 webhook，在该节点的配置文件或环境变量中填写 `telegram.webhook.public_url`。
+- 仅在一台机器（例如承载 Caddy 的 NAS）运行 `telegram-bot` 并启用 webhook，在该节点的配置文件或环境变量中填写 `telegram.webhook.public_url`，并使用带有 `telegram` profile 的启动方式：
+  ```bash
+  docker compose --profile telegram up -d
+  ```
 - 其他工作节点只运行 `subtitle-processor` 与 `transcribe-audio`：
+  默认 profile 只会启动处理服务，因此直接执行 `docker compose up -d` 即可；也可以显式指定服务：
   ```bash
   docker compose up -d subtitle-processor transcribe-audio
   ```
--  或在它们的 `docker-compose.yml` 中注释掉 `telegram-bot` 服务，避免重复响应；也可以在环境变量中设置 `TELEGRAM_BOT_ENABLED=false`，使该容器仅提供健康检查而不处理消息。
+-  或在它们的 `docker-compose.yml` 中注释掉 `telegram-bot` 服务；若需要保留容器，可在环境变量中设置 `TELEGRAM_BOT_ENABLED=false`，让其仅提供健康检查而不处理消息。
 - 所有节点共享 `config/config.yml` 内的转录服务器列表，主节点收到请求后仍会委派后端 FunASR 服务执行转录。
 - 该拓扑阻止 Telegram 将同一条 webhook 投递给多台实例，从根源上消除重复回复。
+- 每条 Webhook 请求都会立即响应，字幕生成移至后台任务执行，Telegram 不会因超时而重试。
 
 ### 🧩 多机快速分发 Docker 镜像
 1. 在构建机器上生成并推送镜像：

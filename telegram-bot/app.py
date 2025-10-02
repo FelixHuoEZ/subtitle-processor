@@ -25,7 +25,7 @@ import re
 import yaml
 import threading
 import asyncio
-from typing import Any, Dict
+from typing import Any, Dict, Awaitable
 from flask import Flask, request, jsonify
 from threading import Thread
 
@@ -145,6 +145,21 @@ if PROXY:
 
 # 禁用不安全的HTTPS警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# 后台任务调度工具，确保异常被记录
+def schedule_background_task(
+    context: ContextTypes.DEFAULT_TYPE, coro: Awaitable[Any]
+) -> asyncio.Task:
+    task = context.application.create_task(coro)
+
+    def _log_task_error(t: asyncio.Task) -> None:
+        try:
+            t.result()
+        except Exception as exc:
+            logger.error(f"后台任务失败: {exc}", exc_info=True)
+
+    task.add_done_callback(_log_task_error)
+    return task
 
 # 全局变量
 VALID_LOCATIONS = {"1": "new", "2": "later", "3": "archive", "4": "feed"}
@@ -591,7 +606,13 @@ async def tags_timeout(context: CallbackContext) -> None:
         # 使用默认的空tags继续处理
         url = user_states[user_id]["url"]
         location = user_states[user_id]["location"]
-        await process_url_with_location(user_id, chat_id, url, location, context, [])
+        await context.bot.send_message(
+            chat_id=chat_id, text="✅ 已收到请求，正在后台处理..."
+        )
+        schedule_background_task(
+            context,
+            process_url_with_location(user_id, chat_id, url, location, context, []),
+        )
 
         # 清理状态
         if user_id in user_states:
@@ -608,13 +629,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if user_state and user_state.get("state") == "waiting_for_tags":
         if update.message.text.lower() == "/skip":
             # 用户选择跳过添加tags
-            await process_url_with_location(
-                user_id,
-                update.effective_chat.id,
-                user_state["url"],
-                user_state["location"],
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="✅ 已收到请求，正在后台处理...",
+            )
+            schedule_background_task(
                 context,
-                [],  # 明确传递空列表
+                process_url_with_location(
+                    user_id,
+                    update.effective_chat.id,
+                    user_state["url"],
+                    user_state["location"],
+                    context,
+                    [],  # 明确传递空列表
+                ),
             )
         else:
             # 处理用户输入的tags，支持中英文逗号
@@ -623,13 +651,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             tags = [
                 tag.strip() for tag in text.replace("，", ",").split(",") if tag.strip()
             ]
-            await process_url_with_location(
-                user_id,
-                update.effective_chat.id,
-                user_state["url"],
-                user_state["location"],
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="✅ 已收到请求，正在后台处理...",
+            )
+            schedule_background_task(
                 context,
-                tags,
+                process_url_with_location(
+                    user_id,
+                    update.effective_chat.id,
+                    user_state["url"],
+                    user_state["location"],
+                    context,
+                    tags,
+                ),
             )
 
         # 清理用户状态
@@ -676,55 +711,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理用户发送的视频URL"""
+    """处理 /process 命令"""
     try:
         record_update(update)
-        # 获取消息文本
-        message_text = update.message.text.strip()
 
-        # 标准化URL
-        normalized_url, platform = normalize_url(message_text)
-        if not normalized_url:
-            await update.message.reply_text(
-                "❌ 无效的视频URL。请发送YouTube或Bilibili视频链接。"
-            )
+        text = (update.message.text or "").strip()
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            await update.message.reply_text("❌ 请在命令后提供视频URL，例如 /process <url>")
             return
 
-        # 提取视频ID
-        video_id = extract_video_id(normalized_url, platform)
-        if not video_id:
-            await update.message.reply_text("❌ 无法解析视频ID。请检查URL格式。")
-            return
+        target_url = parts[1].strip()
+        await update.message.reply_text("✅ 已收到请求，正在后台处理...")
 
-        # 发送处理中的消息
-        processing_message = await update.message.reply_text(
-            "⏳ 正在处理视频，请稍候..."
+        schedule_background_task(
+            context,
+            process_url_with_location(
+                update.effective_user.id,
+                update.effective_chat.id,
+                target_url,
+                "new",
+                context,
+                [],
+            ),
         )
-
-        # 准备请求数据
-        data = {"url": normalized_url, "platform": platform, "video_id": video_id}
-
-        # 发送请求到字幕处理服务
-        subtitle_processor_url = os.getenv(
-            "SUBTITLE_PROCESSOR_URL", "http://subtitle-processor:5000"
-        )
-        response = requests.post(f"{subtitle_processor_url}/process", json=data)
-
-        if response.status_code == 200:
-            result = response.json()
-
-            # 检查是否有字幕内容
-            if result.get("subtitle_content"):
-                # 发送字幕文件
-                await send_subtitle_file(update, context, result)
-                await processing_message.edit_text("✅ 字幕处理完成！")
-            else:
-                await processing_message.edit_text("❌ 未找到可用的字幕。")
-        else:
-            await processing_message.edit_text(f"❌ 服务器错误: {response.status_code}")
-
     except Exception as e:
-        logger.error(f"处理URL时出错: {str(e)}")
+        logger.error(f"处理 /process 命令时出错: {str(e)}")
         await update.message.reply_text("❌ 处理视频时出错，请稍后重试。")
 
 
@@ -775,7 +787,8 @@ async def process_url_with_location(
 
         # 发送请求到字幕处理服务
         try:
-            response = requests.post(
+            response = await asyncio.to_thread(
+                requests.post,
                 f"{SUBTITLE_PROCESSOR_URL}/process",
                 json=data,
                 timeout=300,  # 5分钟超时
