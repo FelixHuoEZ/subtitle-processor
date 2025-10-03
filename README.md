@@ -110,6 +110,7 @@ A comprehensive subtitle processing service that automatically downloads, transc
 - The worker nodes will still take part in transcription because the primary bot forwards requests to them via the shared FunASR server list in `config/config.yml`.
 - This “single entry + multiple workers” layout prevents Telegram from redelivering the same webhook to different instances, eliminating duplicate replies in chats.
 - Each webhook is acknowledged immediately and the heavy lifting runs in background tasks, so Telegram never retries the same update due to timeouts.
+- For exceptionally long jobs you can raise the HTTP timeouts via `SUBTITLE_CONNECT_TIMEOUT` (default 120 seconds) and `SUBTITLE_READ_TIMEOUT` (default 1800 seconds). Defaults are defined in `docker-compose.yml` and may be overridden with environment variables if needed.
 
 ### 🔧 Usage
 1. **Telegram Bot**
@@ -217,6 +218,7 @@ Special thanks to:
 - 所有节点共享 `config/config.yml` 内的转录服务器列表，主节点收到请求后仍会委派后端 FunASR 服务执行转录。
 - 该拓扑阻止 Telegram 将同一条 webhook 投递给多台实例，从根源上消除重复回复。
 - 每条 Webhook 请求都会立即响应，字幕生成移至后台任务执行，Telegram 不会因超时而重试。
+- 如果处理超长视频，可以通过环境变量 `SUBTITLE_CONNECT_TIMEOUT`（默认 120 秒）和 `SUBTITLE_READ_TIMEOUT`（默认 1800 秒）调高字幕请求的连接/读取超时。默认值写在 `docker-compose.yml`，需要时可在环境变量中覆盖。
 
 ### 🧩 多机快速分发 Docker 镜像
 1. 在构建机器上生成并推送镜像：

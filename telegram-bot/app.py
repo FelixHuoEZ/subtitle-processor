@@ -98,6 +98,9 @@ TELEGRAM_ENABLED = _get_bool(
     True,
 )
 
+SUBTITLE_CONNECT_TIMEOUT = int(os.getenv("SUBTITLE_CONNECT_TIMEOUT", "30"))
+SUBTITLE_READ_TIMEOUT = int(os.getenv("SUBTITLE_READ_TIMEOUT", "1800"))
+
 WEBHOOK_ENABLED = _get_bool(
     os.getenv("TELEGRAM_WEBHOOK_ENABLED", WEBHOOK_CONFIG.get("enabled", False))
 )
@@ -791,7 +794,7 @@ async def process_url_with_location(
                 requests.post,
                 f"{SUBTITLE_PROCESSOR_URL}/process",
                 json=data,
-                timeout=300,  # 5分钟超时
+                timeout=(SUBTITLE_CONNECT_TIMEOUT, SUBTITLE_READ_TIMEOUT),
             )
             response.raise_for_status()
             result = response.json()

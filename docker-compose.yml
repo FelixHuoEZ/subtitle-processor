@@ -126,6 +126,8 @@ services:
       - TELEGRAM_WEBHOOK_LISTEN=0.0.0.0
       - TELEGRAM_WEBHOOK_PATH=/telegram/webhook
       - TELEGRAM_BOT_ENABLED=${TELEGRAM_BOT_ENABLED:-true}
+      - SUBTITLE_CONNECT_TIMEOUT=${SUBTITLE_CONNECT_TIMEOUT:-120}
+      - SUBTITLE_READ_TIMEOUT=${SUBTITLE_READ_TIMEOUT:-1800}
       # - NO_PROXY=subtitle-processor,localhost,127.0.0.1
       # - ALL_PROXY=http://host.docker.internal:20172
       # - HTTP_PROXY=http://host.docker.internal:20172
