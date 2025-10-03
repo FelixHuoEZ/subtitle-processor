@@ -28,6 +28,7 @@ __pycache__/
 .venv
 env/
 venv/
+images.env
 
 # IDE
 .vscode/
@@ -52,3 +53,8 @@ logseq-whisper-subtitles-server/
 app/export_cookies.py
 test_download.py
 test_download2.py
+test_app_startup.py
+
+# 开发记录文件
+AGENTS.md
+LOG.md
