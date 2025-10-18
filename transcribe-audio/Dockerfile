@@ -7,10 +7,9 @@ ENV PYTHON_VERSION=3.9
 ENV DEBIAN_FRONTEND=noninteractive
 
 # 安装Python和系统依赖
-RUN --mount=type=cache,id=apt-cache-${TARGETARCH},target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,id=apt-lists-${TARGETARCH},target=/var/lib/apt/lists,sharing=locked \
-    set -eux; \
-    if [ "${TARGETARCH}" = "arm64" ]; then \
+RUN set -eux; \
+    ARCH="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    if [ "${ARCH}" = "arm64" ]; then \
         BASE_URL="https://mirrors.aliyun.com/ubuntu-ports"; \
     else \
         BASE_URL="https://mirrors.aliyun.com/ubuntu"; \

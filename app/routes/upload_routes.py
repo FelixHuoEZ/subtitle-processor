@@ -4,6 +4,8 @@ import os
 import uuid
 import json
 import logging
+import threading
+import traceback
 from datetime import datetime
 from flask import Blueprint, request, jsonify, render_template, redirect, url_for, flash
 from werkzeug.utils import secure_filename
@@ -142,7 +144,9 @@ def upload_url():
             'tags': tags,  # 保存用户指定的标签
             'status': 'pending',
             'created_time': datetime.now().isoformat(),
-            'updated_time': datetime.now().isoformat()
+            'updated_time': datetime.now().isoformat(),
+            'auto_transcribe': auto_transcribe,
+            'extract_audio': extract_audio
         }
         
         # 保存任务信息
@@ -153,243 +157,38 @@ def upload_url():
         logger.info(f"用户标签: {tags}")
         print(f"DEBUG: auto_start = {auto_start}, type = {type(auto_start)}")
         print(f"DEBUG: user_tags = {tags}")
-        
-        # 如果设置了自动启动，立即开始处理
+
         if auto_start:
-            print(f"=== 开始自动视频处理流程 ===")
-            print(f"处理ID: {process_id}")
-            print(f"视频URL: {url}")
-            print(f"平台: {platform}")
-            logger.info(f"=== 开始自动视频处理流程 === {process_id}")
-            logger.info(f"处理ID: {process_id}")
-            logger.info(f"视频URL: {url}")
-            logger.info(f"平台: {platform}")
-            print("DEBUG: 进入自动启动分支")
-            try:
-                logger.info(f"第1步：开始视频下载和预处理")
-                # 调用视频处理服务
-                result = video_service.process_video_for_transcription(
-                    url=url,
-                    platform=platform
-                )
-                logger.info(f"第1步完成：视频处理结果存在: {result is not None}")
-                
-                # 更新任务状态
-                if result:
-                    task_info['video_info'] = result.get('video_info', {})
-                    task_info['language'] = result.get('language')
-                    task_info['subtitle_content'] = result.get('subtitle_content')
-                    task_info['audio_file'] = result.get('audio_file')
-                    task_info['needs_transcription'] = result.get('needs_transcription', False)
-                    task_info['updated_time'] = datetime.now().isoformat()
-                    
-                    # 调试输出
-                    logger.info(f"视频处理结果 - subtitle_content存在: {bool(result.get('subtitle_content'))}")
-                    logger.info(f"视频处理结果 - needs_transcription: {result.get('needs_transcription')}")
-                    logger.info(f"视频处理结果 - audio_file: {result.get('audio_file')}")
-                    
-                    # 如果有字幕内容，直接完成
-                    if result.get('subtitle_content'):
-                        task_info['status'] = 'completed'
-                        task_info['progress'] = 100
-                        logger.info(f"第2步完成：视频已有字幕，无需转录: {process_id}")
-                        
-                        # 发送到Readwise Reader
-                        logger.info(f"第3步：开始发送内容到Readwise Reader: {process_id}")
-                        
-                        # 添加调试信息
-                        logger.debug(f"调试信息(有字幕) - task_info关键字段:")
-                        logger.debug(f"  - video_info存在: {bool(task_info.get('video_info'))}")
-                        logger.debug(f"  - subtitle_content存在: {bool(task_info.get('subtitle_content'))}")
-                        logger.debug(f"  - subtitle_content长度: {len(task_info.get('subtitle_content', ''))}")
-                        logger.debug(f"  - tags: {task_info.get('tags')}")
-                        
-                        try:
-                            logger.info(f"调用readwise_service.create_article_from_subtitle(有字幕)...")
-                            readwise_result = readwise_service.create_article_from_subtitle(task_info)
-                            logger.info(f"Readwise调用返回结果(有字幕): {readwise_result}")
-                            
-                            if readwise_result:
-                                task_info['readwise_article_id'] = readwise_result.get('id')
-                                task_info['readwise_url'] = readwise_result.get('url')
-                                logger.info(f"第3步完成：Readwise文章创建成功: {process_id} -> {readwise_result.get('id')}")
-                            else:
-                                logger.warning(f"第3步失败：Readwise文章创建失败: {process_id}")
-                                logger.warning(f"readwise_service返回了None或False(有字幕): {readwise_result}")
-                        except Exception as e:
-                            logger.error(f"第3步错误：发送到Readwise失败: {process_id} - {str(e)}")
-                            import traceback
-                            logger.error(f"异常堆栈(有字幕): {traceback.format_exc()}")
-                        
-                        logger.info(f"=== 视频处理流程完成 === {process_id}")
-                    # 如果需要转录且有音频文件，进行转录
-                    elif result.get('needs_transcription') and result.get('audio_file'):
-                        logger.info(f"第2步：开始音频转录流程: {process_id}")
-                        logger.info(f"needs_transcription: {result.get('needs_transcription')}")
-                        logger.info(f"audio_file: {result.get('audio_file')}")
-                        audio_file = result.get('audio_file')
-                        try:
-                            # 进行音频转录
-                            logger.info(f"第2.1步：调用转录服务，音频文件: {audio_file}")
-                            logger.info(f"音频文件是否存在: {os.path.exists(audio_file)}")
-                            transcription_result = transcription_service.transcribe_audio(
-                                audio_file=audio_file,
-                                hotwords=None,
-                                video_info=task_info.get('video_info', {}),
-                                tags=task_info.get('tags', []),
-                                platform=platform
-                            )
-                            logger.info(f"第2.1步完成：转录结果是否为None: {transcription_result is None}")
-                            
-                            if transcription_result is None:
-                                logger.error("第2.1步失败：转录结果为None，转录失败")
-                            else:
-                                logger.info(f"转录数据类型: {type(transcription_result)}")
-                                # 仅显示text字段内容和长度，避免过长的日志
-                                if isinstance(transcription_result, dict) and 'text' in transcription_result:
-                                    text_length = len(transcription_result['text']) if transcription_result['text'] else 0
-                                    text_preview = transcription_result['text'][:100] + "..." if text_length > 100 else transcription_result['text']
-                                    logger.info(f"转录文本长度: {text_length}")
-                                    logger.info(f"转录文本预览: '{text_preview}'")
-                                
-                                # 转换为SRT格式前的调试
-                                logger.info("第2.2步：开始转换为SRT格式")
-                                srt_content = subtitle_service.parse_srt(transcription_result, [])
-                                logger.info(f"第2.2步完成：SRT转换结果是否为None: {srt_content is None}")
-                                if srt_content:
-                                    srt_length = len(srt_content)
-                                    logger.info(f"SRT内容长度: {srt_length}")
-                                    # 计算字幕条数
-                                    subtitle_count = srt_content.count('\n\n') + 1 if srt_content else 0
-                                    logger.info(f"生成字幕条数: {subtitle_count}")
-                                else:
-                                    logger.error("第2.2步失败：SRT转换结果为None或空")
-                                
-                                if srt_content:
-                                    task_info['status'] = 'completed'
-                                    task_info['subtitle_content'] = srt_content
-                                    task_info['transcription_result'] = transcription_result
-                                    task_info['progress'] = 100
-                                    logger.info(f"第2步完成：音频转录和SRT转换成功: {process_id}")
-                                    
-                                    # 发送到Readwise Reader
-                                    logger.info(f"第3步：开始发送内容到Readwise Reader: {process_id}")
-                                    
-                                    # 添加详细的调试信息
-                                    logger.debug(f"调试信息 - task_info关键字段:")
-                                    logger.debug(f"  - video_info存在: {bool(task_info.get('video_info'))}")
-                                    logger.debug(f"  - subtitle_content存在: {bool(task_info.get('subtitle_content'))}")
-                                    logger.debug(f"  - subtitle_content长度: {len(task_info.get('subtitle_content', ''))}")
-                                    logger.debug(f"  - tags: {task_info.get('tags')}")
-                                    if task_info.get('video_info'):
-                                        vi = task_info['video_info']
-                                        logger.debug(f"  - video_info.title: {vi.get('title', 'None')}")
-                                        logger.debug(f"  - video_info.uploader: {vi.get('uploader', 'None')}")
-                                    
-                                    try:
-                                        logger.info(f"调用readwise_service.create_article_from_subtitle...")
-                                        readwise_result = readwise_service.create_article_from_subtitle(task_info)
-                                        logger.info(f"Readwise调用返回结果: {readwise_result}")
-                                        
-                                        if readwise_result:
-                                            task_info['readwise_article_id'] = readwise_result.get('id')
-                                            task_info['readwise_url'] = readwise_result.get('url')
-                                            logger.info(f"第3步完成：Readwise文章创建成功: {process_id} -> {readwise_result.get('id')}")
-                                        else:
-                                            logger.warning(f"第3步失败：Readwise文章创建失败: {process_id}")
-                                            logger.warning(f"readwise_service返回了None或False: {readwise_result}")
-                                    except Exception as e:
-                                        logger.error(f"第3步错误：发送到Readwise失败: {process_id} - {str(e)}")
-                                        import traceback
-                                        logger.error(f"异常堆栈: {traceback.format_exc()}")
-                                    
-                                    logger.info(f"=== 视频处理流程完成 === {process_id}")
-                                else:
-                                    task_info['status'] = 'failed'
-                                    task_info['error'] = 'SRT转换失败'
-                                    logger.error(f"第2.2步失败：SRT转换失败: {process_id}")
-                            
-                            if transcription_result is None:
-                                task_info['status'] = 'failed'
-                                task_info['error'] = '音频转录失败'
-                                logger.error(f"第2步失败：音频转录失败: {process_id}")
-                        except Exception as e:
-                            task_info['status'] = 'failed'
-                            task_info['error'] = f'转录出错: {str(e)}'
-                            logger.error(f"第2步错误：转录出错: {process_id} - {str(e)}")
-                    else:
-                        # 如果转录失败，至少提供基本的视频信息
-                        task_info['status'] = 'completed'
-                        task_info['progress'] = 100
-                        task_info['subtitle_content'] = f"视频标题: {task_info.get('video_info', {}).get('title', '未知')}\n视频链接: {url}\n\n注意：音频转录暂时不可用，请手动处理字幕。"
-                        logger.warning(f"第2步跳过：转录不可用，返回基本信息: {process_id}")
-                        
-                        # 尝试发送基本信息到Readwise
-                        logger.info(f"第3步：发送基本视频信息到Readwise Reader: {process_id}")
-                        
-                        # 添加调试信息
-                        logger.debug(f"调试信息(基本信息) - task_info关键字段:")
-                        logger.debug(f"  - video_info存在: {bool(task_info.get('video_info'))}")
-                        logger.debug(f"  - subtitle_content存在: {bool(task_info.get('subtitle_content'))}")
-                        logger.debug(f"  - subtitle_content长度: {len(task_info.get('subtitle_content', ''))}")
-                        logger.debug(f"  - tags: {task_info.get('tags')}")
-                        
-                        try:
-                            logger.info(f"调用readwise_service.create_article_from_subtitle(基本信息)...")
-                            readwise_result = readwise_service.create_article_from_subtitle(task_info)
-                            logger.info(f"Readwise调用返回结果(基本信息): {readwise_result}")
-                            
-                            if readwise_result:
-                                task_info['readwise_article_id'] = readwise_result.get('id')
-                                task_info['readwise_url'] = readwise_result.get('url')
-                                logger.info(f"第3步完成：Readwise文章(基本信息)创建成功: {process_id} -> {readwise_result.get('id')}")
-                            else:
-                                logger.warning(f"第3步失败：Readwise文章(基本信息)创建失败: {process_id}")
-                                logger.warning(f"readwise_service返回了None或False(基本信息): {readwise_result}")
-                        except Exception as e:
-                            logger.error(f"第3步错误：发送基本信息到Readwise失败: {process_id} - {str(e)}")
-                            import traceback
-                            logger.error(f"异常堆栈(基本信息): {traceback.format_exc()}")
-                        
-                        logger.info(f"=== 视频处理流程完成(仅基本信息) === {process_id}")
-                else:
-                    task_info['status'] = 'failed'
-                    task_info['error'] = '视频处理失败'
-                    task_info['updated_time'] = datetime.now().isoformat()
-                    logger.error(f"第1步失败：视频处理失败: {process_id}")
-                
-                file_service.update_file_info(process_id, task_info)
-                
-            except Exception as e:
-                logger.error(f"=== 视频处理流程出错 === {process_id} - {str(e)}")
-                task_info['status'] = 'failed'
-                task_info['error'] = str(e)
-                file_service.update_file_info(process_id, task_info)
+            thread = threading.Thread(
+                target=_process_video_task,
+                args=(dict(task_info), auto_transcribe),
+                daemon=True,
+                name=f"video-task-{process_id}"
+            )
+            thread.start()
         
         # 根据请求类型返回不同响应
         if request.is_json:
             response_data = {
                 'success': True,
                 'process_id': process_id,
-                'message': f'视频处理任务已创建，auto_start={auto_start}',
                 'status_url': f'/process/video/{process_id}',
                 'platform': platform
             }
             if auto_start:
-                # 如果自动启动且处理完成，返回字幕内容
-                if task_info.get('status') == 'completed' and task_info.get('subtitle_content'):
-                    response_data['message'] = '视频处理已完成'
-                    response_data['subtitle_content'] = task_info['subtitle_content']
-                    response_data['video_info'] = task_info.get('video_info', {})
-                elif task_info.get('status') == 'failed':
-                    response_data['success'] = False
-                    response_data['message'] = task_info.get('error', '视频处理失败')
-                else:
-                    response_data['message'] = '视频处理已开始'
-                response_data['auto_started'] = True
+                response_data.update({
+                    'message': '视频处理任务已开始，结果请稍后通过 status_url 查询',
+                    'auto_started': True,
+                    'status': 'processing'
+                })
+                return jsonify(response_data), 202
+            response_data['message'] = '视频处理任务已创建'
             return jsonify(response_data)
         else:
-            flash(f'视频处理任务已创建', 'success')
+            if auto_start:
+                flash('视频处理任务已创建，正在后台处理', 'success')
+            else:
+                flash('视频处理任务已创建', 'success')
             return redirect(url_for('process.process_video', process_id=process_id))
         
     except Exception as e:
@@ -512,6 +311,209 @@ def validate_file():
     except Exception as e:
         logger.error(f"文件验证失败: {str(e)}")
         return jsonify({'valid': False, 'message': str(e)})
+
+
+def _process_video_task(task_info, auto_transcribe):
+    """后台执行视频下载、转录及推送流程"""
+    process_id = task_info['id']
+    url = task_info['url']
+    platform = task_info['platform']
+    tags = task_info.get('tags', []) or []
+
+    print(f"=== 开始自动视频处理流程 ===")
+    print(f"处理ID: {process_id}")
+    print(f"视频URL: {url}")
+    print(f"平台: {platform}")
+    logger.info(f"=== 开始自动视频处理流程 === {process_id}")
+    logger.info(f"处理ID: {process_id}")
+    logger.info(f"视频URL: {url}")
+    logger.info(f"平台: {platform}")
+    logger.info(f"自动转录设置: {auto_transcribe}")
+    print("DEBUG: 进入自动启动分支")
+
+    task_info['status'] = 'processing'
+    task_info['progress'] = 0
+    task_info['updated_time'] = datetime.now().isoformat()
+    file_service.update_file_info(process_id, task_info)
+
+    try:
+        logger.info("第1步：开始视频下载和预处理")
+        result = video_service.process_video_for_transcription(
+            url=url,
+            platform=platform
+        )
+        logger.info(f"第1步完成：视频处理结果存在: {result is not None}")
+
+        if result:
+            task_info['video_info'] = result.get('video_info', {})
+            task_info['language'] = result.get('language')
+            task_info['subtitle_content'] = result.get('subtitle_content')
+            task_info['audio_file'] = result.get('audio_file')
+            task_info['needs_transcription'] = result.get('needs_transcription', False)
+            task_info['updated_time'] = datetime.now().isoformat()
+            file_service.update_file_info(process_id, task_info)
+
+            logger.info(f"视频处理结果 - subtitle_content存在: {bool(result.get('subtitle_content'))}")
+            logger.info(f"视频处理结果 - needs_transcription: {result.get('needs_transcription')}")
+            logger.info(f"视频处理结果 - audio_file: {result.get('audio_file')}")
+
+            if result.get('subtitle_content'):
+                task_info['status'] = 'completed'
+                task_info['progress'] = 100
+                logger.info(f"第2步完成：视频已有字幕，无需转录: {process_id}")
+                logger.info(f"第3步：开始发送内容到Readwise Reader: {process_id}")
+
+                logger.debug("调试信息(有字幕) - task_info关键字段:")
+                logger.debug(f"  - video_info存在: {bool(task_info.get('video_info'))}")
+                logger.debug(f"  - subtitle_content存在: {bool(task_info.get('subtitle_content'))}")
+                logger.debug(f"  - subtitle_content长度: {len(task_info.get('subtitle_content', ''))}")
+                logger.debug(f"  - tags: {task_info.get('tags')}")
+
+                try:
+                    logger.info("调用readwise_service.create_article_from_subtitle(有字幕)...")
+                    readwise_result = readwise_service.create_article_from_subtitle(task_info)
+                    logger.info(f"Readwise调用返回结果(有字幕): {readwise_result}")
+
+                    if readwise_result:
+                        task_info['readwise_article_id'] = readwise_result.get('id')
+                        task_info['readwise_url'] = readwise_result.get('url')
+                        logger.info(f"第3步完成：Readwise文章创建成功: {process_id} -> {readwise_result.get('id')}")
+                    else:
+                        logger.warning(f"第3步失败：Readwise文章创建失败: {process_id}")
+                        logger.warning(f"readwise_service返回了None或False(有字幕): {readwise_result}")
+                except Exception as e:
+                    logger.error(f"第3步错误：发送到Readwise失败: {process_id} - {str(e)}")
+                    logger.error(f"异常堆栈(有字幕): {traceback.format_exc()}")
+
+                logger.info(f"=== 视频处理流程完成 === {process_id}")
+
+            elif result.get('needs_transcription') and result.get('audio_file'):
+                logger.info(f"第2步：开始音频转录流程: {process_id}")
+                logger.info(f"needs_transcription: {result.get('needs_transcription')}")
+                logger.info(f"audio_file: {result.get('audio_file')}")
+                audio_file = result.get('audio_file')
+                try:
+                    logger.info(f"第2.1步：调用转录服务，音频文件: {audio_file}")
+                    logger.info(f"音频文件是否存在: {os.path.exists(audio_file)}")
+                    transcription_result = transcription_service.transcribe_audio(
+                        audio_file=audio_file,
+                        hotwords=None,
+                        video_info=task_info.get('video_info', {}),
+                        tags=tags,
+                        platform=platform
+                    )
+                    logger.info(f"第2.1步完成：转录结果是否为None: {transcription_result is None}")
+
+                    if transcription_result is None:
+                        task_info['status'] = 'failed'
+                        task_info['error'] = '音频转录失败'
+                        logger.error(f"第2步失败：音频转录失败: {process_id}")
+                    else:
+                        logger.info(f"转录数据类型: {type(transcription_result)}")
+                        if isinstance(transcription_result, dict) and 'text' in transcription_result:
+                            text_length = len(transcription_result['text']) if transcription_result['text'] else 0
+                            text_preview = transcription_result['text'][:100] + "..." if text_length > 100 else transcription_result['text']
+                            logger.info(f"转录文本长度: {text_length}")
+                            logger.info(f"转录文本预览: '{text_preview}'")
+
+                        logger.info("第2.2步：开始转换为SRT格式")
+                        srt_content = subtitle_service.parse_srt(transcription_result, [])
+                        logger.info(f"第2.2步完成：SRT转换结果是否为None: {srt_content is None}")
+                        if srt_content:
+                            srt_length = len(srt_content)
+                            logger.info(f"SRT内容长度: {srt_length}")
+                            subtitle_count = srt_content.count('\n\n') + 1 if srt_content else 0
+                            logger.info(f"生成字幕条数: {subtitle_count}")
+
+                            task_info['status'] = 'completed'
+                            task_info['subtitle_content'] = srt_content
+                            task_info['transcription_result'] = transcription_result
+                            task_info['progress'] = 100
+                            logger.info(f"第2步完成：音频转录和SRT转换成功: {process_id}")
+
+                            logger.info(f"第3步：开始发送内容到Readwise Reader: {process_id}")
+                            logger.debug("调试信息 - task_info关键字段:")
+                            logger.debug(f"  - video_info存在: {bool(task_info.get('video_info'))}")
+                            logger.debug(f"  - subtitle_content存在: {bool(task_info.get('subtitle_content'))}")
+                            logger.debug(f"  - subtitle_content长度: {len(task_info.get('subtitle_content', ''))}")
+                            logger.debug(f"  - tags: {task_info.get('tags')}")
+                            if task_info.get('video_info'):
+                                vi = task_info['video_info']
+                                logger.debug(f"  - video_info.title: {vi.get('title', 'None')}")
+                                logger.debug(f"  - video_info.uploader: {vi.get('uploader', 'None')}")
+
+                            try:
+                                logger.info("调用readwise_service.create_article_from_subtitle...")
+                                readwise_result = readwise_service.create_article_from_subtitle(task_info)
+                                logger.info(f"Readwise调用返回结果: {readwise_result}")
+
+                                if readwise_result:
+                                    task_info['readwise_article_id'] = readwise_result.get('id')
+                                    task_info['readwise_url'] = readwise_result.get('url')
+                                    logger.info(f"第3步完成：Readwise文章创建成功: {process_id} -> {readwise_result.get('id')}")
+                                else:
+                                    logger.warning(f"第3步失败：Readwise文章创建失败: {process_id}")
+                                    logger.warning(f"readwise_service返回了None或False: {readwise_result}")
+                            except Exception as e:
+                                logger.error(f"第3步错误：发送到Readwise失败: {process_id} - {str(e)}")
+                                logger.error(f"异常堆栈: {traceback.format_exc()}")
+
+                            logger.info(f"=== 视频处理流程完成 === {process_id}")
+                        else:
+                            task_info['status'] = 'failed'
+                            task_info['error'] = 'SRT转换失败'
+                            logger.error(f"第2.2步失败：SRT转换失败: {process_id}")
+                except Exception as e:
+                    task_info['status'] = 'failed'
+                    task_info['error'] = f'转录出错: {str(e)}'
+                    logger.error(f"第2步错误：转录出错: {process_id} - {str(e)}")
+            else:
+                task_info['status'] = 'completed'
+                task_info['progress'] = 100
+                task_info['subtitle_content'] = (
+                    f"视频标题: {task_info.get('video_info', {}).get('title', '未知')}\n"
+                    f"视频链接: {url}\n\n注意：音频转录暂时不可用，请手动处理字幕。"
+                )
+                logger.warning(f"第2步跳过：转录不可用，返回基本信息: {process_id}")
+
+                logger.info(f"第3步：发送基本视频信息到Readwise Reader: {process_id}")
+                logger.debug("调试信息(基本信息) - task_info关键字段:")
+                logger.debug(f"  - video_info存在: {bool(task_info.get('video_info'))}")
+                logger.debug(f"  - subtitle_content存在: {bool(task_info.get('subtitle_content'))}")
+                logger.debug(f"  - subtitle_content长度: {len(task_info.get('subtitle_content', ''))}")
+                logger.debug(f"  - tags: {task_info.get('tags')}")
+
+                try:
+                    logger.info("调用readwise_service.create_article_from_subtitle(基本信息)...")
+                    readwise_result = readwise_service.create_article_from_subtitle(task_info)
+                    logger.info(f"Readwise调用返回结果(基本信息): {readwise_result}")
+
+                    if readwise_result:
+                        task_info['readwise_article_id'] = readwise_result.get('id')
+                        task_info['readwise_url'] = readwise_result.get('url')
+                        logger.info(f"第3步完成：Readwise文章(基本信息)创建成功: {process_id} -> {readwise_result.get('id')}")
+                    else:
+                        logger.warning(f"第3步失败：Readwise文章(基本信息)创建失败: {process_id}")
+                        logger.warning(f"readwise_service返回了None或False(基本信息): {readwise_result}")
+                except Exception as e:
+                    logger.error(f"第3步错误：发送基本信息到Readwise失败: {process_id} - {str(e)}")
+                    logger.error(f"异常堆栈(基本信息): {traceback.format_exc()}")
+
+                logger.info(f"=== 视频处理流程完成(仅基本信息) === {process_id}")
+        else:
+            task_info['status'] = 'failed'
+            task_info['error'] = '视频处理失败'
+            task_info['updated_time'] = datetime.now().isoformat()
+            logger.error(f"第1步失败：视频处理失败: {process_id}")
+
+        file_service.update_file_info(process_id, task_info)
+
+    except Exception as e:
+        logger.error(f"=== 视频处理流程出错 === {process_id} - {str(e)}")
+        task_info['status'] = 'failed'
+        task_info['error'] = str(e)
+        task_info['updated_time'] = datetime.now().isoformat()
+        file_service.update_file_info(process_id, task_info)
 
 
 def _detect_file_type(file_ext):

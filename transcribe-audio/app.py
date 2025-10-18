@@ -305,10 +305,63 @@ def ensure_dir(dir_path):
     """确保目录存在，如果不存在则创建"""
     Path(dir_path).mkdir(parents=True, exist_ok=True)
 
+def cleanup_model_locks(cache_dir):
+    """移除遗留的模型锁文件，防止模型下载因文件锁卡死"""
+    cache_path = Path(cache_dir)
+    if not cache_path.exists():
+        return
+    for pattern in ("**/.mdl", "**/*.mdl.lock"):
+        for lock_file in cache_path.glob(pattern):
+            if lock_file.is_file():
+                try:
+                    lock_file.unlink()
+                    logger.warning(f"移除了遗留的模型锁文件: {lock_file}")
+                except OSError as err:
+                    logger.warning(f"无法移除模型锁文件 {lock_file}: {err}")
+    for lock_dir in cache_path.glob("**/.lock"):
+        if lock_dir.is_dir():
+            try:
+                shutil.rmtree(lock_dir)
+                logger.warning(f"移除了遗留的模型锁目录: {lock_dir}")
+            except OSError as err:
+                logger.warning(f"无法移除模型锁目录 {lock_dir}: {err}")
+    for temp_dir in cache_path.glob("**/._____temp"):
+        if temp_dir.is_dir():
+            try:
+                shutil.rmtree(temp_dir)
+                logger.warning(f"移除了遗留的临时目录: {temp_dir}")
+            except OSError as err:
+                logger.warning(f"无法移除临时目录 {temp_dir}: {err}")
+
 def download_model(model_id, revision, cache_dir):
     """下载指定的模型"""
     try:
         logger.info(f"开始下载模型 {model_id} 到 {cache_dir}")
+        cleanup_model_locks(cache_dir)
+        specific_lock_files = [
+            Path(cache_dir) / model_id / ".mdl",
+            Path(cache_dir) / "hub" / model_id / ".mdl",
+        ]
+        for lock_path in specific_lock_files:
+            if lock_path.exists():
+                try:
+                    lock_path.unlink()
+                    logger.warning(f"下载前移除锁文件: {lock_path}")
+                except OSError as err:
+                    logger.warning(f"移除锁文件 {lock_path} 失败: {err}")
+        # 移除未完整下载的临时目录
+        for stale_path in [
+            Path(cache_dir) / "._____temp",
+            Path(cache_dir) / "hub" / "._____temp",
+            Path(cache_dir) / model_id / "._____temp",
+            Path(cache_dir) / "hub" / model_id / "._____temp",
+        ]:
+            if stale_path.exists():
+                try:
+                    shutil.rmtree(stale_path)
+                    logger.warning(f"移除了遗留的模型临时目录: {stale_path}")
+                except OSError as err:
+                    logger.warning(f"无法移除模型临时目录 {stale_path}: {err}")
         
         # 下载模型
         model_dir = snapshot_download(
@@ -392,6 +445,8 @@ def ensure_models():
     # 设置模型目录
     model_dir = os.getenv("MODEL_DIR", "/app/models")
     
+    cleanup_model_locks(model_dir)
+
     # 设置环境变量
     os.environ['MODELSCOPE_CACHE'] = model_dir
     os.environ['HF_HOME'] = model_dir
@@ -416,38 +471,56 @@ def ensure_models():
         logger.info(f"{model_type}模型: {config['name']} (ID: {config['id']})")
     
     # 检查所有模型文件是否存在
+    def _model_exists(model_id: str) -> bool:
+        candidates = [
+            Path(model_dir) / "hub" / model_id,
+            Path(model_dir) / model_id,
+            Path(model_dir) / "models" / model_id,
+        ]
+        return any(path.exists() for path in candidates)
+    
     model_paths = {
-        model_type: os.path.join(model_dir, f"hub/{config['id']}")
+        model_type: [
+            str(path) for path in [
+                Path(model_dir) / "hub" / config["id"],
+                Path(model_dir) / config["id"],
+                Path(model_dir) / "models" / config["id"],
+            ]
+        ]
         for model_type, config in model_configs.items()
     }
-    
+
     logger.info("检查模型文件：")
-    for model_type, path in model_paths.items():
-        logger.info(f"{model_type}模型路径: {path}")
-    
+    for model_type, paths in model_paths.items():
+        logger.info(f"{model_type}模型候选路径: {paths}")
+
     # 检查是否需要下载模型
-    missing_models = [path for path in model_paths.values() if not os.path.exists(path)]
+    missing_models = [
+        (model_type, config)
+        for model_type, config in model_configs.items()
+        if not _model_exists(config["id"])
+    ]
     if missing_models:
+        missing_desc = [f"{model_type}:{config['id']}" for model_type, config in missing_models]
+        logger.info("缺失模型列表: %s", missing_desc)
         logger.info("部分模型文件不存在，开始下载...")
         ensure_dir(model_dir)
-        
+
         # 下载所有缺失的模型
         success = True
-        for model_type, config in model_configs.items():
-            model_path = model_paths[model_type]
-            if model_path in missing_models:
-                try:
-                    downloaded_path = download_model(
-                        model_id=config["id"],
-                        revision=None,  # 使用最新版本
-                        cache_dir=model_dir
-                    )
-                    logger.info(f"模型 {config['id']} 下载成功: {downloaded_path}")
-                except Exception as e:
-                    logger.error(f"下载模型 {config['id']} 失败: {str(e)}")
-                    success = False
-                    continue
-        
+        for model_type, config in missing_models:
+            try:
+                downloaded_path = download_model(
+                    model_id=config["id"],
+                    revision=None,  # 使用最新版本
+                    cache_dir=model_dir
+                )
+                logger.info(f"模型 {config['id']} 下载成功: {downloaded_path}")
+            except Exception as e:
+                logger.error(f"下载模型 {config['id']} 失败: {str(e)}")
+                success = False
+                continue
+
         if not success:
             logger.error("部分模型下载失败，请检查错误信息并重试")
             sys.exit(1)
@@ -456,7 +529,7 @@ def ensure_models():
     else:
         logger.info("所有模型文件已存在，无需下载")
     
-    return model_dir, {k: v["name"] for k, v in model_configs.items()}
+    return model_dir, model_configs
 
 # 初始化FunASR模型
 def init_model():
@@ -487,18 +560,18 @@ def init_model():
         print("\n" + "="*20 + " 模型加载开始 " + "="*20)
         
         # 确保模型存在
-        model_dir, model_names = ensure_models()
+        model_dir, model_info = ensure_models()
         
         try:
             # 尝试使用指定的模型
             model = AutoModel(
-                model=model_names["main"],
+                model=model_info["main"]["id"],
                 device=device,  # 使用检测到的设备
                 model_dir=model_dir,
-                vad_model=model_names["vad"],
+                vad_model=model_info["vad"]["id"],
                 vad_kwargs={"max_single_segment_time": 60000},
-                punc_model=model_names["punc"],
-                spk_model=model_names["spk"],
+                punc_model=model_info["punc"]["id"],
+                spk_model=model_info["spk"]["id"],
                 batch_size=1 if device == "cpu" else 4,  # GPU时使用更大的batch_size
                 vad_model_dir=model_dir,
                 disable_update=True,
@@ -507,10 +580,10 @@ def init_model():
                 spk_model_dir=model_dir
             )
             print(f"FunASR模型加载完成，使用设备: {device}")
-            print(f"主模型: {model_names['main']}")
-            print(f"VAD模型: {model_names['vad']}")
-            print(f"标点模型: {model_names['punc']}")
-            print(f"说话人模型: {model_names['spk']}")
+            print(f"主模型: {model_info['main']['name']} ({model_info['main']['id']})")
+            print(f"VAD模型: {model_info['vad']['name']} ({model_info['vad']['id']})")
+            print(f"标点模型: {model_info['punc']['name']} ({model_info['punc']['id']})")
+            print(f"说话人模型: {model_info['spk']['name']} ({model_info['spk']['id']})")
             print(f"批处理大小: {1 if device == 'cpu' else 4}")
             
         except Exception as e:
@@ -519,13 +592,13 @@ def init_model():
             
             # 使用默认模型
             model = AutoModel(
-                model="paraformer-zh",
+                model="damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
                 device=device,  # 使用检测到的设备
                 model_dir=model_dir,
-                vad_model="fsmn-vad",
+                vad_model="damo/speech_fsmn_vad_zh-cn-16k-common-pytorch",
                 vad_kwargs={"max_single_segment_time": 60000},
-                punc_model="ct-punc",
-                spk_model="cam++",
+                punc_model="damo/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+                spk_model="damo/speech_campplus_sv_zh-cn_16k-common",
                 batch_size=1 if device == "cpu" else 4,  # GPU时使用更大的batch_size
                 vad_model_dir=model_dir,
                 disable_update=True,

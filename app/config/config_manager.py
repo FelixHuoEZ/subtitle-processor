@@ -98,7 +98,17 @@ class ConfigManager:
             value = self.config
             keys = key_path.split('.')
             for i, key in enumerate(keys):
+                is_last = (i == len(keys) - 1)
+
+                if isinstance(value, list) and not is_last:
+                    value = self._list_to_dict(value)
+
+                if isinstance(value, str) and not is_last:
+                    value = {'value': value, 'api_key': value}
+
                 if not isinstance(value, dict):
+                    if is_last:
+                        break
                     logger.warning(f"配置路径 {'.'.join(keys[:i])} 的值不是字典: {value}")
                     return default
                 if key not in value:
@@ -119,6 +129,16 @@ class ConfigManager:
     def reload_config(self):
         """重新加载配置文件"""
         self.load_config()
+    
+    @staticmethod
+    def _list_to_dict(value):
+        """将配置中的列表转换为可通过名称访问的字典"""
+        result = {}
+        for index, item in enumerate(value):
+            if isinstance(item, dict):
+                key = item.get('name') or str(index)
+                result[key] = item
+        return result or {str(index): item for index, item in enumerate(value)}
 
 
 # 全局配置管理器实例

@@ -1,8 +1,11 @@
 """File management service for the subtitle processing application."""
 
+import errno
 import os
 import json
 import logging
+import tempfile
+import time
 from ..config.config_manager import get_config_value
 from ..utils.file_utils import detect_file_encoding, sanitize_filename
 
@@ -41,35 +44,59 @@ class FileService:
         """确保files_info.json文件存在"""
         try:
             if not os.path.exists(self.files_info_path):
-                with open(self.files_info_path, 'w', encoding='utf-8') as f:
-                    json.dump({}, f, ensure_ascii=False)
+                self._atomic_write({}, ensure_dir=True)
                 logger.info(f"创建文件信息存储文件: {self.files_info_path}")
         except Exception as e:
             logger.error(f"创建文件信息存储文件失败: {str(e)}")
     
     def load_files_info(self):
         """加载文件信息"""
-        try:
-            with open(self.files_info_path, 'r', encoding='utf-8') as f:
-                files_info = json.load(f)
-                
-            # 如果是旧的列表格式，进行迁移
-            if isinstance(files_info, list):
-                files_info = self._migrate_files_info()
-                
-            return files_info
-        except Exception as e:
-            logger.error(f"加载文件信息时出错: {str(e)}")
-            return {}
+        attempts = 3
+        for attempt in range(attempts):
+            try:
+                with open(self.files_info_path, 'r', encoding='utf-8') as f:
+                    files_info = json.load(f)
+                if isinstance(files_info, list):
+                    files_info = self._migrate_files_info()
+                return files_info
+            except OSError as e:
+                if e.errno == errno.EDEADLK and attempt < attempts - 1:
+                    logger.warning(f"加载文件信息时遇到文件锁冲突，重试({attempt + 1}/{attempts})")
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                logger.error(f"加载文件信息时出错: {str(e)}")
+                return {}
+            except Exception as e:
+                logger.error(f"加载文件信息时出错: {str(e)}")
+                return {}
+        return {}
     
     def save_files_info(self, files_info):
         """保存文件信息"""
         try:
-            with open(self.files_info_path, 'w', encoding='utf-8') as f:
-                json.dump(files_info, f, ensure_ascii=False, indent=2)
+            self._atomic_write(files_info)
             logger.debug("文件信息已保存")
         except Exception as e:
             logger.error(f"保存文件信息时出错: {str(e)}")
+    
+    def _atomic_write(self, data, ensure_dir=False):
+        """原子写入JSON，避免部分写入造成的锁冲突"""
+        directory = os.path.dirname(self.files_info_path)
+        if ensure_dir:
+            os.makedirs(directory, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(dir=directory, prefix='files_info_', suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as tmp_file:
+                json.dump(data, tmp_file, ensure_ascii=False, indent=2)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+            os.replace(temp_path, self.files_info_path)
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
     
     def _migrate_files_info(self):
         """将文件信息从列表格式迁移到字典格式"""
