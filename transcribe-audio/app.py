@@ -16,6 +16,7 @@ import shutil
 from datetime import datetime
 import difflib
 import re
+import errno
 
 class HotwordPostProcessor:
     """热词后处理器 - 在转录完成后进行热词匹配和替换"""
@@ -278,6 +279,39 @@ logging.getLogger("werkzeug").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("filelock").setLevel(logging.WARNING)
 
+# 处理 macOS 上偶发的 EDEADLK 死锁，重试加载 FunASR 分词字典
+try:
+    from funasr.tokenizer import char_tokenizer as _funasr_char_tokenizer
+except ImportError:
+    _funasr_char_tokenizer = None
+else:
+    if not getattr(_funasr_char_tokenizer.load_seg_dict, "__name__", "").startswith("_load_seg_dict_with_retry"):
+        _original_load_seg_dict = _funasr_char_tokenizer.load_seg_dict
+
+        def _load_seg_dict_with_retry(seg_dict, max_retries=5, base_delay=0.5):
+            """Wrap funasr load_seg_dict to mitigate occasional deadlocks on shared volumes."""
+            last_err = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    return _original_load_seg_dict(seg_dict)
+                except OSError as err:
+                    last_err = err
+                    if err.errno != errno.EDEADLK or attempt == max_retries:
+                        raise
+                    wait_time = base_delay * attempt
+                    logger.warning(
+                        "加载分词字典时遇到系统 EDEADLK 死锁，正在重试 (%s/%s)，%.1f 秒后继续: %s",
+                        attempt,
+                        max_retries,
+                        wait_time,
+                        err,
+                    )
+                    time.sleep(wait_time)
+            raise last_err
+
+        _load_seg_dict_with_retry.__wrapped__ = _original_load_seg_dict
+        _funasr_char_tokenizer.load_seg_dict = _load_seg_dict_with_retry
+
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max-limit
 app.config['UPLOAD_FOLDER'] = '/app/uploads'
@@ -442,16 +476,33 @@ def get_model_id(model_type, model_name):
 
 def ensure_models():
     """确保模型文件存在，如果不存在则下载"""
-    # 设置模型目录
-    model_dir = os.getenv("MODEL_DIR", "/app/models")
-    
+    # 运行时目录与共享目录解耦，避免共享卷上的文件锁问题
+    configured_dir = Path(os.getenv("MODEL_DIR", "/app/models"))
+    runtime_dir = Path(os.getenv("MODEL_RUNTIME_DIR", "/app/runtime-models"))
+
+    ensure_dir(runtime_dir)
+
+    if configured_dir.exists() and configured_dir.resolve() != runtime_dir.resolve():
+        try:
+            if not any(runtime_dir.iterdir()):
+                logger.warning(
+                    "运行时模型目录为空，尝试从共享目录复制以避免锁冲突: %s -> %s",
+                    configured_dir,
+                    runtime_dir,
+                )
+                shutil.copytree(configured_dir, runtime_dir, dirs_exist_ok=True)
+        except Exception as copy_err:
+            logger.warning("复制共享模型到运行目录失败，将按需重新下载: %s", copy_err)
+
+    model_dir = str(runtime_dir)
+
     cleanup_model_locks(model_dir)
 
     # 设置环境变量
     os.environ['MODELSCOPE_CACHE'] = model_dir
     os.environ['HF_HOME'] = model_dir
     os.environ['TORCH_HOME'] = model_dir
-    
+
     # 获取所有模型名称 - 优先使用支持第三代热词的模型
     model_name = os.getenv("FUNASR_MODEL", "SenseVoiceSmall")  # 使用更新的模型
     vad_model = os.getenv("FUNASR_VAD_MODEL", "fsmn-vad")

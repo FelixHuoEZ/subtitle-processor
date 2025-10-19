@@ -18,6 +18,9 @@ models/
 outputs/
 firefox_profile/
 
+# Docker本地配置
+docker-config/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -42,6 +45,10 @@ Thumbs.db
 *.tar
 .docker/
 .image-cache/
+
+# 日志文件
+server.log
+subtitle_processor.log
 
 
 # 单元测试文件和脚本

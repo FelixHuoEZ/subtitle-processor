@@ -43,11 +43,13 @@ services:
       # - HTTPS_PROXY=http://host.docker.internal:20172
       # 从配置文件读取所有配置
       - CONFIG_PATH=/app/config/config.yml
+      - BGUTIL_PROVIDER_URL=${BGUTIL_PROVIDER_URL:-http://bgutil-provider:4416}
     networks:
       - srt-network
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    # depends_on:
+    depends_on:
+      - bgutil-provider
     #   - deeplx
 
   transcribe-audio:
@@ -96,6 +98,15 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    networks:
+      - srt-network
+
+  bgutil-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:1.2.2
+    container_name: bgutil-provider
+    restart: unless-stopped
+    ports:
+      - "4416:4416"
     networks:
       - srt-network
 

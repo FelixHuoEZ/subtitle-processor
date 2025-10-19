@@ -1,6 +1,8 @@
 flask
 requests
 yt-dlp
+yt-dlp-get-pot
+bgutil-ytdlp-pot-provider
 chardet
 flask-cors
 pydub==0.25.1

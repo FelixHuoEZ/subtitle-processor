@@ -21,50 +21,64 @@ class VideoService:
 
     def __init__(self):
         """初始化视频服务"""
-        self.supported_platforms = ['youtube', 'bilibili', 'acfun']
+        self.supported_platforms = ["youtube", "bilibili", "acfun"]
+        self.bgutil_provider_url = os.getenv(
+            "BGUTIL_PROVIDER_URL", "http://bgutil-provider:4416"
+        )
         self._setup_yt_dlp_options()
 
     def _setup_yt_dlp_options(self):
         """设置yt-dlp默认选项"""
+
         # 自定义日志处理器
         class QuietLogger:
             def debug(self, msg):
                 # 忽略调试信息
                 pass
+
             def warning(self, msg):
                 logger.warning(msg)
+
             def error(self, msg):
                 logger.error(msg)
 
         base_opts = {
-            'logger': QuietLogger(),
-            'quiet': True,
-            'no_warnings': True,
-            'cachedir': False,
-            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0',
-            'http_headers': {'Referer': 'https://www.youtube.com/'},
-            'noplaylist': True,
-            'skip_unavailable_fragments': True,
-            'format': 'bestaudio/best',
+            "logger": QuietLogger(),
+            "quiet": True,
+            "no_warnings": True,
+            "cachedir": False,
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0",
+            "http_headers": {"Referer": "https://www.youtube.com/"},
+            "noplaylist": True,
+            "skip_unavailable_fragments": True,
+            "format": "bestaudio/best",
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["default", "mweb"],
+                    "po_token": "auto",
+                },
+                "youtubepot-bgutilhttp": {
+                    "base_url": self.bgutil_provider_url,
+                },
+            },
         }
         self.yt_dlp_opts = base_opts
-
 
     def _extract_youtube_info(self, url: str) -> Optional[Dict[str, Any]]:
         try:
             with yt_dlp.YoutubeDL(self.yt_dlp_opts) as ydl:
                 return ydl.extract_info(url, download=False)
         except DownloadError as err:
-            logger.warning(f'初次获取YouTube信息失败，尝试元数据回退: {err}')
+            logger.warning(f"初次获取YouTube信息失败，尝试元数据回退: {err}")
             fallback_opts = dict(self.yt_dlp_opts)
-            fallback_opts.pop('format', None)
-            fallback_opts.pop('skip_unavailable_fragments', None)
-            fallback_opts['quiet'] = True
+            fallback_opts.pop("format", None)
+            fallback_opts.pop("skip_unavailable_fragments", None)
+            fallback_opts["quiet"] = True
             try:
                 with yt_dlp.YoutubeDL(fallback_opts) as ydl:
                     return ydl.extract_info(url, download=False, process=False)
             except DownloadError as fallback_err:
-                logger.error(f'YouTube元数据回退失败: {fallback_err}')
+                logger.error(f"YouTube元数据回退失败: {fallback_err}")
                 raise
 
     def get_video_info(self, url: str, platform: str) -> Optional[Dict[str, Any]]:
@@ -80,11 +94,11 @@ class VideoService:
         try:
             logger.info(f"获取{platform}视频信息: {url}")
 
-            if platform == 'youtube':
+            if platform == "youtube":
                 return self.get_youtube_info(url)
-            elif platform == 'bilibili':
+            elif platform == "bilibili":
                 return self.get_bilibili_info(url)
-            elif platform == 'acfun':
+            elif platform == "acfun":
                 return self.get_acfun_info(url)
             else:
                 logger.error(f"不支持的平台: {platform}")
@@ -101,46 +115,54 @@ class VideoService:
             time.sleep(2)
             info = self._extract_youtube_info(url)
             if not info:
-                logger.error('未能获取YouTube元数据')
+                logger.error("未能获取YouTube元数据")
                 return None
 
             # ��ϸ��¼���п��ܰ������ڵ��ֶ�
             date_fields = {
-                'upload_date': info.get('upload_date'),
-                'release_date': info.get('release_date'),
-                'modified_date': info.get('modified_date'),
-                'timestamp': info.get('timestamp')
+                "upload_date": info.get("upload_date"),
+                "release_date": info.get("release_date"),
+                "modified_date": info.get("modified_date"),
+                "timestamp": info.get("timestamp"),
             }
-            logger.info(f"YouTube��Ƶ��������ֶ�: {json.dumps(date_fields, indent=2, ensure_ascii=False)}")
+            logger.info(
+                f"YouTube��Ƶ��������ֶ�: {json.dumps(date_fields, indent=2, ensure_ascii=False)}"
+            )
 
             # ���Զ�������ֶ�
             published_date = None
-            if info.get('upload_date'):
+            if info.get("upload_date"):
                 published_date = f"{info['upload_date'][:4]}-{info['upload_date'][4:6]}-{info['upload_date'][6:]}T00:00:00Z"
-            elif info.get('release_date'):
-                published_date = info['release_date']
-            elif info.get('modified_date'):
-                published_date = info['modified_date']
-            elif info.get('timestamp'):
-                published_date = datetime.fromtimestamp(info['timestamp']).strftime('%Y-%m-%dT%H:%M:%SZ')
+            elif info.get("release_date"):
+                published_date = info["release_date"]
+            elif info.get("modified_date"):
+                published_date = info["modified_date"]
+            elif info.get("timestamp"):
+                published_date = datetime.fromtimestamp(info["timestamp"]).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
 
             logger.info(f"����ȷ���ķ�������: {published_date}")
 
             video_info = {
-                'id': info.get('id'),
-                'title': info.get('title'),
-                'description': info.get('description'),
-                'uploader': info.get('uploader') or info.get('channel'),
-                'duration': info.get('duration'),
-                'view_count': info.get('view_count'),
-                'like_count': info.get('like_count'),
-                'upload_date': info.get('upload_date'),
-                'published_date': published_date,
-                'webpage_url': info.get('webpage_url', url),
-                'thumbnail': info.get('thumbnail'),
-                'language': info.get('language', 'en'),
-                'subtitles': list(info.get('subtitles', {}).keys()) if info.get('subtitles') else [],
-                'automatic_captions': list(info.get('automatic_captions', {}).keys()) if info.get('automatic_captions') else []
+                "id": info.get("id"),
+                "title": info.get("title"),
+                "description": info.get("description"),
+                "uploader": info.get("uploader") or info.get("channel"),
+                "duration": info.get("duration"),
+                "view_count": info.get("view_count"),
+                "like_count": info.get("like_count"),
+                "upload_date": info.get("upload_date"),
+                "published_date": published_date,
+                "webpage_url": info.get("webpage_url", url),
+                "thumbnail": info.get("thumbnail"),
+                "language": info.get("language", "en"),
+                "subtitles": list(info.get("subtitles", {}).keys())
+                if info.get("subtitles")
+                else [],
+                "automatic_captions": list(info.get("automatic_captions", {}).keys())
+                if info.get("automatic_captions")
+                else [],
             }
 
             logger.info(f"��ȡYouTube��Ƶ��Ϣ�ɹ�: {video_info['title']}")
@@ -157,19 +179,21 @@ class VideoService:
                 info = ydl.extract_info(url, download=False)
 
                 video_info = {
-                    'id': info.get('id'),
-                    'title': info.get('title'),
-                    'description': info.get('description'),
-                    'uploader': info.get('uploader'),
-                    'duration': info.get('duration'),
-                    'view_count': info.get('view_count'),
-                    'upload_date': info.get('upload_date'),
-                    'published_date': info.get('upload_date'),
-                    'webpage_url': info.get('webpage_url', url),
-                    'thumbnail': info.get('thumbnail'),
-                    'language': 'zh-CN',
-                    'subtitles': list(info.get('subtitles', {}).keys()) if info.get('subtitles') else [],
-                    'automatic_captions': []
+                    "id": info.get("id"),
+                    "title": info.get("title"),
+                    "description": info.get("description"),
+                    "uploader": info.get("uploader"),
+                    "duration": info.get("duration"),
+                    "view_count": info.get("view_count"),
+                    "upload_date": info.get("upload_date"),
+                    "published_date": info.get("upload_date"),
+                    "webpage_url": info.get("webpage_url", url),
+                    "thumbnail": info.get("thumbnail"),
+                    "language": "zh-CN",
+                    "subtitles": list(info.get("subtitles", {}).keys())
+                    if info.get("subtitles")
+                    else [],
+                    "automatic_captions": [],
                 }
 
                 logger.info(f"获取Bilibili视频信息成功: {video_info['title']}")
@@ -186,19 +210,21 @@ class VideoService:
                 info = ydl.extract_info(url, download=False)
 
                 video_info = {
-                    'id': info.get('id'),
-                    'title': info.get('title'),
-                    'description': info.get('description'),
-                    'uploader': info.get('uploader'),
-                    'duration': info.get('duration'),
-                    'view_count': info.get('view_count'),
-                    'upload_date': info.get('upload_date'),
-                    'published_date': info.get('upload_date'),
-                    'webpage_url': info.get('webpage_url', url),
-                    'thumbnail': info.get('thumbnail'),
-                    'language': 'zh-CN',
-                    'subtitles': list(info.get('subtitles', {}).keys()) if info.get('subtitles') else [],
-                    'automatic_captions': []
+                    "id": info.get("id"),
+                    "title": info.get("title"),
+                    "description": info.get("description"),
+                    "uploader": info.get("uploader"),
+                    "duration": info.get("duration"),
+                    "view_count": info.get("view_count"),
+                    "upload_date": info.get("upload_date"),
+                    "published_date": info.get("upload_date"),
+                    "webpage_url": info.get("webpage_url", url),
+                    "thumbnail": info.get("thumbnail"),
+                    "language": "zh-CN",
+                    "subtitles": list(info.get("subtitles", {}).keys())
+                    if info.get("subtitles")
+                    else [],
+                    "automatic_captions": [],
                 }
 
                 logger.info(f"获取AcFun视频信息成功: {video_info['title']}")
@@ -222,25 +248,25 @@ class VideoService:
                 return None
 
             # 1. 优先使用视频信息中的语言字段
-            if 'language' in info and info['language']:
-                lang = info['language'].lower()
-                if lang.startswith('zh'):
-                    return 'zh'
-                elif lang.startswith('en'):
-                    return 'en'
+            if "language" in info and info["language"]:
+                lang = info["language"].lower()
+                if lang.startswith("zh"):
+                    return "zh"
+                elif lang.startswith("en"):
+                    return "en"
                 else:
                     return lang[:2]
 
             # 2. 根据标题和描述中的字符特征判断
-            title = info.get('title', '')
-            description = info.get('description', '')
-            text_sample = (title + ' ' + description)[:500]  # 取前500字符作为样本
+            title = info.get("title", "")
+            description = info.get("description", "")
+            text_sample = (title + " " + description)[:500]  # 取前500字符作为样本
 
             if not text_sample:
                 return None
 
             # 统计中文字符数量
-            chinese_chars = len(re.findall(r'[\\u4e00-\\u9fff]', text_sample))
+            chinese_chars = len(re.findall(r"[\\u4e00-\\u9fff]", text_sample))
             total_chars = len([c for c in text_sample if c.isalnum()])
 
             if total_chars == 0:
@@ -250,17 +276,19 @@ class VideoService:
 
             # 如果中文字符占比超过30%，认为是中文视频
             if chinese_ratio > 0.3:
-                return 'zh'
+                return "zh"
             elif chinese_ratio < 0.1:
-                return 'en'
+                return "en"
             else:
-                return 'mixed'  # 混合语言
+                return "mixed"  # 混合语言
 
         except Exception as e:
             logger.error(f"检测视频语言时出错: {str(e)}")
             return None
 
-    def get_subtitle_strategy(self, language: Optional[str], info: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    def get_subtitle_strategy(
+        self, language: Optional[str], info: Dict[str, Any]
+    ) -> Tuple[bool, List[str]]:
         """确定字幕获取策略
 
         Args:
@@ -272,8 +300,8 @@ class VideoService:
         """
         try:
             # 获取可用字幕语言，确保是字典类型
-            available_subtitles = info.get('subtitles', {})
-            available_auto = info.get('automatic_captions', {})
+            available_subtitles = info.get("subtitles", {})
+            available_auto = info.get("automatic_captions", {})
 
             # 如果不是字典类型，设为空字典
             if not isinstance(available_subtitles, dict):
@@ -284,12 +312,12 @@ class VideoService:
             logger.info(f"可用字幕: {list(available_subtitles.keys())}")
             logger.info(f"可用自动字幕: {list(available_auto.keys())}")
 
-            if language == 'zh':
+            if language == "zh":
                 # 中文视频：优先中文字幕
-                lang_priority = ['zh-CN', 'zh', 'zh-TW', 'zh-Hans', 'zh-Hant']
-            elif language == 'en':
+                lang_priority = ["zh-CN", "zh", "zh-TW", "zh-Hans", "zh-Hant"]
+            elif language == "en":
                 # 英文视频：优先英文字幕
-                lang_priority = ['en', 'en-US', 'en-GB']
+                lang_priority = ["en", "en-US", "en-GB"]
             else:
                 # 其他语言：暂不处理
                 return False, []
@@ -311,24 +339,28 @@ class VideoService:
         """将YouTube URL转换为自定义domain"""
         try:
             # 处理不同格式的YouTube URL
-            if 'youtu.be/' in url:
+            if "youtu.be/" in url:
                 # 短链接格式
-                video_id = url.split('youtu.be/')[-1].split('?')[0]
-            elif 'youtube.com/watch?v=' in url:
+                video_id = url.split("youtu.be/")[-1].split("?")[0]
+            elif "youtube.com/watch?v=" in url:
                 # 标准格式
-                video_id = url.split('v=')[1].split('&')[0]
+                video_id = url.split("v=")[1].split("&")[0]
             else:
                 return url  # 如果不是YouTube URL，直接返回
 
             # 获取自定义域名配置
-            custom_domain = get_config_value('servers.video_domain', 'http://localhost:5000')
+            custom_domain = get_config_value(
+                "servers.video_domain", "http://localhost:5000"
+            )
             return f"{custom_domain}/view/{video_id}"
 
         except Exception as e:
             logger.error(f"转换YouTube URL时出错: {str(e)}")
             return url
 
-    def download_video(self, url: str, output_folder: Optional[str] = None) -> Optional[str]:
+    def download_video(
+        self, url: str, output_folder: Optional[str] = None
+    ) -> Optional[str]:
         """下载视频并提取音频
 
         Args:
@@ -340,7 +372,9 @@ class VideoService:
         """
         try:
             # 创建临时目录
-            temp_dir = output_folder or os.path.join(get_config_value('app.upload_folder', '/app/uploads'), 'temp')
+            temp_dir = output_folder or os.path.join(
+                get_config_value("app.upload_folder", "/app/uploads"), "temp"
+            )
             os.makedirs(temp_dir, exist_ok=True)
             logger.info(f"开始下载视频: {url}")
 
@@ -350,23 +384,28 @@ class VideoService:
                 # 添加率限制防止IP被封
                 time.sleep(2)
                 temp_opts = {
-                    'quiet': True,
-                    'extractor_args': {
-                        'youtube': {
-                            'player_client': ['mweb'],
-                            'po_token': 'auto'
-                        }
-                    }
+                    "quiet": True,
+                    "extractor_args": {
+                        "youtube": {
+                            "player_client": ["default", "mweb"],
+                            "po_token": "auto",
+                        },
+                        "youtubepot-bgutilhttp": {
+                            "base_url": self.bgutil_provider_url,
+                        },
+                    },
                 }
                 with yt_dlp.YoutubeDL(temp_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                     logger.info(f"视频标题: {info.get('title')}")
-                    if info.get('age_limit', 0) > 0:
+                    if info.get("age_limit", 0) > 0:
                         logger.info(f"视频有年龄限制: {info.get('age_limit')}+")
-                    if info.get('is_live', False):
+                    if info.get("is_live", False):
                         logger.info("这是一个直播视频")
-                    if info.get('availability', '') != 'public':
-                        logger.info(f"视频可用性: {info.get('availability', 'unknown')}")
+                    if info.get("availability", "") != "public":
+                        logger.info(
+                            f"视频可用性: {info.get('availability', 'unknown')}"
+                        )
             except Exception as e:
                 logger.info(f"无法获取视频信息，可能需要登录: {str(e)}")
                 info = None
@@ -374,14 +413,14 @@ class VideoService:
             # 记录预期的视频ID（用于后续文件查找）
             expected_video_id = None
             if info:
-                expected_video_id = info.get('id')
+                expected_video_id = info.get("id")
             else:
                 # 尝试从URL中提取视频ID
                 try:
-                    if 'youtu.be/' in url:
-                        expected_video_id = url.split('youtu.be/')[-1].split('?')[0]
-                    elif 'youtube.com/watch?v=' in url:
-                        expected_video_id = url.split('v=')[1].split('&')[0]
+                    if "youtu.be/" in url:
+                        expected_video_id = url.split("youtu.be/")[-1].split("?")[0]
+                    elif "youtube.com/watch?v=" in url:
+                        expected_video_id = url.split("v=")[1].split("&")[0]
                 except:
                     pass
 
@@ -389,39 +428,51 @@ class VideoService:
 
             # 基础下载选项
             base_opts = {
-                'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
-                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'quiet': True,
-                'no_warnings': True,
-                'geo_bypass': True,
-                'no_check_certificate': True,
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['mweb'],
-                        'po_token': 'auto'
-                    }
+                "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "quiet": True,
+                "no_warnings": True,
+                "geo_bypass": True,
+                "no_check_certificate": True,
+                "extractor_args": {
+                    "youtube": {
+                        "player_client": ["default", "mweb"],
+                        "po_token": "auto",
+                    },
+                    "youtubepot-bgutilhttp": {
+                        "base_url": self.bgutil_provider_url,
+                    },
                 },
-                'http_headers': {
-                    'Accept': '*/*',
-                    'Accept-Language': 'en-US,en;q=0.5',
-                    'Origin': 'https://www.youtube.com',
-                    'Referer': 'https://www.youtube.com/'
-                }
+                "http_headers": {
+                    "Accept": "*/*",
+                    "Accept-Language": "en-US,en;q=0.5",
+                    "Origin": "https://www.youtube.com",
+                    "Referer": "https://www.youtube.com/",
+                },
             }
 
             # 尝试获取Firefox配置文件路径
             firefox_profile = self._get_firefox_profile_path()
             if firefox_profile:
                 logger.info(f"使用Firefox配置文件: {firefox_profile}")
-                base_opts['cookiesfrombrowser'] = ('firefox', firefox_profile)
+                base_opts["cookiesfrombrowser"] = ("firefox", firefox_profile)
             else:
                 logger.warning("未找到Firefox配置文件，将尝试不使用cookie下载")
 
             # 按优先级尝试不同的格式
             format_attempts = [
-                {'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio', 'desc': '最佳音频格式'},
-                {'format': 'worst[height<=480]/worst', 'desc': '低质量视频（提取音频）'},
-                {'format': 'best[height<=720]/best', 'desc': '中等质量视频（提取音频）'}
+                {
+                    "format": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio",
+                    "desc": "最佳音频格式",
+                },
+                {
+                    "format": "worst[height<=480]/worst",
+                    "desc": "低质量视频（提取音频）",
+                },
+                {
+                    "format": "best[height<=720]/best",
+                    "desc": "中等质量视频（提取音频）",
+                },
             ]
 
             downloaded_file = None
@@ -431,13 +482,15 @@ class VideoService:
                     # 添加率限制防止IP被封
                     time.sleep(3)
                     opts = base_opts.copy()
-                    opts['format'] = attempt['format']
+                    opts["format"] = attempt["format"]
 
                     with yt_dlp.YoutubeDL(opts) as ydl:
                         ydl.download([url])
 
                     # 改进的文件查找逻辑
-                    downloaded_file = self._find_downloaded_file(temp_dir, expected_video_id)
+                    downloaded_file = self._find_downloaded_file(
+                        temp_dir, expected_video_id
+                    )
 
                     if downloaded_file and os.path.exists(downloaded_file):
                         logger.info(f"下载成功: {downloaded_file}")
@@ -454,7 +507,9 @@ class VideoService:
                     files = os.listdir(temp_dir)
                     logger.error(f"临时目录中的文件: {files}")
                     if files:
-                        logger.error("文件存在但未被正确识别，这可能是文件查找逻辑的问题")
+                        logger.error(
+                            "文件存在但未被正确识别，这可能是文件查找逻辑的问题"
+                        )
                 except Exception as e:
                     logger.error(f"无法列出临时目录文件: {str(e)}")
                 return None
@@ -466,7 +521,9 @@ class VideoService:
             logger.error(f"下载视频时出错: {str(e)}")
             return None
 
-    def _find_downloaded_file(self, temp_dir: str, expected_video_id: Optional[str]) -> Optional[str]:
+    def _find_downloaded_file(
+        self, temp_dir: str, expected_video_id: Optional[str]
+    ) -> Optional[str]:
         """改进的下载文件查找逻辑"""
         try:
             if not os.path.exists(temp_dir):
@@ -532,19 +589,26 @@ class VideoService:
                     audio = AudioSegment.from_file(video_file)
                     current_rate = audio.frame_rate
                     current_channels = audio.channels
-                    logger.info(f"当前音频格式: {current_rate}Hz, {current_channels}声道")
+                    logger.info(
+                        f"当前音频格式: {current_rate}Hz, {current_channels}声道"
+                    )
 
                     if current_rate == 16000 and current_channels == 1:
                         logger.info(f"音频格式已符合要求，无需转换: {audio_file}")
                         return audio_file
                     else:
-                        logger.info(f"需要调整音频格式: {current_rate}Hz -> 16000Hz, {current_channels}声道 -> 1声道")
+                        logger.info(
+                            f"需要调整音频格式: {current_rate}Hz -> 16000Hz, {current_channels}声道 -> 1声道"
+                        )
 
                         # 使用安全的临时文件转换方案
                         import uuid
                         import shutil
 
-                        temp_file = os.path.join(output_dir, f"{base_name}_format_temp_{uuid.uuid4().hex[:8]}.wav")
+                        temp_file = os.path.join(
+                            output_dir,
+                            f"{base_name}_format_temp_{uuid.uuid4().hex[:8]}.wav",
+                        )
                         backup_file = audio_file + f"_backup_{uuid.uuid4().hex[:8]}"
 
                         try:
@@ -553,11 +617,16 @@ class VideoService:
                             logger.info(f"原文件已备份: {backup_file}")
 
                             # 格式转换
-                            converted_audio = audio.set_frame_rate(16000).set_channels(1)
+                            converted_audio = audio.set_frame_rate(16000).set_channels(
+                                1
+                            )
                             converted_audio.export(temp_file, format="wav")
 
                             # 验证转换结果
-                            if not os.path.exists(temp_file) or os.path.getsize(temp_file) == 0:
+                            if (
+                                not os.path.exists(temp_file)
+                                or os.path.getsize(temp_file) == 0
+                            ):
                                 raise Exception("格式转换失败，临时文件无效")
 
                             # 替换原文件
@@ -582,7 +651,9 @@ class VideoService:
                                     shutil.move(backup_file, audio_file)
                                     logger.info("已恢复原文件")
                                 except Exception as restore_error:
-                                    logger.error(f"恢复原文件失败: {str(restore_error)}")
+                                    logger.error(
+                                        f"恢复原文件失败: {str(restore_error)}"
+                                    )
 
                             # 清理临时文件
                             for cleanup_file in [temp_file, backup_file]:
@@ -600,15 +671,25 @@ class VideoService:
 
             # 对于同名文件，跳过FFmpeg直接使用pydub（避免FFmpeg的同名文件问题）
             if video_file == audio_file:
-                logger.info(f"同名文件检测到，跳过FFmpeg直接使用pydub处理: {audio_file}")
+                logger.info(
+                    f"同名文件检测到，跳过FFmpeg直接使用pydub处理: {audio_file}"
+                )
             else:
                 # 使用ffmpeg转换（仅对不同名文件）
                 try:
                     cmd = [
-                        'ffmpeg', '-i', video_file, 
-                        '-vn', '-acodec', 'pcm_s16le', 
-                        '-ar', '16000', '-ac', '1', 
-                        audio_file, '-y'
+                        "ffmpeg",
+                        "-i",
+                        video_file,
+                        "-vn",
+                        "-acodec",
+                        "pcm_s16le",
+                        "-ar",
+                        "16000",
+                        "-ac",
+                        "1",
+                        audio_file,
+                        "-y",
                     ]
                     result = subprocess.run(cmd, capture_output=True, text=True)
                     if result.returncode == 0:
@@ -668,7 +749,9 @@ class VideoService:
                             if temp_size == 0:
                                 raise Exception(f"临时文件为空: {temp_audio_file}")
 
-                            logger.info(f"临时文件创建成功: {temp_audio_file} ({temp_size} bytes)")
+                            logger.info(
+                                f"临时文件创建成功: {temp_audio_file} ({temp_size} bytes)"
+                            )
 
                             # 步骤4: 多重替换策略
                             replacement_success = False
@@ -679,7 +762,9 @@ class VideoService:
                                     os.remove(audio_file)
                                 os.rename(temp_audio_file, audio_file)
                                 replacement_success = True
-                                logger.info(f"pydub转换成功(同名文件,os.rename): {audio_file}")
+                                logger.info(
+                                    f"pydub转换成功(同名文件,os.rename): {audio_file}"
+                                )
                             except Exception as rename_error:
                                 logger.warning(f"os.rename失败: {str(rename_error)}")
 
@@ -689,9 +774,13 @@ class VideoService:
                                         os.remove(audio_file)
                                     shutil.move(temp_audio_file, audio_file)
                                     replacement_success = True
-                                    logger.info(f"pydub转换成功(同名文件,shutil.move): {audio_file}")
+                                    logger.info(
+                                        f"pydub转换成功(同名文件,shutil.move): {audio_file}"
+                                    )
                                 except Exception as move_error:
-                                    logger.warning(f"shutil.move失败: {str(move_error)}")
+                                    logger.warning(
+                                        f"shutil.move失败: {str(move_error)}"
+                                    )
 
                                     # 策略3: 复制+删除
                                     try:
@@ -700,9 +789,13 @@ class VideoService:
                                         shutil.copy2(temp_audio_file, audio_file)
                                         os.remove(temp_audio_file)
                                         replacement_success = True
-                                        logger.info(f"pydub转换成功(同名文件,copy+delete): {audio_file}")
+                                        logger.info(
+                                            f"pydub转换成功(同名文件,copy+delete): {audio_file}"
+                                        )
                                     except Exception as copy_error:
-                                        logger.error(f"所有替换策略均失败: {str(copy_error)}")
+                                        logger.error(
+                                            f"所有替换策略均失败: {str(copy_error)}"
+                                        )
 
                             if not replacement_success:
                                 raise Exception("所有文件替换策略均失败")
@@ -715,7 +808,9 @@ class VideoService:
                             if final_size == 0:
                                 raise Exception(f"最终音频文件为空: {audio_file}")
 
-                            logger.info(f"最终文件验证成功: {audio_file} ({final_size} bytes)")
+                            logger.info(
+                                f"最终文件验证成功: {audio_file} ({final_size} bytes)"
+                            )
                             success = True
 
                         except Exception as temp_error:
@@ -729,7 +824,9 @@ class VideoService:
                                     shutil.move(backup_file, audio_file)
                                     logger.info(f"已恢复备份文件: {audio_file}")
                                 except Exception as restore_error:
-                                    logger.error(f"恢复备份文件失败: {str(restore_error)}")
+                                    logger.error(
+                                        f"恢复备份文件失败: {str(restore_error)}"
+                                    )
 
                             raise temp_error
 
@@ -741,7 +838,9 @@ class VideoService:
                                         os.remove(cleanup_file)
                                         logger.debug(f"清理临时文件: {cleanup_file}")
                                     except Exception as cleanup_error:
-                                        logger.warning(f"清理文件失败 {cleanup_file}: {str(cleanup_error)}")
+                                        logger.warning(
+                                            f"清理文件失败 {cleanup_file}: {str(cleanup_error)}"
+                                        )
 
                             if success:
                                 logger.info(f"同名文件转换完成: {audio_file}")
@@ -760,6 +859,7 @@ class VideoService:
                     # 格式已经正确，如果是不同文件则复制
                     if video_file != audio_file:
                         import shutil
+
                         shutil.copy2(video_file, audio_file)
                         os.remove(video_file)
                         logger.info(f"音频格式正确，文件复制完成: {audio_file}")
@@ -782,33 +882,47 @@ class VideoService:
             import configparser
 
             # 检查配置文件中是否有指定的cookie路径
-            cookie_path = get_config_value('cookies')
+            cookie_path = get_config_value("cookies")
             if cookie_path and os.path.exists(cookie_path):
                 logger.info(f"使用配置的cookie路径: {cookie_path}")
                 return cookie_path
 
             # 在Docker容器中，Firefox配置文件路径
-            firefox_config = '/root/.mozilla/firefox/profiles.ini'
+            firefox_config = "/root/.mozilla/firefox/profiles.ini"
             if os.path.exists(firefox_config):
                 config = configparser.ConfigParser()
                 config.read(firefox_config)
 
                 # 优先查找default-release配置文件
                 for section in config.sections():
-                    if section.startswith('Profile'):
-                        if config.has_option(section, 'Path'):
-                            profile_path = config.get(section, 'Path')
+                    if section.startswith("Profile"):
+                        if config.has_option(section, "Path"):
+                            profile_path = config.get(section, "Path")
                             # 检查是否为相对路径
-                            if config.has_option(section, 'IsRelative') and config.getint(section, 'IsRelative', fallback=1) == 1:
-                                profile_path = os.path.join('/root/.mozilla/firefox', profile_path)
+                            if (
+                                config.has_option(section, "IsRelative")
+                                and config.getint(section, "IsRelative", fallback=1)
+                                == 1
+                            ):
+                                profile_path = os.path.join(
+                                    "/root/.mozilla/firefox", profile_path
+                                )
 
                             # 检查是否为默认配置文件
-                            if config.has_option(section, 'Name') and config.get(section, 'Name') == 'default-release':
-                                logger.info(f"使用default-release配置文件: {profile_path}")
+                            if (
+                                config.has_option(section, "Name")
+                                and config.get(section, "Name") == "default-release"
+                            ):
+                                logger.info(
+                                    f"使用default-release配置文件: {profile_path}"
+                                )
                                 return profile_path
 
                             # 如果标记为默认配置文件
-                            if config.has_option(section, 'Default') and config.getint(section, 'Default', fallback=0) == 1:
+                            if (
+                                config.has_option(section, "Default")
+                                and config.getint(section, "Default", fallback=0) == 1
+                            ):
                                 logger.info(f"使用默认配置文件: {profile_path}")
                                 return profile_path
 
@@ -818,7 +932,9 @@ class VideoService:
             logger.error(f"获取Firefox配置文件路径时出错: {str(e)}")
             return None
 
-    def download_subtitles(self, url: str, platform: str, lang_priority: List[str]) -> Optional[str]:
+    def download_subtitles(
+        self, url: str, platform: str, lang_priority: List[str]
+    ) -> Optional[str]:
         """下载字幕文件
 
         Args:
@@ -832,11 +948,11 @@ class VideoService:
         try:
             logger.info(f"开始下载{platform}字幕: {url}")
 
-            if platform == 'youtube':
+            if platform == "youtube":
                 return self.download_youtube_subtitles(url, lang_priority)
-            elif platform == 'bilibili':
+            elif platform == "bilibili":
                 return self.download_bilibili_subtitles(url, lang_priority)
-            elif platform == 'acfun':
+            elif platform == "acfun":
                 return self.download_acfun_subtitles(url, lang_priority)
             else:
                 logger.error(f"不支持的平台字幕下载: {platform}")
@@ -846,7 +962,9 @@ class VideoService:
             logger.error(f"下载{platform}字幕失败: {str(e)}")
             return None
 
-    def download_youtube_subtitles(self, url: str, lang_priority: List[str]) -> Optional[str]:
+    def download_youtube_subtitles(
+        self, url: str, lang_priority: List[str]
+    ) -> Optional[str]:
         """下载YouTube字幕"""
         try:
             # 添加率限制防止IP被封
@@ -854,8 +972,8 @@ class VideoService:
             with yt_dlp.YoutubeDL(self.yt_dlp_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
 
-                available_subtitles = info.get('subtitles', {})
-                available_auto = info.get('automatic_captions', {})
+                available_subtitles = info.get("subtitles", {})
+                available_auto = info.get("automatic_captions", {})
 
                 # 按优先级查找字幕
                 for lang in lang_priority:
@@ -876,13 +994,15 @@ class VideoService:
             logger.error(f"下载YouTube字幕失败: {str(e)}")
             return None
 
-    def download_bilibili_subtitles(self, url: str, lang_priority: List[str]) -> Optional[str]:
+    def download_bilibili_subtitles(
+        self, url: str, lang_priority: List[str]
+    ) -> Optional[str]:
         """下载Bilibili字幕"""
         try:
             with yt_dlp.YoutubeDL(self.yt_dlp_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
 
-                available_subtitles = info.get('subtitles', {})
+                available_subtitles = info.get("subtitles", {})
 
                 # Bilibili通常只有中文字幕
                 for lang in lang_priority:
@@ -894,7 +1014,9 @@ class VideoService:
                 if available_subtitles:
                     first_lang = list(available_subtitles.keys())[0]
                     logger.info(f"使用第一个可用字幕: {first_lang}")
-                    return self._extract_subtitle_content(available_subtitles[first_lang])
+                    return self._extract_subtitle_content(
+                        available_subtitles[first_lang]
+                    )
 
                 logger.warning("未找到Bilibili字幕")
                 return None
@@ -903,13 +1025,15 @@ class VideoService:
             logger.error(f"下载Bilibili字幕失败: {str(e)}")
             return None
 
-    def download_acfun_subtitles(self, url: str, lang_priority: List[str]) -> Optional[str]:
+    def download_acfun_subtitles(
+        self, url: str, lang_priority: List[str]
+    ) -> Optional[str]:
         """下载AcFun字幕"""
         try:
             with yt_dlp.YoutubeDL(self.yt_dlp_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
 
-                available_subtitles = info.get('subtitles', {})
+                available_subtitles = info.get("subtitles", {})
 
                 # AcFun通常只有中文字幕
                 for lang in lang_priority:
@@ -921,7 +1045,9 @@ class VideoService:
                 if available_subtitles:
                     first_lang = list(available_subtitles.keys())[0]
                     logger.info(f"使用第一个可用字幕: {first_lang}")
-                    return self._extract_subtitle_content(available_subtitles[first_lang])
+                    return self._extract_subtitle_content(
+                        available_subtitles[first_lang]
+                    )
 
                 logger.warning("未找到AcFun字幕")
                 return None
@@ -930,16 +1056,18 @@ class VideoService:
             logger.error(f"下载AcFun字幕失败: {str(e)}")
             return None
 
-    def _extract_subtitle_content(self, subtitle_formats: List[Dict[str, Any]]) -> Optional[str]:
+    def _extract_subtitle_content(
+        self, subtitle_formats: List[Dict[str, Any]]
+    ) -> Optional[str]:
         """从字幕格式列表中提取内容"""
         try:
             # 按优先级尝试不同格式
-            format_priority = ['json3', 'srv3', 'srv2', 'srv1', 'ttml', 'vtt', 'srt']
+            format_priority = ["json3", "srv3", "srv2", "srv1", "ttml", "vtt", "srt"]
 
             for format_name in format_priority:
                 for subtitle_format in subtitle_formats:
-                    if subtitle_format.get('ext') == format_name:
-                        subtitle_url = subtitle_format.get('url')
+                    if subtitle_format.get("ext") == format_name:
+                        subtitle_url = subtitle_format.get("url")
                         if subtitle_url:
                             logger.info(f"下载{format_name}格式字幕: {subtitle_url}")
                             response = requests.get(subtitle_url, timeout=30)
@@ -949,7 +1077,7 @@ class VideoService:
             # 如果没有找到优先格式，使用第一个可用的
             if subtitle_formats:
                 first_format = subtitle_formats[0]
-                subtitle_url = first_format.get('url')
+                subtitle_url = first_format.get("url")
                 if subtitle_url:
                     logger.info(f"使用第一个可用格式: {first_format.get('ext')}")
                     response = requests.get(subtitle_url, timeout=30)
@@ -963,7 +1091,9 @@ class VideoService:
             logger.error(f"提取字幕内容失败: {str(e)}")
             return None
 
-    def process_video_for_transcription(self, url: str, platform: str) -> Optional[Dict[str, Any]]:
+    def process_video_for_transcription(
+        self, url: str, platform: str
+    ) -> Optional[Dict[str, Any]]:
         """处理视频用于转录
 
         Args:
@@ -984,7 +1114,9 @@ class VideoService:
 
             # 2. 检测语言和字幕策略
             language = self.get_video_language(video_info)
-            should_download_subs, lang_priority = self.get_subtitle_strategy(language, video_info)
+            should_download_subs, lang_priority = self.get_subtitle_strategy(
+                language, video_info
+            )
 
             # 3. 尝试下载字幕
             subtitle_content = None
@@ -998,11 +1130,11 @@ class VideoService:
                 audio_file = self.download_video(url)
 
             return {
-                'video_info': video_info,
-                'language': language,
-                'subtitle_content': subtitle_content,
-                'audio_file': audio_file,
-                'needs_transcription': subtitle_content is None
+                "video_info": video_info,
+                "language": language,
+                "subtitle_content": subtitle_content,
+                "audio_file": audio_file,
+                "needs_transcription": subtitle_content is None,
             }
 
         except Exception as e:

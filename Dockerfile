@@ -14,15 +14,15 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources && \
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        ffmpeg \
-        curl \
-        iputils-ping \
-        net-tools \
-        firefox-esr \
-        x11vnc \
-        xvfb \
-        openbox \
-        supervisor \
+    ffmpeg \
+    curl \
+    iputils-ping \
+    net-tools \
+    firefox-esr \
+    x11vnc \
+    xvfb \
+    openbox \
+    supervisor \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -30,9 +30,6 @@ WORKDIR /app
 # 复制并安装Python依赖
 COPY requirements.txt .
 RUN pip install -r requirements.txt
-
-# 安装 bgutil-ytdlp-pot-provider 插件用于自动处理 PO Token
-RUN pip install -U bgutil-ytdlp-pot-provider
 
 # 复制应用文件 - 新模块化架构
 COPY app/ ./app/
