@@ -44,6 +44,8 @@ services:
       # 从配置文件读取所有配置
       - CONFIG_PATH=/app/config/config.yml
       - BGUTIL_PROVIDER_URL=${BGUTIL_PROVIDER_URL:-http://bgutil-provider:4416}
+      - YT_DLP_EXTRACTOR_ARGS=youtubepot-bgutilhttp:base_url=http://bgutil-provider:4416
+
     networks:
       - srt-network
     extra_hosts:
@@ -87,7 +89,7 @@ services:
       - MODELSCOPE_CACHE=/app/models
       - HF_HOME=/app/models
       - TORCH_HOME=/app/models
-      - FUNASR_MODEL=paraformer-zh
+      - FUNASR_MODEL=paraformer-zh-vad-punc
       - FUNASR_VAD_MODEL=fsmn-vad
       - FUNASR_PUNC_MODEL=ct-punc
       - FUNASR_SPK_MODEL=cam++

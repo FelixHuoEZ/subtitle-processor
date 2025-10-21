@@ -24,6 +24,8 @@ class TranscriptionService:
         self.openai_base_url = get_config_value('tokens.openai.base_url', 'https://api.openai.com/v1')
         self.hotword_service = HotwordService()
         self.default_hotwords = self.hotword_service.get_default_hotwords()
+        self.enable_auto_hotwords = os.getenv("ENABLE_AUTO_HOTWORDS", "false").lower() == "true"
+        self.disable_generated_hotwords = os.getenv("DISABLE_AUTO_HOTWORDS", "true").lower() == "true"
     
     
     def _load_transcribe_servers(self) -> List[Dict[str, Any]]:
@@ -133,7 +135,7 @@ class TranscriptionService:
                 # 如果用户指定了热词，优先使用
                 final_hotwords = hotwords
                 logger.info(f"使用用户指定热词: {final_hotwords}")
-            else:
+            elif self.enable_auto_hotwords and not self.disable_generated_hotwords:
                 # 基于视频信息智能生成热词
                 title = video_info.get('title') if video_info else None
                 channel_name = video_info.get('uploader') if video_info else None
@@ -152,6 +154,12 @@ class TranscriptionService:
                 
                 logger.info(f"智能生成热词 ({len(generated_hotwords)} 个): {generated_hotwords}")
                 logger.info(f"最终使用热词 ({len(final_hotwords)} 个): {final_hotwords}")
+            else:
+                final_hotwords = []
+                if self.enable_auto_hotwords and self.disable_generated_hotwords:
+                    logger.info("自动热词匹配已暂时禁用，仅使用用户提供的热词")
+                else:
+                    logger.info("已禁用自动热词生成，不追加额外热词")
             
             # 【关键日志】记录最终使用的热词
             logger.warning(f"🔥 TranscriptionService最终使用热词 ({len(final_hotwords)}个): {final_hotwords}")
@@ -257,31 +265,57 @@ class TranscriptionService:
             
             # 合并转录结果
             merged_text = ""
-            all_timestamps = []
+            merged_sentence_info = []
             
-            current_offset = 0
+            current_offset = 0.0
             for result in all_results:
                 text = result.get('text', '')
                 timestamps = result.get('timestamp', [])
+                sentence_info = result.get('sentence_info', [])
                 
                 # 添加文本
                 if merged_text and not merged_text.endswith((' ', '\n')):
                     merged_text += " "
                 merged_text += text
                 
-                # 调整时间戳偏移
-                if timestamps:
-                    adjusted_timestamps = []
+                # 优先使用 sentence_info
+                if not sentence_info and isinstance(timestamps, list):
+                    if timestamps and isinstance(timestamps[0], dict):
+                        sentence_info = timestamps
+
+                if sentence_info:
+                    for sentence in sentence_info:
+                        start = sentence.get('start')
+                        end = sentence.get('end')
+                        sent_text = sentence.get('text', '')
+                        if start is None or end is None:
+                            continue
+                        adjusted_sentence = {
+                            'text': sent_text,
+                            'start': start + current_offset,
+                            'end': end + current_offset,
+                        }
+                        word_ts = []
+                        for ts in sentence.get('word_timestamps', []):
+                            if isinstance(ts, (list, tuple)) and len(ts) >= 2:
+                                word_ts.append([ts[0] + current_offset, ts[1] + current_offset])
+                        if word_ts:
+                            adjusted_sentence['word_timestamps'] = word_ts
+                        merged_sentence_info.append(adjusted_sentence)
+                elif isinstance(timestamps, list):
+                    # 兼容旧格式 [start, end, text]
                     for ts in timestamps:
                         if isinstance(ts, list) and len(ts) >= 3:
-                            # [start_time, end_time, text]
-                            adjusted_ts = [ts[0] + current_offset, ts[1] + current_offset, ts[2]]
-                            adjusted_timestamps.append(adjusted_ts)
-                    all_timestamps.extend(adjusted_timestamps)
+                            adjusted_sentence = {
+                                'text': ts[2],
+                                'start': ts[0] + current_offset,
+                                'end': ts[1] + current_offset,
+                            }
+                            merged_sentence_info.append(adjusted_sentence)
                 
                 # 更新偏移量
                 if 'audio_info' in result and 'duration_seconds' in result['audio_info']:
-                    current_offset += result['audio_info']['duration_seconds']
+                    current_offset += float(result['audio_info']['duration_seconds'] or 0)
             
             # 构造合并后的结果
             merged_result = {
@@ -291,7 +325,8 @@ class TranscriptionService:
                     'file_size': sum(os.path.getsize(seg) for seg in audio_segments if os.path.exists(seg)),
                     'segments_count': len(audio_segments)
                 },
-                'timestamp': all_timestamps,
+                'timestamp': merged_sentence_info,
+                'sentence_info': merged_sentence_info,
                 'source': 'funasr_segments'
             }
             
@@ -372,6 +407,7 @@ class TranscriptionService:
             # 解析文本内容
             text_content = ""
             timestamp_info = None
+            sentence_info = result.get('sentence_info', [])
             
             # 首先检查是否直接有text字段（新格式）
             if 'text' in result:
@@ -399,11 +435,23 @@ class TranscriptionService:
             else:
                 logger.warning(f"未找到text或result字段，可用字段: {list(result.keys())}")
             
+            if text_content is None:
+                text_content = ''
+            if not timestamp_info:
+                timestamp_info = []
+            if sentence_info:
+                timestamp_info = sentence_info
+                if not text_content:
+                    text_content = " ".join(
+                        seg.get('text', '') for seg in sentence_info if isinstance(seg, dict)
+                    ).strip()
+
             # 构造标准化结果
             parsed_result = {
                 'text': text_content,
                 'audio_info': audio_info,
                 'timestamp': timestamp_info,
+                'sentence_info': sentence_info,
                 'source': 'funasr'
             }
             

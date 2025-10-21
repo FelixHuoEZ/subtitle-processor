@@ -9,6 +9,7 @@ import yt_dlp
 from yt_dlp.utils import DownloadError
 import time
 from datetime import datetime
+from urllib.parse import urlparse
 from typing import Dict, Any, Optional, Tuple, List
 from ..config.config_manager import get_config_value
 from ..utils.file_utils import sanitize_filename
@@ -22,10 +23,22 @@ class VideoService:
     def __init__(self):
         """初始化视频服务"""
         self.supported_platforms = ["youtube", "bilibili", "acfun"]
-        self.bgutil_provider_url = os.getenv(
-            "BGUTIL_PROVIDER_URL", "http://bgutil-provider:4416"
+        self.bgutil_provider_url = self._normalize_bgutil_url(
+            os.getenv("BGUTIL_PROVIDER_URL", "http://bgutil-provider:4416")
         )
         self._setup_yt_dlp_options()
+
+    @staticmethod
+    def _normalize_bgutil_url(url: Optional[str]) -> str:
+        """确保bgutil provider的URL合法并带有协议"""
+        default_url = "http://bgutil-provider:4416"
+        if not url:
+            return default_url
+        parsed = urlparse(url if "://" in url else f"http://{url.strip()}")
+        if not parsed.scheme or not parsed.netloc:
+            return default_url
+        return parsed.geturl().rstrip("/") or default_url
+
 
     def _setup_yt_dlp_options(self):
         """设置yt-dlp默认选项"""
@@ -55,13 +68,14 @@ class VideoService:
             "extractor_args": {
                 "youtube": {
                     "player_client": ["default", "mweb"],
-                    "po_token": "auto",
+                    "fetch_pot": ["always"],
                 },
                 "youtubepot-bgutilhttp": {
-                    "base_url": self.bgutil_provider_url,
+                    "base_url": [self.bgutil_provider_url],
                 },
             },
         }
+        logger.info("yt-dlp 将使用 bgutil provider: %s", self.bgutil_provider_url)
         self.yt_dlp_opts = base_opts
 
     def _extract_youtube_info(self, url: str) -> Optional[Dict[str, Any]]:
@@ -388,10 +402,10 @@ class VideoService:
                     "extractor_args": {
                         "youtube": {
                             "player_client": ["default", "mweb"],
-                            "po_token": "auto",
+                            "fetch_pot": ["always"],
                         },
                         "youtubepot-bgutilhttp": {
-                            "base_url": self.bgutil_provider_url,
+                            "base_url": [self.bgutil_provider_url],
                         },
                     },
                 }
@@ -437,10 +451,10 @@ class VideoService:
                 "extractor_args": {
                     "youtube": {
                         "player_client": ["default", "mweb"],
-                        "po_token": "auto",
+                        "fetch_pot": ["always"],
                     },
                     "youtubepot-bgutilhttp": {
-                        "base_url": self.bgutil_provider_url,
+                        "base_url": [self.bgutil_provider_url],
                     },
                 },
                 "http_headers": {
@@ -539,6 +553,14 @@ class VideoService:
 
             # 策略1: 如果有预期的视频ID，优先匹配
             if expected_video_id:
+                # 先查找精确匹配（不带_part_的文件）
+                for file in files:
+                    base_name, _ = os.path.splitext(file)
+                    if base_name == expected_video_id:
+                        file_path = os.path.join(temp_dir, file)
+                        logger.info(f"通过精确匹配到文件: {file_path}")
+                        return file_path
+
                 for file in files:
                     if file.startswith(expected_video_id):
                         file_path = os.path.join(temp_dir, file)

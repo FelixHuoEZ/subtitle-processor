@@ -54,6 +54,8 @@ class SubtitleService:
                     duration = result['audio_info']['duration_seconds']
                     logger.debug(f"获取到音频时长: {duration}秒")
                 
+                sentence_info_data = result.get('sentence_info')
+
                 # 获取文本内容
                 if 'text' in result:
                     logger.info(f"找到text字段，类型: {type(result['text'])}")
@@ -81,6 +83,10 @@ class SubtitleService:
                         except json.JSONDecodeError:
                             logger.warning("时间戳解析失败，将不使用时间戳")
                             timestamps = None
+
+                if sentence_info_data:
+                    logger.info("检测到句级时间戳信息，优先使用 sentence_info 生成字幕")
+                    return self._generate_srt_from_sentence_info(sentence_info_data)
             
             # 如果没有文本内容，无法生成字幕
             if not text_content:
@@ -119,6 +125,10 @@ class SubtitleService:
             str: SRT格式字幕
         """
         try:
+            # 如果时间戳为句级结构则直接生成
+            if timestamps and isinstance(timestamps, list) and len(timestamps) > 0 and isinstance(timestamps[0], dict):
+                return self._generate_srt_from_sentence_info(timestamps)
+
             # 分割成句子
             sentences = split_into_sentences(text_content)
             if not sentences:
@@ -151,6 +161,53 @@ class SubtitleService:
             logger.error(f"生成SRT格式字幕时出错: {str(e)}")
             return None
     
+    def _generate_srt_from_sentence_info(self, sentence_info: List[Dict[str, Any]]):
+        """基于句级时间戳生成SRT"""
+        try:
+            subtitles = []
+            for index, sentence in enumerate(sentence_info, start=1):
+                text = (sentence.get('text') or '').strip()
+                start = sentence.get('start')
+                end = sentence.get('end')
+
+                if not text:
+                    continue
+                if start is None or end is None:
+                    continue
+
+                start_sec = start / 1000.0 if isinstance(start, (int, float)) and start > 1000 else float(start)
+                end_sec = end / 1000.0 if isinstance(end, (int, float)) and end > 1000 else float(end)
+
+                if end_sec <= start_sec:
+                    end_sec = start_sec + 0.5  # 避免出现负时长
+
+                subtitles.append({
+                    'index': index,
+                    'start': start_sec,
+                    'end': end_sec,
+                    'text': text
+                })
+
+            if not subtitles:
+                logger.error("sentence_info 中未找到有效的字幕段落")
+                return None
+
+            srt_lines = []
+            for subtitle in subtitles:
+                srt_lines.extend([
+                    str(subtitle['index']),
+                    f"{format_time(subtitle['start'])} --> {format_time(subtitle['end'])}",
+                    subtitle['text'],
+                    ""
+                ])
+
+            srt_content = "\n".join(srt_lines)
+            logger.info(f"成功使用 sentence_info 生成SRT，共 {len(subtitles)} 条")
+            return srt_content
+        except Exception as e:
+            logger.error(f"基于 sentence_info 生成SRT时出错: {str(e)}")
+            return None
+
     def parse_srt_content(self, srt_content):
         """解析SRT格式字幕内容
         

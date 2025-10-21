@@ -18,6 +18,8 @@ import difflib
 import re
 import errno
 
+ENABLE_HOTWORD_POST_PROCESS = os.getenv("ENABLE_HOTWORD_POST_PROCESS", "false").lower() == "true"
+
 class HotwordPostProcessor:
     """热词后处理器 - 在转录完成后进行热词匹配和替换"""
     
@@ -423,6 +425,7 @@ def get_model_id(model_type, model_name):
         "main": {
             "paraformer-zh": "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
             "paraformer-zh-streaming": "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+            "paraformer-zh-vad-punc": "iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
             "paraformer-en": "damo/speech_paraformer-large_asr_nat-en-16k-common-vocab10020",
             "conformer-en": "damo/speech_conformer_asr_nat-en-16k-common-vocab10020",
             "SenseVoiceSmall": "damo/speech_SenseVoiceSmall_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
@@ -443,8 +446,8 @@ def get_model_id(model_type, model_name):
         }
     }
     
-    # 检查是否是完整的模型ID（包含damo/前缀）
-    if model_name.startswith("damo/"):
+    # 检查是否是完整的模型ID（包含仓库前缀）
+    if "/" in model_name:
         return model_name
     
     # 检查是否在映射表中
@@ -504,7 +507,7 @@ def ensure_models():
     os.environ['TORCH_HOME'] = model_dir
 
     # 获取所有模型名称 - 优先使用支持第三代热词的模型
-    model_name = os.getenv("FUNASR_MODEL", "SenseVoiceSmall")  # 使用更新的模型
+    model_name = os.getenv("FUNASR_MODEL", "paraformer-zh-vad-punc")  # 默认使用支持时间戳的模型
     vad_model = os.getenv("FUNASR_VAD_MODEL", "fsmn-vad")
     punc_model = os.getenv("FUNASR_PUNC_MODEL", "ct-punc")
     spk_model = os.getenv("FUNASR_SPK_MODEL", "cam++")
@@ -819,48 +822,121 @@ def normalize_audio(audio_data):
         logger.error(f"音频标准化失败: {str(e)}")
         raise
 
+def _convert_timestamp_value(value):
+    """FunASR时间戳转换为秒"""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if value > 1000:
+            return value / 1000.0
+        return float(value)
+    return None
+
+
 def process_recognition_result(result):
-    """处理识别结果，支持字符串和列表格式"""
+    """处理识别结果，返回统一结构"""
     try:
         logger.debug(f"处理识别结果: {type(result)} - {result}")
-        
+
+        combined_text_parts = []
+        sentence_info = []
+        raw_segments = []
+
         if isinstance(result, str):
-            return result.strip()
+            combined_text_parts.append(result.strip())
         elif isinstance(result, list):
             if len(result) == 0:
                 logger.warning("识别结果列表为空")
-                return ""
-            
-            # 如果是列表，可能包含多个识别结果或时间戳信息
-            text_parts = []
             for i, item in enumerate(result):
                 try:
                     if isinstance(item, dict):
-                        # 如果是字典格式，提取文本部分
-                        text = item.get('text', '') or item.get('result', '') or item.get('sentence', '')
+                        text = (item.get('text') or item.get('result') or item.get('sentence') or '').strip()
                         if text:
-                            text_parts.append(text)
+                            combined_text_parts.append(text)
+
+                        start = _convert_timestamp_value(item.get('start'))
+                        end = _convert_timestamp_value(item.get('end'))
+
+                        token_timestamps = item.get('timestamp', [])
+                        if token_timestamps:
+                            first_ts = token_timestamps[0]
+                            last_ts = token_timestamps[-1]
+                            if start is None and len(first_ts) >= 1:
+                                start = _convert_timestamp_value(first_ts[0])
+                            if end is None and len(last_ts) >= 2:
+                                end = _convert_timestamp_value(last_ts[1])
+
+                        if start is not None and end is not None and text:
+                            sentence_info.append({
+                                'text': text,
+                                'start': start,
+                                'end': end,
+                                'word_timestamps': [
+                                    [
+                                        _convert_timestamp_value(ts[0]),
+                                        _convert_timestamp_value(ts[1])
+                                    ]
+                                    for ts in token_timestamps
+                                    if isinstance(ts, (list, tuple)) and len(ts) >= 2
+                                ]
+                            })
+                        raw_segments.append(item)
                     elif isinstance(item, str):
-                        text_parts.append(item)
+                        combined_text_parts.append(item.strip())
                     else:
                         logger.debug(f"列表项 {i}: 未知格式 {type(item)} - {item}")
                 except Exception as e:
                     logger.warning(f"处理列表项 {i} 时出错: {str(e)}")
                     continue
-                    
-            return ' '.join(filter(None, text_parts)).strip()
         elif isinstance(result, dict):
-            # 处理字典格式的结果
-            text = result.get('text', '') or result.get('result', '') or result.get('sentence', '')
-            return text.strip() if text else ""
+            text = (result.get('text') or result.get('result') or result.get('sentence') or '').strip()
+            if text:
+                combined_text_parts.append(text)
+
+            sentence_list = result.get('sentence_info')
+            if isinstance(sentence_list, list):
+                for sentence in sentence_list:
+                    try:
+                        sent_text = (sentence.get('text') or '').strip()
+                        start = _convert_timestamp_value(sentence.get('start'))
+                        end = _convert_timestamp_value(sentence.get('end'))
+                        if sent_text and start is not None and end is not None:
+                            sentence_info.append({
+                                'text': sent_text,
+                                'start': start,
+                                'end': end,
+                                'word_timestamps': [
+                                    [
+                                        _convert_timestamp_value(ts[0]),
+                                        _convert_timestamp_value(ts[1])
+                                    ]
+                                    for ts in sentence.get('timestamp', [])
+                                    if isinstance(ts, (list, tuple)) and len(ts) >= 2
+                                ]
+                            })
+                    except Exception as e:
+                        logger.warning(f"处理sentence_info时出错: {str(e)}")
+            raw_segments.append(result)
         elif result is None:
-            return ""
+            combined_text_parts.append("")
         else:
             logger.warning(f"未知的识别结果格式: {type(result)} - {result}")
-            return str(result) if result else ""
+            if result:
+                combined_text_parts.append(str(result))
+
+        combined_text = " ".join(filter(None, combined_text_parts)).strip()
+        return {
+            'text': combined_text,
+            'sentence_info': sentence_info,
+            'raw_segments': raw_segments
+        }
     except Exception as e:
         logger.error(f"处理识别结果时出错: {str(e)}")
-        return ""
+        return {
+            'text': "",
+            'sentence_info': [],
+            'raw_segments': []
+        }
 
 def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000, hotwords=None):
     """分块处理音频数据
@@ -899,15 +975,15 @@ def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000, hotwords=N
                             input=audio_data
                         )
                     processed_result = process_recognition_result(result)
+                    chunk_text = processed_result.get('text', '')
+
+                    if ENABLE_HOTWORD_POST_PROCESS and chunk_text and hotwords:
+                        hotword_result = hotword_processor.process_text_with_hotwords(chunk_text, hotwords)
+                        chunk_text = hotword_result['processed_text']
+                        logger.warning(f"🔥 短音频额外后处理结果: '{chunk_text}' (修正{hotword_result['corrections']}处)")
                     
-                    # 可选的额外热词后处理（作为原生hotword的补充）
-                    if processed_result and hotwords:
-                        hotword_result = hotword_processor.process_text_with_hotwords(processed_result, hotwords)
-                        processed_result = hotword_result['processed_text']
-                        logger.warning(f"🔥 短音频额外后处理结果: '{processed_result}' (修正{hotword_result['corrections']}处)")
-                    
-                    if processed_result:
-                        results.append(processed_result)
+                    if chunk_text:
+                        results.append(chunk_text)
                     update_progress("processing", 1, 1, "短音频处理完成")
             except Exception as e:
                 print(f"处理短音频时出错: {str(e)}")
@@ -926,15 +1002,20 @@ def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000, hotwords=N
                 update_progress("processing", chunk_num, total_chunks, f"正在处理第 {chunk_num}/{total_chunks} 个音频块...")
                 
                 # 检查音频块的有效性
-                chunk_max = np.max(np.abs(chunk))
-                chunk_energy = np.mean(chunk**2)
-                
-                # print(f"\n处理音频块 {chunk_num}/{total_chunks}")
-                # print(f"块信息: 最大振幅={chunk_max:.6f}, 能量={chunk_energy:.6f}")
-                
-                # 使用能量和振幅双重判断是否为静音
-                if chunk_max < 1e-3 or chunk_energy < 1e-6:
-                    # print("跳过静音块")
+                chunk_max = float(np.max(np.abs(chunk))) if chunk.size else 0.0
+                chunk_energy = float(np.mean(chunk**2)) if chunk.size else 0.0
+
+                # 更保守地判断静音，避免将低音量语音当作噪声跳过
+                silence_peak_threshold = 1e-4
+                silence_energy_threshold = 1e-8
+                if chunk_max < silence_peak_threshold and chunk_energy < silence_energy_threshold:
+                    logger.debug(
+                        "跳过静音块 %s/%s (峰值=%.6e, 能量=%.6e)",
+                        chunk_num,
+                        total_chunks,
+                        chunk_max,
+                        chunk_energy,
+                    )
                     continue
                 
                 try:
@@ -954,15 +1035,15 @@ def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000, hotwords=N
                                 input=chunk
                             )
                         processed_result = process_recognition_result(result)
+                        chunk_text = processed_result.get('text', '')
+
+                        if ENABLE_HOTWORD_POST_PROCESS and chunk_text and hotwords:
+                            hotword_result = hotword_processor.process_text_with_hotwords(chunk_text, hotwords)
+                            chunk_text = hotword_result['processed_text']
+                            logger.warning(f"🔥 长音频块{chunk_num}额外后处理结果: '{chunk_text}' (修正{hotword_result['corrections']}处)")
                         
-                        # 可选的额外热词后处理（作为原生hotword的补充）
-                        if processed_result and hotwords:
-                            hotword_result = hotword_processor.process_text_with_hotwords(processed_result, hotwords)
-                            processed_result = hotword_result['processed_text']
-                            logger.warning(f"🔥 长音频块{chunk_num}额外后处理结果: '{processed_result}' (修正{hotword_result['corrections']}处)")
-                        
-                        if processed_result:
-                            results.append(processed_result)
+                        if chunk_text:
+                            results.append(chunk_text)
                             # print(f"识别结果: {processed_result}")
                 except Exception as e:
                     print(f"处理音频块 {chunk_num} 时出错: {str(e)}")
@@ -1033,58 +1114,86 @@ def recognize_audio():
                 logger.error("音频数据全为静音")
                 return jsonify({"error": "音频数据全为静音"}), 400
             
-            # 分块处理音频
             logger.info("开始音频识别...")
-            result = process_audio_chunk(audio_data, sample_rate, hotwords=hotwords if hotwords else None)
-            
-            # 放宽对空结果的处理
-            if not result or len(result.strip()) == 0:
-                logger.warning("识别结果为空，尝试整体识别...")
-                # 如果分块识别失败，尝试整体识别
-                try:
-                    with torch.no_grad():
-                        logger.info("开始整体音频识别...")
-                        # 修复热词参数传递
-                        if hotwords:
-                            # FunASR官方格式：直接使用hotword参数，空格分隔多个热词
-                            hotword_string = ' '.join(hotwords)
-                            logger.warning(f"整体识别使用热词: '{hotword_string}'")
+
+            hotword_string = ' '.join(hotwords) if hotwords else None
+            generation_kwargs = {}
+            if hotword_string:
+                generation_kwargs['hotword'] = hotword_string
+            generation_kwargs['sentence_timestamp'] = True
+
+            parsed_result = None
+            raw_result = None
+
+            try:
+                with torch.no_grad():
+                    logger.info("调用FunASR整体识别（带VAD）")
+                    raw_result = model.generate(
+                        input=audio_data,
+                        **generation_kwargs
+                    )
+                parsed_result = process_recognition_result(raw_result)
+            except Exception as e:
+                logger.error(f"整体识别（带时间戳）失败: {str(e)}")
+                logger.exception(e)
+                parsed_result = None
+
+            if not parsed_result or not parsed_result.get('text'):
+                logger.warning("整体识别结果为空，尝试分块处理")
+                chunk_text = process_audio_chunk(
+                    audio_data,
+                    sample_rate,
+                    hotwords=hotwords if hotwords else None
+                )
+                if chunk_text and chunk_text.strip():
+                    parsed_result = {
+                        'text': chunk_text.strip(),
+                        'sentence_info': [],
+                        'raw_segments': []
+                    }
+                else:
+                    logger.warning("分块识别仍为空，尝试无时间戳的整体识别")
+                    try:
+                        fallback_kwargs = generation_kwargs.copy()
+                        fallback_kwargs.pop('sentence_timestamp', None)
+                        with torch.no_grad():
                             raw_result = model.generate(
                                 input=audio_data,
-                                hotword=hotword_string
+                                **fallback_kwargs
                             )
-                        else:
-                            logger.warning("整体识别调用 model.generate，无热词")
-                            raw_result = model.generate(
-                                input=audio_data
-                            )
-                        logger.debug(f"整体识别原始结果: {type(raw_result)} - {raw_result}")
-                        result = process_recognition_result(raw_result)
-                        
-                        # 可选的额外热词后处理（作为原生hotword的补充）
-                        if result and hotwords:
-                            hotword_result = hotword_processor.process_text_with_hotwords(result, hotwords)
-                            result = hotword_result['processed_text']
-                            logger.warning(f"🔥 整体识别额外后处理结果: '{result}' (修正{hotword_result['corrections']}处)")
-                        
-                        logger.info(f"整体识别处理后结果: {result}")
-                except Exception as e:
-                    logger.error(f"整体识别失败: {str(e)}")
-                    import traceback
-                    logger.error(f"整体识别错误堆栈: {traceback.format_exc()}")
-                    result = ""
-            
+                        parsed_result = process_recognition_result(raw_result)
+                    except Exception as e:
+                        logger.error(f"无时间戳整体识别失败: {str(e)}")
+                        logger.exception(e)
+                        parsed_result = {
+                            'text': '',
+                            'sentence_info': [],
+                            'raw_segments': []
+                        }
+
+            text_output = parsed_result.get('text', '').strip()
+            if ENABLE_HOTWORD_POST_PROCESS and text_output and hotwords:
+                hotword_result = hotword_processor.process_text_with_hotwords(text_output, hotwords)
+                text_output = hotword_result['processed_text']
+                logger.warning(f"🔥 整体识别额外后处理结果: '{text_output}' (修正{hotword_result['corrections']}处)")
+
+            parsed_result['text'] = text_output
+
             logger.info("音频识别完成")
-            
+
+            sentence_info = parsed_result.get('sentence_info', [])
+
             response_data = {
                 "success": True,
-                "text": result if result and len(result.strip()) > 0 else "",
+                "text": text_output,
                 "audio_info": {
                     "original_filename": original_filename,
                     "file_size_kb": file_size/1024,
                     "duration_seconds": len(audio_data)/sample_rate,
                     "sample_rate": sample_rate
-                }
+                },
+                "sentence_info": sentence_info,
+                "timestamp": sentence_info
             }
             return jsonify(response_data)
             
