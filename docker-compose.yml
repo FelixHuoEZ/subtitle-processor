@@ -30,7 +30,7 @@ services:
       - ./videos:/app/videos
       - ./outputs:/app/outputs
       - ./config:/app/config
-      # - ./firefox_profile:/root/.mozilla/firefox # Firefox 配置目录（如需浏览器登录可取消注释）
+      - ./firefox_profile:/root/.mozilla/firefox # Firefox 配置目录（如需浏览器登录可取消注释）
     environment:
       - TZ=Asia/Shanghai
       - FLASK_APP=run_app.py
