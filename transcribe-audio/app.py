@@ -14,243 +14,7 @@ from modelscope import snapshot_download
 from pathlib import Path
 import shutil
 from datetime import datetime
-import difflib
-import re
 import errno
-
-ENABLE_HOTWORD_POST_PROCESS = os.getenv("ENABLE_HOTWORD_POST_PROCESS", "false").lower() == "true"
-
-class HotwordPostProcessor:
-    """热词后处理器 - 在转录完成后进行热词匹配和替换"""
-    
-    def __init__(self):
-        self.similarity_threshold = 0.5  # 降低相似度阈值，更容易匹配
-        self.weight_boost = 1.5  # 热词权重提升
-        
-    def process_text_with_hotwords(self, text, hotwords, confidence_boost=0.1):
-        """
-        使用热词对转录文本进行后处理
-        
-        Args:
-            text: 原始转录文本
-            hotwords: 热词列表
-            confidence_boost: 置信度提升值
-            
-        Returns:
-            dict: 处理后的结果，包含修正文本和匹配信息
-        """
-        if not text or not hotwords:
-            return {
-                'original_text': text,
-                'processed_text': text,
-                'matches': [],
-                'corrections': 0
-            }
-        
-        logger.warning(f"🔥 开始热词后处理，原文本: '{text}'")
-        logger.warning(f"🔥 使用热词 ({len(hotwords)}个): {hotwords}")
-        
-        # 将文本分词
-        words = self._segment_text(text)
-        processed_words = []
-        matches = []
-        corrections = 0
-        
-        for i, word in enumerate(words):
-            # 寻找最匹配的热词
-            best_match = self._find_best_hotword_match(word, hotwords)
-            
-            if best_match:
-                hotword, similarity = best_match
-                if similarity >= self.similarity_threshold:
-                    logger.warning(f"🔥 热词匹配: '{word}' -> '{hotword}' (相似度: {similarity:.3f})")
-                    processed_words.append(hotword)
-                    matches.append({
-                        'original': word,
-                        'hotword': hotword,
-                        'similarity': similarity,
-                        'position': i
-                    })
-                    corrections += 1
-                else:
-                    processed_words.append(word)
-            else:
-                processed_words.append(word)
-        
-        processed_text = ''.join(processed_words)
-        
-        # 执行基于上下文的热词替换
-        processed_text = self._context_based_replacement(processed_text, hotwords)
-        
-        result = {
-            'original_text': text,
-            'processed_text': processed_text,
-            'matches': matches,
-            'corrections': corrections,
-            'hotwords_applied': len(hotwords)
-        }
-        
-        logger.warning(f"🔥 热词后处理完成，修正 {corrections} 处，最终文本: '{processed_text}'")
-        
-        return result
-    
-    def _segment_text(self, text):
-        """分词处理，保持原有格式"""
-        try:
-            import jieba
-            # 使用jieba进行中文分词
-            words = list(jieba.cut(text))
-            logger.warning(f"🔥 分词结果: {words}")
-            return words
-        except ImportError:
-            # 如果jieba不可用，使用改进的正则表达式分词
-            # 按标点符号分割，同时保留中文字符序列
-            import re
-            # 匹配中文字符、英文单词、数字、标点符号
-            tokens = re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z]+|\d+|[^\w\s]|\s+', text)
-            # 过滤空白tokens
-            tokens = [token for token in tokens if token.strip()]
-            logger.warning(f"🔥 正则分词结果: {tokens}")
-            return tokens
-    
-    def _find_best_hotword_match(self, word, hotwords):
-        """找到最佳匹配的热词"""
-        if not word.strip():
-            return None
-            
-        clean_word = re.sub(r'[^\w]', '', word)  # 移除标点符号
-        if not clean_word:
-            return None
-        
-        best_match = None
-        best_similarity = 0
-        
-        for hotword in hotwords:
-            # 精确匹配
-            if clean_word == hotword:
-                return (hotword, 1.0)
-            
-            # 子串匹配 - 特别适用于中文复合词
-            if hotword in clean_word or clean_word in hotword:
-                # 计算子串匹配的相似度
-                if len(hotword) <= len(clean_word):
-                    substring_similarity = len(hotword) / len(clean_word) * 0.9  # 给子串匹配稍低权重
-                else:
-                    substring_similarity = len(clean_word) / len(hotword) * 0.9
-                
-                if substring_similarity > best_similarity:
-                    best_similarity = substring_similarity
-                    best_match = hotword
-                    logger.warning(f"🔥 子串匹配: '{clean_word}' <-> '{hotword}' (相似度: {substring_similarity:.3f})")
-            
-            # 模糊匹配
-            similarity = difflib.SequenceMatcher(None, clean_word.lower(), hotword.lower()).ratio()
-            
-            # 考虑长度因素
-            length_factor = min(len(clean_word), len(hotword)) / max(len(clean_word), len(hotword))
-            adjusted_similarity = similarity * (0.7 + 0.3 * length_factor)
-            
-            if adjusted_similarity > best_similarity:
-                best_similarity = adjusted_similarity
-                best_match = hotword
-        
-        return (best_match, best_similarity) if best_match else None
-    
-    def _context_based_replacement(self, text, hotwords):
-        """基于上下文的热词替换"""
-        # 对于常见的转录错误模式进行替换
-        replacements = self._generate_common_replacements(hotwords)
-        
-        for pattern, replacement in replacements.items():
-            if pattern in text:
-                text = text.replace(pattern, replacement)
-                logger.warning(f"🔥 上下文替换: '{pattern}' -> '{replacement}'")
-        
-        return text
-    
-    def _generate_common_replacements(self, hotwords):
-        """生成常见的替换模式"""
-        replacements = {}
-        
-        # 为每个热词生成可能的错误识别模式
-        for hotword in hotwords:
-            # 转换为小写进行模糊匹配
-            hotword_lower = hotword.lower()
-            
-            # 通用模式：处理英文单词的音近误识别
-            if hotword == "ultrathink" or hotword == "Ultrathink":
-                replacements.update({
-                    "乌托": "ultrathink",
-                    "阿尔特拉": "ultrathink", 
-                    "奥特拉": "ultrathink",
-                    "ultra": "ultrathink",
-                    "Ultra": "ultrathink",
-                    "乌尔特拉": "ultrathink",
-                    "奥拉": "ultrathink"
-                })
-            elif hotword == "Python":
-                replacements.update({
-                    "派森": "Python",
-                    "派桑": "Python", 
-                    "皮桑": "Python",
-                    "python": "Python"
-                })
-            elif hotword == "编程":
-                replacements.update({
-                    "便程": "编程",
-                    "编成": "编程",
-                    "变成": "编程"
-                })
-            elif hotword == "机器学习":
-                replacements.update({
-                    "机械学习": "机器学习",
-                    "机器雪洗": "机器学习",
-                    "机器血洗": "机器学习"
-                })
-            elif hotword == "教程":
-                replacements.update({
-                    "叫程": "教程",
-                    "较程": "教程"
-                })
-            
-            # 自动生成音近字替换模式
-            # 对于英文词汇，查找可能的中文音译错误
-            if re.match(r'^[a-zA-Z]+$', hotword):
-                # 为英文热词生成常见的中文音译错误模式
-                phonetic_variants = self._generate_phonetic_variants(hotword)
-                for variant in phonetic_variants:
-                    replacements[variant] = hotword
-        
-        return replacements
-    
-    def _generate_phonetic_variants(self, english_word):
-        """为英文单词生成可能的中文音译变体"""
-        variants = []
-        word_lower = english_word.lower()
-        
-        # 基于英文单词的音节生成中文音译变体
-        phonetic_map = {
-            'ultra': ['乌尔特拉', '奥特拉', '阿尔特拉', '乌托拉'],
-            'think': ['辛克', '思克', '听克', '滕克'],
-            'python': ['派森', '派桑', '皮桑'],
-            'java': ['加瓦', '佳瓦', '嘉瓦'],
-            'docker': ['道克', '多克', '都克'],
-            'kubernetes': ['库伯内蒂斯', '库贝内蒂斯'],
-            'react': ['瑞艾克特', '里艾克特'],
-            'angular': ['安古拉', '安格拉'],
-            'github': ['吉特哈布', '基特哈布', '吉哈布'],
-        }
-        
-        # 查找完全匹配
-        if word_lower in phonetic_map:
-            variants.extend(phonetic_map[word_lower])
-        
-        # 查找部分匹配
-        for key, values in phonetic_map.items():
-            if key in word_lower or word_lower in key:
-                variants.extend(values)
-        
-        return variants
 
 # FunASR 模型列表
 FUNASR_MODELS = [
@@ -271,7 +35,23 @@ logging.basicConfig(
 
 # 创建logger
 logger = logging.getLogger("transcribe-audio")
-logger.setLevel(logging.WARNING)  # 将日志级别从INFO改为WARNING
+logger.setLevel(logging.DEBUG)
+
+# 日志文件输出
+log_dir = Path(os.getenv("LOG_DIR", "/app/logs"))
+log_dir.mkdir(parents=True, exist_ok=True)
+log_file = log_dir / os.getenv("LOG_FILE", "transcribe-audio.log")
+file_handler = logging.FileHandler(log_file, encoding="utf-8")
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(
+    logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+)
+logger.addHandler(file_handler)
+logging.getLogger().addHandler(file_handler)
+logger.info("日志文件输出到 %s", log_file)
 
 # 确保其他库的日志级别不会太详细
 logging.getLogger("modelscope").setLevel(logging.ERROR)
@@ -321,7 +101,6 @@ app.config['UPLOAD_FOLDER'] = '/app/uploads'
 
 # 全局模型变量
 model = None
-hotword_processor = None
 
 # 全局进度跟踪
 current_progress = {
@@ -480,23 +259,8 @@ def get_model_id(model_type, model_name):
 def ensure_models():
     """确保模型文件存在，如果不存在则下载"""
     # 运行时目录与共享目录解耦，避免共享卷上的文件锁问题
-    configured_dir = Path(os.getenv("MODEL_DIR", "/app/models"))
-    runtime_dir = Path(os.getenv("MODEL_RUNTIME_DIR", "/app/runtime-models"))
-
+    runtime_dir = Path(os.getenv("MODEL_DIR", "/app/runtime-models"))
     ensure_dir(runtime_dir)
-
-    if configured_dir.exists() and configured_dir.resolve() != runtime_dir.resolve():
-        try:
-            if not any(runtime_dir.iterdir()):
-                logger.warning(
-                    "运行时模型目录为空，尝试从共享目录复制以避免锁冲突: %s -> %s",
-                    configured_dir,
-                    runtime_dir,
-                )
-                shutil.copytree(configured_dir, runtime_dir, dirs_exist_ok=True)
-        except Exception as copy_err:
-            logger.warning("复制共享模型到运行目录失败，将按需重新下载: %s", copy_err)
-
     model_dir = str(runtime_dir)
 
     cleanup_model_locks(model_dir)
@@ -507,21 +271,24 @@ def ensure_models():
     os.environ['TORCH_HOME'] = model_dir
 
     # 获取所有模型名称 - 优先使用支持第三代热词的模型
-    model_name = os.getenv("FUNASR_MODEL", "paraformer-zh-vad-punc")  # 默认使用支持时间戳的模型
-    vad_model = os.getenv("FUNASR_VAD_MODEL", "fsmn-vad")
-    punc_model = os.getenv("FUNASR_PUNC_MODEL", "ct-punc")
-    spk_model = os.getenv("FUNASR_SPK_MODEL", "cam++")
+    model_name = os.getenv("FUNASR_MODEL", "paraformer-zh").strip()
+    vad_model = os.getenv("FUNASR_VAD_MODEL", "fsmn-vad").strip()
+    punc_model = os.getenv("FUNASR_PUNC_MODEL", "ct-punc").strip()
+    spk_model = os.getenv("FUNASR_SPK_MODEL", "").strip()
     
     # 获取完整的模型ID
     model_configs = {
         "main": {"name": model_name, "id": get_model_id("main", model_name)},
-        "vad": {"name": vad_model, "id": get_model_id("vad", vad_model)},
-        "punc": {"name": punc_model, "id": get_model_id("punc", punc_model)},
-        "spk": {"name": spk_model, "id": get_model_id("spk", spk_model)}
+        "vad": {"name": vad_model, "id": get_model_id("vad", vad_model)} if vad_model else None,
+        "punc": {"name": punc_model, "id": get_model_id("punc", punc_model)} if punc_model else None,
+        "spk": {"name": spk_model, "id": get_model_id("spk", spk_model)} if spk_model else None,
     }
     
     logger.info("检查模型配置：")
     for model_type, config in model_configs.items():
+        if not config:
+            logger.info(f"{model_type}模型: 已禁用")
+            continue
         logger.info(f"{model_type}模型: {config['name']} (ID: {config['id']})")
     
     # 检查所有模型文件是否存在
@@ -541,7 +308,7 @@ def ensure_models():
                 Path(model_dir) / "models" / config["id"],
             ]
         ]
-        for model_type, config in model_configs.items()
+        for model_type, config in model_configs.items() if config
     }
 
     logger.info("检查模型文件：")
@@ -552,7 +319,7 @@ def ensure_models():
     missing_models = [
         (model_type, config)
         for model_type, config in model_configs.items()
-        if not _model_exists(config["id"])
+        if config and not _model_exists(config["id"])
     ]
     if missing_models:
         missing_desc = [f"{model_type}:{config['id']}" for model_type, config in missing_models]
@@ -583,11 +350,23 @@ def ensure_models():
     else:
         logger.info("所有模型文件已存在，无需下载")
     
-    return model_dir, model_configs
+    timestamp_capable = {
+        "iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+        "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+    }
+    supports_timestamp = model_configs["main"]["id"] in timestamp_capable
+
+    if not supports_timestamp:
+        logger.warning("主模型不具备句级时间戳能力，将继续使用VAD但跳过句级时间戳")
+
+    return model_dir, model_configs, supports_timestamp
 
 # 初始化FunASR模型
+MODEL_SUPPORTS_TIMESTAMP = False
+
+
 def init_model():
-    global model, hotword_processor  # 声明使用全局变量
+    global model, MODEL_SUPPORTS_TIMESTAMP  # 声明使用全局变量
     print("="*50)
     print("开始初始化FunASR模型...")
     print("正在检测GPU状态...")
@@ -614,30 +393,59 @@ def init_model():
         print("\n" + "="*20 + " 模型加载开始 " + "="*20)
         
         # 确保模型存在
-        model_dir, model_info = ensure_models()
+        model_dir, model_info, supports_timestamp = ensure_models()
+        MODEL_SUPPORTS_TIMESTAMP = supports_timestamp
+        if MODEL_SUPPORTS_TIMESTAMP:
+            logger.info("当前主模型支持 sentence_timestamp 输出")
+        else:
+            logger.warning("当前主模型不支持 sentence_timestamp，将跳过时间戳和说话人信息")
         
         try:
             # 尝试使用指定的模型
-            model = AutoModel(
-                model=model_info["main"]["id"],
-                device=device,  # 使用检测到的设备
-                model_dir=model_dir,
-                vad_model=model_info["vad"]["id"],
-                vad_kwargs={"max_single_segment_time": 60000},
-                punc_model=model_info["punc"]["id"],
-                spk_model=model_info["spk"]["id"],
-                batch_size=1 if device == "cpu" else 4,  # GPU时使用更大的batch_size
-                vad_model_dir=model_dir,
-                disable_update=True,
-                use_local=True,
-                punc_model_dir=model_dir,
-                spk_model_dir=model_dir
-            )
+            init_kwargs = {
+                "model": model_info["main"]["id"],
+                "device": device,
+                "model_dir": model_dir,
+                "batch_size": 1 if device == "cpu" else 4,
+                "disable_update": True,
+                "use_local": True,
+            }
+            vad_config = model_info.get("vad")
+            if vad_config:
+                init_kwargs.update({
+                    "vad_model": vad_config["id"],
+                    "vad_kwargs": {"max_single_segment_time": 60000},
+                    "vad_model_dir": model_dir,
+                })
+            punc_config = model_info.get("punc")
+            if punc_config:
+                init_kwargs.update({
+                    "punc_model": punc_config["id"],
+                    "punc_model_dir": model_dir,
+                })
+            spk_config = model_info.get("spk")
+            if spk_config:
+                init_kwargs.update({
+                    "spk_model": spk_config["id"],
+                    "spk_model_dir": model_dir,
+                })
+
+            logger.info("FunASR初始化参数: %s", {k: v if k != "hotword" else "***" for k, v in init_kwargs.items()})
+            model = AutoModel(**init_kwargs)
             print(f"FunASR模型加载完成，使用设备: {device}")
             print(f"主模型: {model_info['main']['name']} ({model_info['main']['id']})")
-            print(f"VAD模型: {model_info['vad']['name']} ({model_info['vad']['id']})")
-            print(f"标点模型: {model_info['punc']['name']} ({model_info['punc']['id']})")
-            print(f"说话人模型: {model_info['spk']['name']} ({model_info['spk']['id']})")
+            if vad_config:
+                print(f"VAD模型: {vad_config['name']} ({vad_config['id']})")
+            else:
+                print("VAD模型: 已禁用")
+            if punc_config:
+                print(f"标点模型: {punc_config['name']} ({punc_config['id']})")
+            else:
+                print("标点模型: 已禁用")
+            if spk_config:
+                print(f"说话人模型: {spk_config['name']} ({spk_config['id']})")
+            else:
+                print("说话人模型: 已禁用")
             print(f"批处理大小: {1 if device == 'cpu' else 4}")
             
         except Exception as e:
@@ -645,21 +453,27 @@ def init_model():
             print("尝试使用默认模型配置")
             
             # 使用默认模型
-            model = AutoModel(
-                model="damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-                device=device,  # 使用检测到的设备
-                model_dir=model_dir,
-                vad_model="damo/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-                vad_kwargs={"max_single_segment_time": 60000},
-                punc_model="damo/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
-                spk_model="damo/speech_campplus_sv_zh-cn_16k-common",
-                batch_size=1 if device == "cpu" else 4,  # GPU时使用更大的batch_size
-                vad_model_dir=model_dir,
-                disable_update=True,
-                use_local=True,
-                punc_model_dir=model_dir,
-                spk_model_dir=model_dir
-            )
+            fallback_kwargs = {
+                "model": "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+                "device": device,
+                "model_dir": model_dir,
+                "batch_size": 1 if device == "cpu" else 4,
+                "disable_update": True,
+                "use_local": True,
+            }
+            fallback_kwargs.update({
+                "vad_model": "damo/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+                "vad_kwargs": {"max_single_segment_time": 60000},
+                "vad_model_dir": model_dir,
+                "punc_model": "damo/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+                "punc_model_dir": model_dir,
+                "spk_model": "damo/speech_campplus_sv_zh-cn_16k-common",
+                "spk_model_dir": model_dir,
+            })
+
+            logger.warning("使用默认模型参数: %s", fallback_kwargs)
+            model = AutoModel(**fallback_kwargs)
+            MODEL_SUPPORTS_TIMESTAMP = False
             print(f"FunASR模型加载完成，使用设备: {device}")
             print(f"主模型: paraformer-zh")
             print(f"VAD模型: fsmn-vad")
@@ -673,11 +487,6 @@ def init_model():
         test_result = model.generate(input=test_audio, sample_rate=16000)
         print(f"模型验证结果: {test_result}")
         print("FunASR模型加载完成")
-        
-        # 初始化热词后处理器
-        print("初始化热词后处理器...")
-        hotword_processor = HotwordPostProcessor()
-        print("热词后处理器初始化完成")
         
         return model
         
@@ -977,11 +786,6 @@ def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000, hotwords=N
                     processed_result = process_recognition_result(result)
                     chunk_text = processed_result.get('text', '')
 
-                    if ENABLE_HOTWORD_POST_PROCESS and chunk_text and hotwords:
-                        hotword_result = hotword_processor.process_text_with_hotwords(chunk_text, hotwords)
-                        chunk_text = hotword_result['processed_text']
-                        logger.warning(f"🔥 短音频额外后处理结果: '{chunk_text}' (修正{hotword_result['corrections']}处)")
-                    
                     if chunk_text:
                         results.append(chunk_text)
                     update_progress("processing", 1, 1, "短音频处理完成")
@@ -1021,27 +825,26 @@ def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000, hotwords=N
                 try:
                     with torch.no_grad():
                         # 修复热词参数传递
+                        kwargs = {}
                         if hotwords:
-                            # FunASR官方格式：直接使用hotword参数，空格分隔多个热词
                             hotword_string = ' '.join(hotwords)
                             logger.warning(f"🔥 长音频块{chunk_num}使用热词: '{hotword_string}'")
-                            result = model.generate(
-                                input=chunk,
-                                hotword=hotword_string
-                            )
-                        else:
-                            logger.warning(f"🔥 长音频块{chunk_num}调用 model.generate，无热词")
-                            result = model.generate(
-                                input=chunk
-                            )
+                            kwargs['hotword'] = hotword_string
+                        if not MODEL_SUPPORTS_TIMESTAMP:
+                            kwargs['sentence_timestamp'] = False
+                        logger.debug(
+                            "调用模型处理块 %s/%s，kwargs=%s",
+                            chunk_num,
+                            total_chunks,
+                            {k: ("***" if k == "hotword" else v) for k, v in kwargs.items()},
+                        )
+                        result = model.generate(
+                            input=chunk,
+                            **kwargs
+                        )
                         processed_result = process_recognition_result(result)
                         chunk_text = processed_result.get('text', '')
 
-                        if ENABLE_HOTWORD_POST_PROCESS and chunk_text and hotwords:
-                            hotword_result = hotword_processor.process_text_with_hotwords(chunk_text, hotwords)
-                            chunk_text = hotword_result['processed_text']
-                            logger.warning(f"🔥 长音频块{chunk_num}额外后处理结果: '{chunk_text}' (修正{hotword_result['corrections']}处)")
-                        
                         if chunk_text:
                             results.append(chunk_text)
                             # print(f"识别结果: {processed_result}")
@@ -1120,23 +923,32 @@ def recognize_audio():
             generation_kwargs = {}
             if hotword_string:
                 generation_kwargs['hotword'] = hotword_string
-            generation_kwargs['sentence_timestamp'] = True
+            if MODEL_SUPPORTS_TIMESTAMP:
+                generation_kwargs['sentence_timestamp'] = True
+            logger.debug(
+                "整体识别调用参数: supports_timestamp=%s kwargs=%s",
+                MODEL_SUPPORTS_TIMESTAMP,
+                {k: ("***" if k == "hotword" else v) for k, v in generation_kwargs.items()},
+            )
 
             parsed_result = None
             raw_result = None
 
-            try:
-                with torch.no_grad():
-                    logger.info("调用FunASR整体识别（带VAD）")
-                    raw_result = model.generate(
-                        input=audio_data,
-                        **generation_kwargs
-                    )
-                parsed_result = process_recognition_result(raw_result)
-            except Exception as e:
-                logger.error(f"整体识别（带时间戳）失败: {str(e)}")
-                logger.exception(e)
-                parsed_result = None
+            if MODEL_SUPPORTS_TIMESTAMP:
+                try:
+                    with torch.no_grad():
+                        logger.info("调用FunASR整体识别（带VAD）")
+                        raw_result = model.generate(
+                            input=audio_data,
+                            **generation_kwargs
+                        )
+                    parsed_result = process_recognition_result(raw_result)
+                except Exception as e:
+                    logger.error(f"整体识别（带时间戳）失败: {str(e)}")
+                    logger.exception(e)
+                    parsed_result = None
+            else:
+                logger.info("当前模型不支持时间戳，跳过整体识别，直接进入分块流程")
 
             if not parsed_result or not parsed_result.get('text'):
                 logger.warning("整体识别结果为空，尝试分块处理")
@@ -1151,11 +963,15 @@ def recognize_audio():
                         'sentence_info': [],
                         'raw_segments': []
                     }
-                else:
+                elif MODEL_SUPPORTS_TIMESTAMP:
                     logger.warning("分块识别仍为空，尝试无时间戳的整体识别")
                     try:
                         fallback_kwargs = generation_kwargs.copy()
                         fallback_kwargs.pop('sentence_timestamp', None)
+                        logger.debug(
+                            "无时间戳整体识别参数: %s",
+                            {k: ("***" if k == "hotword" else v) for k, v in fallback_kwargs.items()},
+                        )
                         with torch.no_grad():
                             raw_result = model.generate(
                                 input=audio_data,
@@ -1170,13 +986,15 @@ def recognize_audio():
                             'sentence_info': [],
                             'raw_segments': []
                         }
+                else:
+                    logger.warning("分块识别仍为空，模型不支持时间戳，将返回空结果")
+                    parsed_result = {
+                        'text': '',
+                        'sentence_info': [],
+                        'raw_segments': []
+                    }
 
             text_output = parsed_result.get('text', '').strip()
-            if ENABLE_HOTWORD_POST_PROCESS and text_output and hotwords:
-                hotword_result = hotword_processor.process_text_with_hotwords(text_output, hotwords)
-                text_output = hotword_result['processed_text']
-                logger.warning(f"🔥 整体识别额外后处理结果: '{text_output}' (修正{hotword_result['corrections']}处)")
-
             parsed_result['text'] = text_output
 
             logger.info("音频识别完成")

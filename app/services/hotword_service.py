@@ -5,11 +5,39 @@ import yaml
 import logging
 import re
 import jieba
-from typing import Dict, List, Optional, Tuple, Set
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Set, Any
 from collections import Counter
 from ..config.config_manager import get_config_value
 
 logger = logging.getLogger(__name__)
+
+GLOBAL_STOPWORDS: Set[str] = {
+    "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一",
+    "一个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有",
+    "看", "好", "自己", "这", "教程", "视频", "内容", "分享", "介绍", "讲解",
+    "分析", "展示", "说明", "大家", "我们", "他们", "这些", "那些", "东西",
+    "时候", "技术", "可以", "如何", "因为", "如果", "然后", "感觉",
+    "为什么", "怎么", "怎么样", "哪些", "多少", "那么", "这么", "还是", "以及"
+}
+
+
+@dataclass
+class HotwordCandidate:
+    word: str
+    score: float = 0.0
+    sources: Set[str] = None
+    count: int = 0
+
+    def __post_init__(self):
+        if self.sources is None:
+            self.sources = set()
+
+    def add(self, weight: float, source: str):
+        self.score += weight
+        if source:
+            self.sources.add(source)
+        self.count += 1
 
 
 class HotwordService:
@@ -47,7 +75,17 @@ class HotwordService:
             'strategy': {
                 'enabled_methods': ['title_extraction', 'tag_based'],
                 'max_hotwords': 15,
-                'min_keyword_length': 2
+                'min_keyword_length': 2,
+                'thresholds': {
+                    'curated': {
+                        'min_score': 0.2,
+                        'strict_score': 0.6
+                    },
+                    'experiment': {
+                        'min_score': 0.1,
+                        'strict_score': 0.25
+                    }
+                }
             },
             'weights': {
                 'category_based': 0.4,
@@ -98,79 +136,166 @@ class HotwordService:
             logger.error(f"加载分类热词失败: {str(e)}")
             return {}
     
-    def generate_hotwords(self, 
-                         title: str = None, 
-                         tags: List[str] = None, 
-                         channel_name: str = None, 
-                         platform: str = None,
-                         max_hotwords: int = None) -> List[str]:
-        """生成热词列表
-        
-        Args:
-            title: 视频标题
-            tags: 用户标签
-            channel_name: 频道名称
-            platform: 平台名称
-            max_hotwords: 最大热词数量
-            
-        Returns:
-            生成的热词列表
-        """
+    def generate_hotwords(self,
+                          title: str = None,
+                          tags: Optional[List[str]] = None,
+                          channel_name: str = None,
+                          platform: str = None,
+                          max_hotwords: Optional[int] = None,
+                          mode: str = "curated") -> List[Dict[str, Any]]:
+        """生成热词候选列表，附带评分和来源信息"""
         try:
-            # 获取配置
             strategy_config = self.config.get('strategy', {})
             enabled_methods = strategy_config.get('enabled_methods', [])
             weights = self.config.get('weights', {})
+            thresholds_cfg = strategy_config.get('thresholds', {})
             max_count = max_hotwords or strategy_config.get('max_hotwords', 20)
             min_length = strategy_config.get('min_keyword_length', 2)
-            
-            # 收集候选热词
-            candidate_hotwords = {}
-            
-            # 1. 基于分类的热词（仅在有分类文件时启用）
+
+            mode = (mode or "curated").lower()
+            if mode not in {"curated", "experiment"}:
+                mode = "curated"
+
+            candidate_map: Dict[str, HotwordCandidate] = {}
+
+            def add_candidate(word: str, weight: float, source: str):
+                word = (word or "").strip()
+                if not word:
+                    return
+                candidate = candidate_map.get(word)
+                if not candidate:
+                    candidate = HotwordCandidate(word=word)
+                    candidate_map[word] = candidate
+                candidate.add(weight, source)
+
+            # 1. 分类热词
             if 'category_based' in enabled_methods and self.category_hotwords:
                 category_words = self._get_category_based_hotwords(title, tags, channel_name)
                 weight = weights.get('category_based', 0.4)
                 for word in category_words:
-                    candidate_hotwords[word] = candidate_hotwords.get(word, 0) + weight
+                    add_candidate(word, weight, 'category')
             elif 'category_based' in enabled_methods:
                 logger.debug("跳过分类热词生成：无可用的分类文件")
-            
-            # 2. 从标题提取关键词
+
+            # 2. 标题关键词
             if 'title_extraction' in enabled_methods and title:
-                title_words = self._extract_keywords_from_title(title)
-                weight = weights.get('title_extraction', 0.3)
-                for word in title_words:
-                    if len(word) >= min_length:
-                        candidate_hotwords[word] = candidate_hotwords.get(word, 0) + weight
-            
-            # 3. 基于用户标签的热词
+                title_keywords = self._extract_keywords_from_title(title)
+                if title_keywords:
+                    keyword_counts = Counter(title_keywords)
+                    base_weight = weights.get('title_extraction', 0.3)
+                    for word, count in keyword_counts.items():
+                        add_candidate(word, base_weight * count, 'title')
+
+            # 3. 标签
             if 'tag_based' in enabled_methods and tags:
-                tag_words = self._get_tag_based_hotwords(tags)
-                weight = weights.get('tag_based', 0.2)
-                for word in tag_words:
-                    candidate_hotwords[word] = candidate_hotwords.get(word, 0) + weight
-            
-            # 4. 学习热词（预留扩展）
+                tag_keywords = self._get_tag_based_hotwords(tags)
+                if tag_keywords:
+                    tag_counts = Counter(tag_keywords)
+                    base_weight = weights.get('tag_based', 0.2)
+                    for word, count in tag_counts.items():
+                        add_candidate(word, base_weight * count, 'tag')
+
+            # 4. 机器学习占位（可关闭）
             if 'learned' in enabled_methods:
                 learned_words = self._get_learned_hotwords(title, tags, channel_name)
-                weight = weights.get('learned', 0.1)
-                for word in learned_words:
-                    candidate_hotwords[word] = candidate_hotwords.get(word, 0) + weight
-            
-            # 按权重排序并取前N个
-            sorted_hotwords = sorted(candidate_hotwords.items(), key=lambda x: x[1], reverse=True)
-            final_hotwords = [word for word, score in sorted_hotwords[:max_count]]
-            
-            logger.info(f"生成热词完成: {len(final_hotwords)} 个词汇")
-            logger.debug(f"热词列表: {final_hotwords}")
-            
-            return final_hotwords
-            
+                if learned_words:
+                    base_weight = weights.get('learned', 0.1)
+                    for word in learned_words:
+                        add_candidate(word, base_weight, 'learned')
+
+            if not candidate_map:
+                logger.info("自动热词候选为空")
+                return []
+
+            thresholds = thresholds_cfg.get(mode, thresholds_cfg.get('curated', {}))
+            min_score = float(thresholds.get('min_score', 0.2))
+            strict_score = float(thresholds.get('strict_score', max(min_score * 2, min_score)))
+
+            filtered_candidates: List[Dict[str, Any]] = []
+            for candidate in candidate_map.values():
+                if len(candidate.word) < min_length:
+                    continue
+                if self._is_stopword(candidate.word):
+                    continue
+                if not self._is_valid_word(candidate.word):
+                    continue
+
+                adjusted_score = self._apply_scoring_adjustments(candidate)
+                if adjusted_score < min_score:
+                    continue
+
+                filtered_candidates.append({
+                    'word': candidate.word,
+                    'score': round(adjusted_score, 4),
+                    'sources': sorted(candidate.sources),
+                    'strict': adjusted_score >= strict_score
+                })
+
+            filtered_candidates.sort(key=lambda item: item['score'], reverse=True)
+            final_candidates = filtered_candidates[:max_count]
+
+            logger.info(
+                "热词候选生成完成(mode=%s): 候选总数=%d, 通过筛选=%d, 前5=%s",
+                mode,
+                len(candidate_map),
+                len(final_candidates),
+                [item['word'] for item in final_candidates[:5]]
+            )
+            return final_candidates
+
         except Exception as e:
             logger.error(f"生成热词失败: {str(e)}")
             return []
-    
+
+    def _is_stopword(self, word: str) -> bool:
+        normalized = (word or "").strip().lower()
+        if not normalized:
+            return True
+        if normalized in GLOBAL_STOPWORDS:
+            return True
+        # 过滤常见无意义重复字符
+        if len(set(normalized)) == 1 and len(normalized) < 4:
+            return True
+        return False
+
+    def _is_valid_word(self, word: str) -> bool:
+        if not word:
+            return False
+        clean_word = word.strip()
+        if len(clean_word) < 2:
+            return False
+        if clean_word.isdigit():
+            return False
+        if re.fullmatch(r'[\W_]+', clean_word):
+            return False
+        if re.search(r'[A-Za-z]', clean_word) and len(clean_word) == 1:
+            return False
+        return True
+
+    def _apply_scoring_adjustments(self, candidate: HotwordCandidate) -> float:
+        score = candidate.score
+        word = candidate.word.strip()
+
+        # 多来源加成
+        if len(candidate.sources) > 1:
+            score += 0.05 * (len(candidate.sources) - 1)
+
+        # 英文或数字混合词略微加权
+        if re.search(r'[A-Za-z]', word):
+            score += 0.05
+        if re.search(r'\d', word):
+            score += 0.05
+
+        # 单一来源但出现次数多也加分
+        if candidate.count >= 3:
+            score += 0.05
+
+        # 过长的词减分
+        if len(word) > 12:
+            score -= 0.05
+
+        return max(score, 0.0)
+
     def _get_category_based_hotwords(self, title: str, tags: List[str], channel_name: str) -> List[str]:
         """基于分类映射获取热词"""
         try:
@@ -234,21 +359,22 @@ class HotwordService:
             if not title:
                 return []
             
-            # 使用jieba分词
             words = jieba.cut(title)
-            
-            # 过滤关键词
-            keywords = []
-            stopwords = {'的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一', '一个', '上', '也', '很', '到', '说', '要', '去', '你', '会', '着', '没有', '看', '好', '自己', '这'}
-            
+            keywords: List[str] = []
+
             for word in words:
                 word = word.strip()
-                # 过滤条件：长度>=2，不是停用词，不是纯数字/标点
-                if (len(word) >= 2 and 
-                    word not in stopwords and 
-                    not word.isdigit() and 
-                    re.search(r'[\u4e00-\u9fff\w]', word)):  # 包含中文或字母
-                    keywords.append(word)
+                if not word:
+                    continue
+                if word.lower() in GLOBAL_STOPWORDS:
+                    continue
+                if len(word) < 2 and not re.search(r'[A-Za-z]', word):
+                    continue
+                if word.isdigit():
+                    continue
+                if not re.search(r'[\u4e00-\u9fffA-Za-z0-9]', word):
+                    continue
+                keywords.append(word)
             
             logger.debug(f"从标题提取关键词: {keywords}")
             return keywords
@@ -301,14 +427,8 @@ class HotwordService:
             # 2. 基于用户行为学习个性化热词  
             # 3. 基于相似视频学习相关热词
             
-            learned_hotwords = []
-            
-            # 目前返回一些通用的热词作为占位
-            common_words = ["视频", "内容", "分享", "介绍", "教程", "讲解", "分析"]
-            learned_hotwords.extend(common_words[:2])
-            
-            logger.debug(f"学习热词: {learned_hotwords}")
-            return learned_hotwords
+            logger.debug("学习热词模块暂未启用，返回空列表")
+            return []
             
         except Exception as e:
             logger.error(f"获取学习热词失败: {str(e)}")

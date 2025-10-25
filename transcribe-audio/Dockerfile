@@ -50,13 +50,13 @@ RUN set -eux; \
 COPY . .
 
 # 创建必要的目录
-RUN mkdir -p /app/uploads /app/models
+RUN mkdir -p /app/uploads /app/runtime-models
 
 # 设置环境变量
-ENV MODEL_DIR=/app/models \
-    MODELSCOPE_CACHE=/app/models \
-    HF_HOME=/app/models \
-    TORCH_HOME=/app/models \
+ENV MODEL_DIR=/app/runtime-models \
+    MODELSCOPE_CACHE=/app/runtime-models \
+    HF_HOME=/app/runtime-models \
+    TORCH_HOME=/app/runtime-models \
     PYTHONUNBUFFERED=1
 
 # 暴露端口

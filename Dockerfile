@@ -1,4 +1,4 @@
-FROM python:3.9-slim
+FROM python:3.11-slim
 ARG TARGETARCH
 
 # 设置pip镜像源为阿里云

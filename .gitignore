@@ -49,7 +49,7 @@ Thumbs.db
 # 日志文件
 server.log
 subtitle_processor.log
-
+transcribe-audio/logs/
 
 # 单元测试文件和脚本
 build_images.ps1

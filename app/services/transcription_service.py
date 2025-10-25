@@ -9,6 +9,7 @@ import requests
 from typing import Dict, Any, Optional, List
 from ..config.config_manager import get_config_value
 from .hotword_service import HotwordService
+from .hotword_post_processor import HotwordPostProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,12 @@ class TranscriptionService:
         self.hotword_service = HotwordService()
         self.default_hotwords = self.hotword_service.get_default_hotwords()
         self.enable_auto_hotwords = os.getenv("ENABLE_AUTO_HOTWORDS", "false").lower() == "true"
-        self.disable_generated_hotwords = os.getenv("DISABLE_AUTO_HOTWORDS", "true").lower() == "true"
+        self.hotword_mode = os.getenv("HOTWORD_MODE", "user_only").lower()
+        if self.hotword_mode not in {"user_only", "curated", "experiment"}:
+            logger.warning("未知的 HOTWORD_MODE '%s'，重置为 user_only", self.hotword_mode)
+            self.hotword_mode = "user_only"
+        self.max_hotword_count = int(os.getenv("HOTWORD_MAX_COUNT", "20"))
+        self.hotword_post_processor = HotwordPostProcessor()
     
     
     def _load_transcribe_servers(self) -> List[Dict[str, Any]]:
@@ -131,35 +137,46 @@ class TranscriptionService:
                 return None
             
             # 智能生成热词
+            effective_mode = self.hotword_mode if self.enable_auto_hotwords else "user_only"
+            if not self.enable_auto_hotwords and self.hotword_mode != "user_only":
+                logger.info("ENABLE_AUTO_HOTWORDS 已关闭，忽略 HOTWORD_MODE=%s", self.hotword_mode)
+
             if hotwords:
-                # 如果用户指定了热词，优先使用
                 final_hotwords = hotwords
-                logger.info(f"使用用户指定热词: {final_hotwords}")
-            elif self.enable_auto_hotwords and not self.disable_generated_hotwords:
-                # 基于视频信息智能生成热词
+                logger.info("使用用户指定热词: %s", final_hotwords)
+            elif effective_mode == "user_only":
+                final_hotwords = []
+                logger.info("当前热词模式为 user_only，跳过自动热词生成")
+            else:
                 title = video_info.get('title') if video_info else None
                 channel_name = video_info.get('uploader') if video_info else None
-                
-                generated_hotwords = self.hotword_service.generate_hotwords(
+
+                generated_candidates = self.hotword_service.generate_hotwords(
                     title=title,
                     tags=tags,
                     channel_name=channel_name,
-                    platform=platform
+                    platform=platform,
+                    max_hotwords=self.max_hotword_count,
+                    mode=effective_mode
                 )
-                
-                # 合并生成的热词和默认热词
-                final_hotwords = generated_hotwords + self.default_hotwords
-                # 去重并限制数量
-                final_hotwords = list(dict.fromkeys(final_hotwords))[:20]
-                
-                logger.info(f"智能生成热词 ({len(generated_hotwords)} 个): {generated_hotwords}")
-                logger.info(f"最终使用热词 ({len(final_hotwords)} 个): {final_hotwords}")
-            else:
-                final_hotwords = []
-                if self.enable_auto_hotwords and self.disable_generated_hotwords:
-                    logger.info("自动热词匹配已暂时禁用，仅使用用户提供的热词")
+
+                if effective_mode == "curated":
+                    strict_candidates = [c['word'] for c in generated_candidates if c.get('strict')]
+                    final_hotwords = strict_candidates or [c['word'] for c in generated_candidates]
                 else:
-                    logger.info("已禁用自动热词生成，不追加额外热词")
+                    final_hotwords = [candidate['word'] for candidate in generated_candidates]
+
+                if effective_mode == "experiment" and self.default_hotwords:
+                    final_hotwords.extend(self.default_hotwords)
+
+                final_hotwords = list(dict.fromkeys(final_hotwords))[: self.max_hotword_count]
+
+                logger.info(
+                    "智能生成热词模式=%s，候选数量=%d，最终使用=%s",
+                    effective_mode,
+                    len(generated_candidates),
+                    final_hotwords,
+                )
             
             # 【关键日志】记录最终使用的热词
             logger.warning(f"🔥 TranscriptionService最终使用热词 ({len(final_hotwords)}个): {final_hotwords}")
@@ -168,11 +185,12 @@ class TranscriptionService:
             result = self._transcribe_with_funasr(audio_file, final_hotwords)
             if result:
                 logger.info("FunASR转录成功")
-                return result
+                return self.hotword_post_processor.process_result(result, final_hotwords)
             
             # 如果FunASR失败，尝试OpenAI Whisper
             logger.warning("FunASR转录失败，尝试OpenAI Whisper")
-            return self._transcribe_with_openai(audio_file)
+            whisper_result = self._transcribe_with_openai(audio_file)
+            return self.hotword_post_processor.process_result(whisper_result, final_hotwords)
             
         except Exception as e:
             logger.error(f"转录音频失败: {str(e)}")

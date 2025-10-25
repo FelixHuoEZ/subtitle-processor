@@ -30,12 +30,18 @@ services:
       - ./videos:/app/videos
       - ./outputs:/app/outputs
       - ./config:/app/config
-      - ./models:/app/models
       - ./firefox_profile:/root/.mozilla/firefox # Firefox 配置目录
     environment:
       - TZ=Asia/Shanghai
       - FLASK_APP=run_app.py
       - FLASK_ENV=development
+      # 热词策略可选开关
+      - HOTWORD_MODE=curated # user_only/curated/experiment
+      # - HOTWORD_MAX_COUNT=20           # 自动热词最大数量
+      - ENABLE_AUTO_HOTWORDS=true # 启用自动热词生成
+      - ENABLE_HOTWORD_POST_PROCESS=true
+      # - HOTWORD_POST_SIMILARITY=0.82
+      # - ENABLE_HOTWORD_SUBSTRING=false
       # 只对外部请求使用代理
       # - NO_PROXY=transcribe-audio,localhost,127.0.0.1
       # - ALL_PROXY=http://host.docker.internal:20172
@@ -78,23 +84,27 @@ services:
       # - /share/docker/subtitle-processor/config:/app/config
       - ./uploads:/app/uploads
       - ./videos:/app/videos
-      - ./models:/app/models
       - ./outputs:/app/outputs
       - ./config:/app/config
+      - ./models:/app/runtime-models
+      - ./transcribe-audio/logs:/app/logs
     environment:
       - TZ=Asia/Shanghai
       - FLASK_APP=app.py
       - FLASK_ENV=development
-      - MODEL_DIR=/app/models
-      - MODELSCOPE_CACHE=/app/models
-      - HF_HOME=/app/models
-      - TORCH_HOME=/app/models
-      - FUNASR_MODEL=paraformer-zh-vad-punc
+      - MODEL_DIR=/app/runtime-models
+      - MODELSCOPE_CACHE=/app/runtime-models
+      - HF_HOME=/app/runtime-models
+      - TORCH_HOME=/app/runtime-models
+      - FUNASR_MODEL=paraformer-zh
       - FUNASR_VAD_MODEL=fsmn-vad
       - FUNASR_PUNC_MODEL=ct-punc
-      - FUNASR_SPK_MODEL=cam++
       # 从配置文件读取所有配置
       - CONFIG_PATH=/app/config/config.yml
+      # FunASR 热词后处理（默认关闭）
+      # - ENABLE_HOTWORD_POST_PROCESS=true
+      # - HOTWORD_POST_SIMILARITY=0.85
+      # - ENABLE_HOTWORD_SUBSTRING=true
     logging:
       driver: json-file
       options:
@@ -104,7 +114,9 @@ services:
       - srt-network
 
   bgutil-provider:
-    image: brainicism/bgutil-ytdlp-pot-provider:1.2.2
+    build:
+      context: ./docker-config/bgutil
+      dockerfile: Dockerfile
     container_name: bgutil-provider
     restart: unless-stopped
     ports:
