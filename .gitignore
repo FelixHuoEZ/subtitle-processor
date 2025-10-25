@@ -7,6 +7,7 @@ config/openai_token-backup.txt
 config/readwise_token-backup.txt
 config/telegram_token-backup.txt
 config/transcribe_servers-backup.json
+config/hotword_settings.json
 
 # 热词配置文件（隐私保护）
 config/hotwords/

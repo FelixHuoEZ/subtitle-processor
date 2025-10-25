@@ -18,10 +18,10 @@ RUN apt-get update && \
     curl \
     iputils-ping \
     net-tools \
-    firefox-esr \
-    x11vnc \
-    xvfb \
-    openbox \
+    # firefox-esr \
+    # x11vnc \
+    # xvfb \
+    # openbox \
     supervisor \
     && rm -rf /var/lib/apt/lists/*
 
@@ -36,19 +36,16 @@ COPY app/ ./app/
 COPY run_app.py .
 COPY test_app_startup.py .
 
-# 创建必要的目录
+# 创建必要的目录（保留注释方便恢复图形环境）
 RUN mkdir -p uploads videos
-RUN mkdir -p /root/.mozilla/firefox/
-
-# 设置VNC密码
-RUN mkdir -p /root/.vnc && x11vnc -storepasswd password /root/.vnc/passwd
-
+# RUN mkdir -p /root/.mozilla/firefox/
+# RUN mkdir -p /root/.vnc && x11vnc -storepasswd password /root/.vnc/passwd
 # 配置supervisor
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 # 暴露端口
 EXPOSE 5000
-EXPOSE 5900
+# EXPOSE 5900
 
 # 使用supervisor启动所有服务
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

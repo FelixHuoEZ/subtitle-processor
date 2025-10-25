@@ -11,7 +11,7 @@ from .services.transcription_service import TranscriptionService
 from .services.subtitle_service import SubtitleService
 from .services.translation_service import TranslationService
 from .services.readwise_service import ReadwiseService
-from .routes import upload_bp, view_bp, process_bp
+from .routes import upload_bp, view_bp, process_bp, settings_bp
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +124,7 @@ def _register_blueprints(app):
         app.register_blueprint(upload_bp)
         app.register_blueprint(view_bp)
         app.register_blueprint(process_bp)
+        app.register_blueprint(settings_bp)
         
         logger.info("所有蓝图注册完成")
         

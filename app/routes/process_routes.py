@@ -4,7 +4,7 @@ import os
 import json
 import logging
 from datetime import datetime
-from flask import Blueprint, request, jsonify, render_template, redirect, url_for, flash
+from flask import Blueprint, request, jsonify, render_template, redirect, url_for, flash, Response
 from ..services.file_service import FileService
 from ..services.video_service import VideoService
 from ..services.transcription_service import TranscriptionService
@@ -416,23 +416,52 @@ def create_readwise_article(file_id):
 
 @process_bp.route('/status/<task_id>')
 def get_processing_status(task_id):
-    """获取处理状态"""
+    """获取处理状态（支持 include_content=1 返回字幕文本）"""
     try:
         task_info = file_service.get_file_info(task_id)
         if not task_info:
-            return jsonify({'error': 'Task not found'}), 404
-        
-        return jsonify({
-            'id': task_id,
-            'status': task_info.get('status', 'unknown'),
-            'progress': task_info.get('progress', 0),
+            return jsonify({'success': False, 'status': 'not_found'}), 404
+
+        status = task_info.get('status', 'unknown')
+        response_data = {
+            'success': True,
+            'process_id': task_id,
+            'status': status,
+            'progress': task_info.get('progress'),
             'error': task_info.get('error'),
-            'updated_time': task_info.get('updated_time')
-        })
-        
+            'video_info': task_info.get('video_info'),
+            'filename': task_info.get('filename'),
+            'subtitle_path': task_info.get('subtitle_path') or task_info.get('path'),
+            'view_url': task_info.get('url'),
+            'created_at': task_info.get('upload_time'),
+            'updated_at': task_info.get('updated_time'),
+            'status_url': f"/process/status/{task_id}",
+        }
+
+        include_content = request.args.get('include_content') == '1'
+        subtitle_path = response_data.get('subtitle_path')
+        cached_subtitle = task_info.get('subtitle_content')
+
+        if include_content and status == 'completed':
+            if cached_subtitle:
+                response_data['subtitle_content'] = cached_subtitle
+
+            if not response_data.get('subtitle_content') and subtitle_path and os.path.exists(subtitle_path):
+                try:
+                    with open(subtitle_path, 'r', encoding='utf-8') as subtitle_file:
+                        response_data['subtitle_content'] = subtitle_file.read()
+                except Exception as subtitle_error:
+                    logger.error("读取字幕文件失败(%s): %s", task_id, subtitle_error)
+                    response_data['subtitle_content_error'] = str(subtitle_error)
+
+            if not response_data.get('subtitle_content') and cached_subtitle:
+                response_data['subtitle_content'] = cached_subtitle
+
+        return jsonify(response_data)
+
     except Exception as e:
         logger.error(f"获取处理状态失败: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'status': 'error', 'error': str(e)}), 500
 
 
 @process_bp.route('/batch/transcribe', methods=['POST'])
@@ -508,3 +537,29 @@ def batch_transcribe():
     except Exception as e:
         logger.error(f"批量转录失败: {str(e)}")
         return jsonify({'error': str(e)}), 500
+@process_bp.route('/status/<process_id>/subtitle', methods=['GET'])
+def process_subtitle_content(process_id: str):
+    """返回指定任务的字幕纯文本，用于轮询下载"""
+    try:
+        task_info = file_service.get_file_info(process_id)
+        if not task_info:
+            return Response("not found", status=404)
+
+        subtitle_content = task_info.get('subtitle_content')
+        if subtitle_content:
+            return Response(subtitle_content, status=200, mimetype='text/plain; charset=utf-8')
+
+        subtitle_path = task_info.get('subtitle_path')
+        if subtitle_path and os.path.exists(subtitle_path):
+            try:
+                with open(subtitle_path, 'r', encoding='utf-8') as subtitle_file:
+                    data = subtitle_file.read()
+                return Response(data, status=200, mimetype='text/plain; charset=utf-8')
+            except Exception as file_error:
+                logger.error("读取字幕文件失败(%s): %s", process_id, file_error)
+                return Response(str(file_error), status=500)
+
+        return Response("pending", status=202)
+    except Exception as exc:
+        logger.error("获取字幕内容失败(%s): %s", process_id, exc)
+        return Response(str(exc), status=500)

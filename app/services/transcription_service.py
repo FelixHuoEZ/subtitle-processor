@@ -10,6 +10,7 @@ from typing import Dict, Any, Optional, List
 from ..config.config_manager import get_config_value
 from .hotword_service import HotwordService
 from .hotword_post_processor import HotwordPostProcessor
+from .hotword_settings import HotwordSettingsManager
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +26,8 @@ class TranscriptionService:
         self.openai_base_url = get_config_value('tokens.openai.base_url', 'https://api.openai.com/v1')
         self.hotword_service = HotwordService()
         self.default_hotwords = self.hotword_service.get_default_hotwords()
-        self.enable_auto_hotwords = os.getenv("ENABLE_AUTO_HOTWORDS", "false").lower() == "true"
-        self.hotword_mode = os.getenv("HOTWORD_MODE", "user_only").lower()
-        if self.hotword_mode not in {"user_only", "curated", "experiment"}:
-            logger.warning("未知的 HOTWORD_MODE '%s'，重置为 user_only", self.hotword_mode)
-            self.hotword_mode = "user_only"
-        self.max_hotword_count = int(os.getenv("HOTWORD_MAX_COUNT", "20"))
-        self.hotword_post_processor = HotwordPostProcessor()
+        self.hotword_settings = HotwordSettingsManager.get_instance()
+        self.hotword_post_processor = HotwordPostProcessor(self.hotword_settings)
     
     
     def _load_transcribe_servers(self) -> List[Dict[str, Any]]:
@@ -137,9 +133,14 @@ class TranscriptionService:
                 return None
             
             # 智能生成热词
-            effective_mode = self.hotword_mode if self.enable_auto_hotwords else "user_only"
-            if not self.enable_auto_hotwords and self.hotword_mode != "user_only":
-                logger.info("ENABLE_AUTO_HOTWORDS 已关闭，忽略 HOTWORD_MODE=%s", self.hotword_mode)
+            settings = self.hotword_settings.get_state()
+            enable_auto_hotwords = settings.get("auto_hotwords", False)
+            hotword_mode = settings.get("mode", "user_only")
+            max_hotword_count = settings.get("max_count", 20)
+
+            effective_mode = hotword_mode if enable_auto_hotwords else "user_only"
+            if not enable_auto_hotwords and hotword_mode != "user_only":
+                logger.info("自动热词已关闭，忽略 HOTWORD_MODE=%s", hotword_mode)
 
             if hotwords:
                 final_hotwords = hotwords
@@ -156,7 +157,7 @@ class TranscriptionService:
                     tags=tags,
                     channel_name=channel_name,
                     platform=platform,
-                    max_hotwords=self.max_hotword_count,
+                    max_hotwords=max_hotword_count,
                     mode=effective_mode
                 )
 
@@ -169,7 +170,7 @@ class TranscriptionService:
                 if effective_mode == "experiment" and self.default_hotwords:
                     final_hotwords.extend(self.default_hotwords)
 
-                final_hotwords = list(dict.fromkeys(final_hotwords))[: self.max_hotword_count]
+                final_hotwords = list(dict.fromkeys(final_hotwords))[: max_hotword_count]
 
                 logger.info(
                     "智能生成热词模式=%s，候选数量=%d，最终使用=%s",

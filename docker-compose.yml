@@ -17,7 +17,7 @@ services:
     #           capabilities: [gpu]
     ports:
       - "6000:5000" # Web 界面 (临时映射到宿主6000)
-      - "5001:5900" # VNC 服务端口
+      # - "5001:5900" # VNC 服务端口（如需启用图形界面可取消注释）
     volumes:
       # - /share/docker/subtitle-processor/uploads:/app/uploads
       # - /share/docker/subtitle-processor/videos:/app/videos
@@ -30,7 +30,7 @@ services:
       - ./videos:/app/videos
       - ./outputs:/app/outputs
       - ./config:/app/config
-      - ./firefox_profile:/root/.mozilla/firefox # Firefox 配置目录
+      # - ./firefox_profile:/root/.mozilla/firefox # Firefox 配置目录（如需浏览器登录可取消注释）
     environment:
       - TZ=Asia/Shanghai
       - FLASK_APP=run_app.py
@@ -134,7 +134,7 @@ services:
   #     - srt-network
 
   telegram-bot:
-    profiles: [telegram]
+    # profiles: [telegram]
     build: # 直接运行、不构建的时候，注释掉
       context: ./telegram-bot
       dockerfile: Dockerfile

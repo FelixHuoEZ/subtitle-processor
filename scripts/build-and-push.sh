@@ -20,6 +20,7 @@ set -euo pipefail
 #   subtitle-processor -> ./ (Dockerfile)
 #   transcribe-audio   -> ./transcribe-audio (Dockerfile)
 #   telegram-bot       -> ./telegram-bot (Dockerfile)
+#   bgutil-provider    -> ./docker-config/bgutil (Dockerfile)
 
 # IMAGE_PREFIX can include registry/namespace (e.g. registry.gitlab.com/org/project).
 # When omitted the images are tagged locally without a registry prefix.
@@ -129,6 +130,7 @@ SERVICES=(
   "subtitle-processor=.:Dockerfile"
   "transcribe-audio=transcribe-audio:Dockerfile"
   "telegram-bot=telegram-bot:Dockerfile"
+  "bgutil-provider=docker-config/bgutil:Dockerfile"
 )
 
 USE_BUILDX=true

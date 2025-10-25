@@ -25,13 +25,14 @@ import re
 import yaml
 import threading
 import asyncio
-from typing import Any, Dict, Awaitable
+import tempfile
+from typing import Any, Dict, Awaitable, List, Optional
 from flask import Flask, request, jsonify
 from threading import Thread
 
 # 配置日志
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.DEBUG
 )
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,55 @@ PROXY = os.getenv("ALL_PROXY") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PR
 if PROXY:
     logger.info(f"Using proxy: {PROXY}")
 
+_raw_admins = TELEGRAM_SETTINGS.get("admins", [])
+if isinstance(_raw_admins, (str, int)):
+    _raw_admins = [_raw_admins]
+
+TELEGRAM_ADMIN_IDS = {
+    str(admin).strip()
+    for admin in _raw_admins
+    if admin is not None and str(admin).strip()
+}
+
+
+def is_admin_user(user_id: int) -> bool:
+    """Check whether the user is allowed to change runtime settings."""
+    if not TELEGRAM_ADMIN_IDS:
+        return True
+    return str(user_id) in TELEGRAM_ADMIN_IDS
+
+
+def fetch_hotword_settings_from_server() -> Dict[str, Any]:
+    """Pull the latest hotword settings from subtitle-processor."""
+    try:
+        response = requests.get(
+            f"{SUBTITLE_PROCESSOR_URL}/process/settings/hotword", timeout=10
+        )
+        response.raise_for_status()
+        payload = response.json()
+        settings = payload.get("settings")
+        if isinstance(settings, dict):
+            return settings
+    except Exception as exc:
+        logger.warning("获取热词配置失败: %s", exc)
+    return {}
+
+
+def update_hotword_settings_on_server(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Send a settings update to subtitle-processor and return the new state."""
+    response = requests.post(
+        f"{SUBTITLE_PROCESSOR_URL}/process/settings/hotword",
+        json=payload,
+        timeout=10,
+    )
+    response.raise_for_status()
+    result = response.json()
+    settings = result.get("settings")
+    if isinstance(settings, dict):
+        return settings
+    raise ValueError("未从服务器返回有效的设置状态")
+
+
 # 禁用不安全的HTTPS警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -164,10 +214,39 @@ def schedule_background_task(
     task.add_done_callback(_log_task_error)
     return task
 
+
+def log_update_metadata(prefix: str, update: Update) -> None:
+    """记录Telegram消息的原始发送时间和本地接收延迟."""
+    try:
+        message = getattr(update, "message", None) or getattr(
+            update, "edited_message", None
+        )
+        if not message:
+            return
+        message_date = message.date
+        if not message_date:
+            logger.debug("%s message_date missing", prefix)
+            return
+        if message_date.tzinfo is None:
+            message_ts = message_date.replace(tzinfo=datetime.timezone.utc).timestamp()
+        else:
+            message_ts = message_date.timestamp()
+        now_ts = time.time()
+        latency_ms = int((now_ts - message_ts) * 1000)
+        logger.debug(
+            "%s message_date=%s latency_ms=%s",
+            prefix,
+            message_date.isoformat(),
+            latency_ms,
+        )
+    except Exception as exc:
+        logger.debug("log_update_metadata error: %s", exc, exc_info=True)
+
 # 全局变量
 VALID_LOCATIONS = {"1": "new", "2": "later", "3": "archive", "4": "feed"}
 
 TAGS_HELP_MESSAGE = "请输入标签，多个标签用逗号分隔（例如：'youtube字幕,学习笔记,英语学习'）。\n输入 /skip 跳过添加标签。"
+HOTWORDS_HELP_MESSAGE = "请输入热词，多个热词用逗号分隔（例如：'人工智能,机器学习,AI语音'）。\n输入 /skip 跳过添加热词。"
 
 # 用户状态存储
 user_states = {}
@@ -479,14 +558,22 @@ async def send_subtitle_file(
 
         # 使用视频标题作为文件名
         title = video_info.get("title", "") if video_info else ""
-        if not title and "filename" in result:
-            title = os.path.splitext(result["filename"])[0]
+        if not title:
+            if result.get("original_filename"):
+                title = os.path.splitext(str(result["original_filename"]))[0]
+            elif "filename" in result:
+                title = os.path.splitext(result["filename"])[0]
         if not title:
             title = "subtitle"
-        filename = f"{title}.srt"
-
-        # 创建临时文件
-        import tempfile
+        safe_title = re.sub(r'[\\/:*?"<>|]', "_", title).strip() or "subtitle"
+        filename = f"{safe_title}.srt"
+        logger.debug(
+            "send_subtitle_file: resolved filename=%s title=%r original=%r fallback=%r",
+            filename,
+            video_info.get("title") if video_info else None,
+            result.get("original_filename"),
+            result.get("filename"),
+        )
 
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", suffix=".srt", delete=False
@@ -502,9 +589,6 @@ async def send_subtitle_file(
                 filename=filename,
                 caption=f"✅ 字幕已生成 ({result.get('source', 'unknown')})",
             )
-
-        # 删除临时文件
-        import os
 
         try:
             os.remove(temp_path)
@@ -523,6 +607,7 @@ async def ask_location(
 ) -> None:
     """询问用户选择location"""
     user_id = update.effective_user.id
+    logger.info("ask_location: user=%s url=%s", user_id, url)
 
     # 保存用户状态
     user_states[user_id] = {
@@ -557,6 +642,7 @@ async def location_timeout(context: CallbackContext) -> None:
     try:
         user_id = context.job.data["user_id"]
         chat_id = context.job.data["chat_id"]
+        logger.warning("location_timeout: user=%s chat=%s", user_id, chat_id)
 
         if (
             user_id in user_states
@@ -579,6 +665,9 @@ async def ask_tags(
 ) -> None:
     """询问用户输入tags"""
     user_id = update.effective_user.id
+    logger.info(
+        "ask_tags: user=%s location=%s url=%s", user_id, location, url
+    )
     user_states[user_id] = {
         "state": "waiting_for_tags",
         "url": url,
@@ -597,10 +686,45 @@ async def ask_tags(
     )
 
 
+async def ask_hotwords(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    url: str,
+    location: str,
+    tags: Optional[List[str]],
+) -> None:
+    """询问用户输入热词"""
+    user_id = update.effective_user.id
+    logger.info(
+        "ask_hotwords: user=%s location=%s url=%s tags=%s",
+        user_id,
+        location,
+        url,
+        tags,
+    )
+    user_states[user_id] = {
+        "state": "waiting_for_hotwords",
+        "url": url,
+        "location": location,
+        "tags": tags or [],
+        "last_interaction": datetime.datetime.now(pytz.UTC),
+    }
+
+    await update.message.reply_text(HOTWORDS_HELP_MESSAGE)
+
+    context.job_queue.run_once(
+        hotwords_timeout,
+        180,
+        data={"user_id": user_id, "chat_id": update.effective_chat.id},
+        name=f"hotwords_timeout_{user_id}",
+    )
+
+
 async def tags_timeout(context: CallbackContext) -> None:
     """处理tags输入超时"""
     user_id = context.job.data["user_id"]
     chat_id = context.job.data["chat_id"]
+    logger.warning("tags_timeout: user=%s chat=%s", user_id, chat_id)
 
     if (
         user_id in user_states
@@ -614,7 +738,9 @@ async def tags_timeout(context: CallbackContext) -> None:
         )
         schedule_background_task(
             context,
-            process_url_with_location(user_id, chat_id, url, location, context, []),
+            process_url_with_location(
+                user_id, chat_id, url, location, context, [], []
+            ),
         )
 
         # 清理状态
@@ -622,55 +748,90 @@ async def tags_timeout(context: CallbackContext) -> None:
             del user_states[user_id]
 
 
+async def hotwords_timeout(context: CallbackContext) -> None:
+    """处理热词输入超时"""
+    user_id = context.job.data["user_id"]
+    chat_id = context.job.data["chat_id"]
+    logger.warning("hotwords_timeout: user=%s chat=%s", user_id, chat_id)
+
+    state = user_states.get(user_id)
+    if state and state.get("state") == "waiting_for_hotwords":
+        url = state["url"]
+        location = state["location"]
+        tags = state.get("tags", [])
+        await context.bot.send_message(
+            chat_id=chat_id, text="⌛ 热词输入超时，将不添加热词继续处理。"
+        )
+        schedule_background_task(
+            context,
+            process_url_with_location(
+                user_id, chat_id, url, location, context, tags, []
+            ),
+        )
+        del user_states[user_id]
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理用户消息"""
     record_update(update)  # 更新活动时间与update信息
+    log_update_metadata("handle_message", update)
     user_id = update.effective_user.id
     user_state = user_states.get(user_id)
+    text_preview = (update.message.text or "").strip() if update.message else None
+    logger.info(
+        "handle_message: user=%s state=%s text=%r",
+        user_id,
+        user_state.get("state") if isinstance(user_state, dict) else None,
+        text_preview,
+    )
 
     # 如果用户正在等待输入tags
     if user_state and user_state.get("state") == "waiting_for_tags":
-        if update.message.text.lower() == "/skip":
-            # 用户选择跳过添加tags
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="✅ 已收到请求，正在后台处理...",
-            )
-            schedule_background_task(
-                context,
-                process_url_with_location(
-                    user_id,
-                    update.effective_chat.id,
-                    user_state["url"],
-                    user_state["location"],
-                    context,
-                    [],  # 明确传递空列表
-                ),
-            )
-        else:
-            # 处理用户输入的tags，支持中英文逗号
-            text = update.message.text.strip()
-            # 先将中文逗号替换为英文逗号，然后分割
-            tags = [
-                tag.strip() for tag in text.replace("，", ",").split(",") if tag.strip()
-            ]
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="✅ 已收到请求，正在后台处理...",
-            )
-            schedule_background_task(
-                context,
-                process_url_with_location(
-                    user_id,
-                    update.effective_chat.id,
-                    user_state["url"],
-                    user_state["location"],
-                    context,
-                    tags,
-                ),
-            )
+        text = (update.message.text or "").strip()
+        if not text:
+            await update.message.reply_text("❌ 标签不能为空，请输入标签或发送 /skip")
+            logger.info("handle_message: user=%s 提供空标签", user_id)
+            return
 
-        # 清理用户状态
+        normalized = text.replace("，", ",")
+        if normalized.lower() in {"skip", "跳过"}:
+            tags = []
+        else:
+            tags = [tag.strip() for tag in normalized.split(",") if tag.strip()]
+
+        await update.message.reply_text("✅ 标签已记录。")
+        logger.info("handle_message: user=%s 标签=%s", user_id, tags)
+        await ask_hotwords(update, context, user_state["url"], user_state["location"], tags)
+        return
+
+    if user_state and user_state.get("state") == "waiting_for_hotwords":
+        text = (update.message.text or "").strip()
+        normalized = text.replace("，", ",").replace("\n", ",")
+
+        if not text or normalized.lower() in {"skip", "跳过"}:
+            hotwords = []
+        else:
+            hotwords = [word.strip() for word in normalized.split(",") if word.strip()]
+
+        logger.info("handle_message: user=%s 热词=%s", user_id, hotwords)
+        tags = user_state.get("tags", [])
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="✅ 已收到请求，正在后台处理...",
+        )
+        schedule_background_task(
+            context,
+            process_url_with_location(
+                user_id,
+                update.effective_chat.id,
+                user_state["url"],
+                user_state["location"],
+                context,
+                tags,
+                hotwords,
+            ),
+        )
+
         if user_id in user_states:
             del user_states[user_id]
         return
@@ -678,6 +839,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # 如果用户正在等待选择location
     if user_state and user_state.get("state") == "waiting_for_location":
         location_input = update.message.text.lower().strip()
+        logger.info("handle_message: user=%s 选择location输入=%s", user_id, location_input)
 
         # 检查输入是否有效
         if location_input in VALID_LOCATIONS.values():
@@ -687,6 +849,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else:
             await update.message.reply_text(
                 "❌ 无效的选择，请输入数字(1-4)或有效的位置名称"
+            )
+            logger.warning(
+                "handle_message: user=%s location输入无效=%s", user_id, location_input
             )
             return
 
@@ -717,6 +882,12 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /process 命令"""
     try:
         record_update(update)
+        log_update_metadata("/process", update)
+        logger.info(
+            "/process command: user=%s text=%r",
+            update.effective_user.id,
+            update.message.text if update.message else None,
+        )
 
         text = (update.message.text or "").strip()
         parts = text.split(maxsplit=1)
@@ -736,11 +907,341 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "new",
                 context,
                 [],
+                [],
             ),
         )
     except Exception as e:
         logger.error(f"处理 /process 命令时出错: {str(e)}")
         await update.message.reply_text("❌ 处理视频时出错，请稍后重试。")
+
+
+async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理 /skip 命令"""
+    record_update(update)
+    log_update_metadata("/skip", update)
+    user_id = update.effective_user.id
+    user_state = user_states.get(user_id)
+    logger.info("/skip command: user=%s state=%s", user_id, user_state)
+
+    if not user_state:
+        await update.message.reply_text("当前没有需要跳过的步骤。")
+        return
+
+    state = user_state.get("state")
+    if state == "waiting_for_tags":
+        await update.message.reply_text("✅ 标签已跳过。")
+        await ask_hotwords(update, context, user_state["url"], user_state["location"], [])
+    elif state == "waiting_for_hotwords":
+        tags = user_state.get("tags", [])
+        await update.message.reply_text("✅ 热词已跳过，正在后台处理...")
+        schedule_background_task(
+            context,
+            process_url_with_location(
+                user_id,
+                update.effective_chat.id,
+                user_state["url"],
+                user_state["location"],
+                context,
+                tags,
+                [],
+            ),
+        )
+        if user_id in user_states:
+            del user_states[user_id]
+    elif state == "waiting_for_location":
+        await update.message.reply_text("❌ 请选择一个保存位置（1-4），暂不支持跳过。")
+    else:
+        await update.message.reply_text("当前没有可跳过的步骤。")
+
+
+async def hotword_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """查看热词配置状态"""
+    record_update(update)
+    log_update_metadata("/hotword_status", update)
+    logger.info("/hotword_status command: user=%s", update.effective_user.id)
+    settings = await asyncio.to_thread(fetch_hotword_settings_from_server)
+    if settings:
+        context.application.bot_data["hotword_settings"] = settings
+    else:
+        settings = context.application.bot_data.get("hotword_settings", {})
+
+    auto_state = "开启" if settings.get("auto_hotwords") else "关闭"
+    post_state = "开启" if settings.get("post_process") else "关闭"
+    mode = settings.get("mode", "user_only")
+    max_count = settings.get("max_count", 20)
+
+    await update.message.reply_text(
+        f"🔤 自动热词：{auto_state}\n"
+        f"🛠 热词后处理：{post_state}\n"
+        f"🧭 当前模式：{mode}\n"
+        f"🔢 热词上限：{max_count}"
+    )
+
+
+async def hotword_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """切换热词开关"""
+    record_update(update)
+    log_update_metadata("/hotword_toggle", update)
+    user_id = update.effective_user.id
+    logger.info("/hotword_toggle command: user=%s text=%r", user_id, update.message.text if update.message else None)
+    if not is_admin_user(user_id):
+        await update.message.reply_text("❌ 仅管理员可以执行该操作。")
+        return
+
+    text = (update.message.text or "").strip()
+    parts = text.split(maxsplit=1)
+    desired_state = None
+
+    if len(parts) > 1:
+        arg = parts[1].lower()
+        if arg in {"on", "true", "enable", "1", "开启", "open"}:
+            desired_state = True
+        elif arg in {"off", "false", "disable", "0", "关闭", "close"}:
+            desired_state = False
+        else:
+            await update.message.reply_text("❌ 参数无效，请使用 /hotword_toggle [on|off]")
+            return
+
+    current_settings = context.application.bot_data.get("hotword_settings", {})
+    if desired_state is None:
+        desired_state = not current_settings.get("auto_hotwords", False)
+
+    try:
+        new_settings = await asyncio.to_thread(
+            update_hotword_settings_on_server, {"auto_hotwords": desired_state}
+        )
+    except Exception as exc:
+        logger.error("更新热词开关失败: %s", exc)
+        await update.message.reply_text("❌ 切换热词开关失败，请稍后重试。")
+        return
+
+    context.application.bot_data["hotword_settings"] = new_settings
+    auto_state = "开启" if new_settings.get("auto_hotwords") else "关闭"
+    post_state = "开启" if new_settings.get("post_process") else "关闭"
+    mode = new_settings.get("mode", "user_only")
+    max_count = new_settings.get("max_count", 20)
+
+    await update.message.reply_text(
+        f"🔤 自动热词已{auto_state}\n"
+        f"🛠 热词后处理：{post_state}\n"
+        f"🧭 当前模式：{mode}\n"
+        f"🔢 热词上限：{max_count}"
+    )
+
+
+async def monitor_process_completion(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    message_id: int,
+    process_id: str,
+    poll_interval: int = 8,
+    max_attempts: int = 120,
+) -> None:
+    """轮询字幕处理任务状态，完成后自动发送字幕."""
+    poll_url = f"{SUBTITLE_PROCESSOR_URL}/process/status/{process_id}"
+    logger.debug(
+        "monitor_process_completion: chat=%s message=%s process=%s url=%s",
+        chat_id,
+        message_id,
+        process_id,
+        poll_url,
+    )
+
+    class DummyChat:
+        def __init__(self, chat_id: int):
+            self.id = chat_id
+
+    class DummyUpdate:
+        def __init__(self, chat_id: int):
+            self.effective_chat = DummyChat(chat_id)
+
+    content_wait_attempts = 0
+    max_content_attempts = 30
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = await asyncio.to_thread(
+                requests.get,
+                poll_url,
+                params={"include_content": "1"},
+                timeout=30,
+            )
+        except Exception as exc:
+            logger.debug(
+                "轮询任务状态失败(%s) attempt=%s: %s", process_id, attempt, exc
+            )
+            await asyncio.sleep(poll_interval)
+            continue
+
+        if response.status_code == 404:
+            logger.warning("任务不存在或已过期: %s", process_id)
+            try:
+                await context.bot.edit_message_text(
+                    "⚠️ 未找到处理任务，请稍后重试。",
+                    chat_id=chat_id,
+                    message_id=message_id,
+                )
+            except Exception as edit_err:
+                logger.debug("更新消息失败: %s", edit_err)
+            return
+
+        if response.status_code >= 500:
+            logger.warning(
+                "任务状态查询失败(%s): %s %s",
+                process_id,
+                response.status_code,
+                response.text,
+            )
+            await asyncio.sleep(poll_interval)
+            continue
+
+        try:
+            payload = response.json()
+        except ValueError:
+            logger.error("任务状态返回非JSON(%s): %s", process_id, response.text)
+            await asyncio.sleep(poll_interval)
+            continue
+
+        status = (payload.get("status") or "").lower()
+        logger.debug(
+            "任务状态(%s) attempt=%s status=%s progress=%s",
+            process_id,
+            attempt,
+            status,
+            payload.get("progress"),
+        )
+
+        if status == "completed":
+            subtitle_content = payload.get("subtitle_content") or ""
+            logger.debug(
+                "任务完成检测: process=%s subtitle_len=%s",
+                process_id,
+                len(subtitle_content),
+            )
+            filename = payload.get("filename") or f"{process_id}.srt"
+            video_info = payload.get("video_info") or {}
+
+            if not subtitle_content.strip():
+                view_status_url = f"{poll_url}/subtitle"
+                try:
+                    subtitle_response = await asyncio.to_thread(
+                        requests.get,
+                        view_status_url,
+                        timeout=30,
+                    )
+                    if subtitle_response.status_code == 200:
+                        subtitle_candidate = subtitle_response.text or ""
+                        logger.debug(
+                            "通过字幕接口获取内容: process=%s len=%s",
+                            process_id,
+                            len(subtitle_candidate),
+                        )
+                        if subtitle_candidate.strip():
+                            subtitle_content = subtitle_candidate
+                    elif subtitle_response.status_code == 202:
+                        logger.debug(
+                            "字幕接口返回未就绪状态(202): %s", process_id
+                        )
+                    else:
+                        logger.debug(
+                            "字幕接口返回状态码 %s: %s",
+                            subtitle_response.status_code,
+                            subtitle_response.text,
+                        )
+                except Exception as subtitle_fetch_error:
+                    logger.debug(
+                        "通过字幕接口获取失败(%s): %s",
+                        process_id,
+                        subtitle_fetch_error,
+                    )
+
+            if not subtitle_content.strip():
+                content_wait_attempts += 1
+                if content_wait_attempts <= max_content_attempts:
+                    logger.debug(
+                        "任务完成但字幕内容为空，等待重试(%s/%s): %s",
+                        content_wait_attempts,
+                        max_content_attempts,
+                        process_id,
+                    )
+                    await asyncio.sleep(max(2, poll_interval // 2))
+                    continue
+                logger.warning(
+                    "任务完成但仍未获取字幕内容，将提示用户在网页查看: %s", process_id
+                )
+                try:
+                    await context.bot.edit_message_text(
+                        "⚠️ 视频处理完成，但未能获取字幕内容，请稍后在网页查看。",
+                        chat_id=chat_id,
+                        message_id=message_id,
+                    )
+                except Exception as edit_err:
+                    logger.debug("更新消息失败: %s", edit_err)
+                return
+
+            try:
+                await context.bot.edit_message_text(
+                    "✅ 视频处理完成，正在发送字幕文件...",
+                    chat_id=chat_id,
+                    message_id=message_id,
+                )
+            except Exception as edit_err:
+                logger.debug("更新消息失败: %s", edit_err)
+
+            original_name = (
+                video_info.get("title")
+                if isinstance(video_info, dict)
+                else None
+            ) or payload.get("original_filename") or process_id
+
+            result_payload = {
+                "subtitle_content": subtitle_content,
+                "filename": filename,
+                "video_info": video_info,
+                "source": payload.get("source", "auto"),
+                "original_filename": original_name,
+            }
+            logger.debug(
+                "字幕发送前检查: process=%s payload_keys=%s video_info_title=%r original_name=%r filename=%r",
+                process_id,
+                list(payload.keys()),
+                video_info.get("title") if isinstance(video_info, dict) else None,
+                original_name,
+                filename,
+            )
+
+            logger.debug(
+                "准备发送字幕: process=%s filename=%s content_length=%s",
+                process_id,
+                filename,
+                len(subtitle_content),
+            )
+            await send_subtitle_file(DummyUpdate(chat_id), context, result_payload)
+            return
+
+        if status == "failed":
+            error_message = payload.get("error") or "处理失败"
+            try:
+                await context.bot.edit_message_text(
+                    f"❌ 视频处理失败：{error_message}",
+                    chat_id=chat_id,
+                    message_id=message_id,
+                )
+            except Exception as edit_err:
+                logger.debug("更新消息失败: %s", edit_err)
+            return
+
+        await asyncio.sleep(poll_interval)
+
+    logger.warning("任务超时未完成: %s", process_id)
+    try:
+        await context.bot.edit_message_text(
+            "⚠️ 处理时间超过预期，请稍后重试或在网页查询结果。",
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+    except Exception as edit_err:
+        logger.debug("更新消息失败: %s", edit_err)
 
 
 async def process_url_with_location(
@@ -749,10 +1250,20 @@ async def process_url_with_location(
     url: str,
     location: str,
     context: ContextTypes.DEFAULT_TYPE,
-    tags: list = None,
+    tags: Optional[List[str]] = None,
+    hotwords: Optional[List[str]] = None,
 ) -> None:
     """使用指定的location处理URL"""
     try:
+        logger.info(
+            "process_url_with_location: user=%s chat=%s url=%s location=%s tags=%s hotwords=%s",
+            user_id,
+            chat_id,
+            url,
+            location,
+            tags,
+            hotwords,
+        )
         # 标准化URL
         normalized_url, platform = normalize_url(url)
         if not normalized_url:
@@ -767,8 +1278,9 @@ async def process_url_with_location(
 
         # 记录处理信息
         tags_info = f", tags: {tags}" if tags else ""
+        hotwords_info = f", hotwords: {hotwords}" if hotwords else ""
         logger.info(
-            f"处理{platform}URL: {normalized_url}, location: {location}{tags_info}"
+            f"处理{platform}URL: {normalized_url}, location: {location}{tags_info}{hotwords_info}"
         )
 
         # 发送处理中的消息
@@ -784,9 +1296,8 @@ async def process_url_with_location(
             "video_id": video_id,
         }
 
-        # 如果有tags，添加到请求数据中
-        if tags:
-            data["tags"] = tags
+        data["tags"] = tags or []
+        data["hotwords"] = hotwords or []
 
         # 发送请求到字幕处理服务
         try:
@@ -796,17 +1307,69 @@ async def process_url_with_location(
                 json=data,
                 timeout=(SUBTITLE_CONNECT_TIMEOUT, SUBTITLE_READ_TIMEOUT),
             )
+            status_code = response.status_code
+            try:
+                result = response.json()
+                if isinstance(result, dict):
+                    result.setdefault("original_filename", data.get("video_id"))
+            except ValueError:
+                result = {}
+
+            if status_code == 202:
+                process_id = result.get("process_id")
+                message_text = result.get("message") or "⏳ 视频已进入后台处理，完成后我会继续跟进。"
+                try:
+                    await context.bot.edit_message_text(
+                        message_text,
+                        chat_id=chat_id,
+                        message_id=processing_message.message_id,
+                    )
+                except Exception as edit_err:
+                    logger.debug("更新排队消息失败: %s", edit_err)
+
+                if process_id:
+                    schedule_background_task(
+                        context,
+                        monitor_process_completion(
+                            context,
+                            chat_id,
+                            processing_message.message_id,
+                            process_id,
+                        ),
+                    )
+                else:
+                    logger.warning("202 响应缺少 process_id，无法继续跟踪")
+                return
+
             response.raise_for_status()
-            result = response.json()
 
-            # 更新处理中的消息
-            await context.bot.edit_message_text(
-                "✅ 视频处理完成，正在发送字幕文件...",
-                chat_id=chat_id,
-                message_id=processing_message.message_id,
-            )
+            if not result:
+                logger.warning("处理结果为空，无法发送字幕")
+                await context.bot.edit_message_text(
+                    "⚠️ 未收到字幕结果，请稍后在网页查询。",
+                    chat_id=chat_id,
+                    message_id=processing_message.message_id,
+                )
+                return
 
-            # 创建一个虚拟的Update对象来传递chat_id
+            if not result.get("subtitle_content"):
+                logger.warning("处理结果缺少 subtitle_content: %s", result.keys())
+                await context.bot.edit_message_text(
+                    "⚠️ 字幕生成结果暂不可用，请稍后在网页查询。",
+                    chat_id=chat_id,
+                    message_id=processing_message.message_id,
+                )
+                return
+
+            try:
+                await context.bot.edit_message_text(
+                    "✅ 视频处理完成，正在发送字幕文件...",
+                    chat_id=chat_id,
+                    message_id=processing_message.message_id,
+                )
+            except Exception as edit_err:
+                logger.debug("更新完成消息失败: %s", edit_err)
+
             class DummyChat:
                 def __init__(self, chat_id):
                     self.id = chat_id
@@ -815,10 +1378,7 @@ async def process_url_with_location(
                 def __init__(self, chat_id):
                     self.effective_chat = DummyChat(chat_id)
 
-            dummy_update = DummyUpdate(chat_id)
-
-            # 发送字幕文件
-            await send_subtitle_file(dummy_update, context, result)
+            await send_subtitle_file(DummyUpdate(chat_id), context, result)
 
         except requests.exceptions.RequestException as e:
             error_message = f"处理请求时出错: {str(e)}"
@@ -927,6 +1487,10 @@ def main():
 
     # 构建应用
     application = application_builder.build()
+    application.bot_data["hotword_settings"] = fetch_hotword_settings_from_server()
+    logger.info(
+        "初始化热词设置: %s", application.bot_data.get("hotword_settings", {})
+    )
 
     # 启动连接监控器
     connection_monitor(application)
@@ -981,6 +1545,9 @@ def main():
     # 添加处理器
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("process", process_url))
+    application.add_handler(CommandHandler("skip", skip_command))
+    application.add_handler(CommandHandler("hotword_status", hotword_status))
+    application.add_handler(CommandHandler("hotword_toggle", hotword_toggle))
     # 处理普通消息
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)

@@ -6,10 +6,10 @@
 > **注意**：本 README 完全由 AI 生成，仅供参考。
 
 ### Recent Updates
-- `scripts/build-and-push.sh` now reuses persistent BuildKit caches, pushes multi-arch manifests, and reloads the host architecture locally without an extra `docker pull`.
-- Telegram webhook handlers now acknowledge requests immediately and move heavy subtitle generation into background tasks, preventing duplicate retries.
-- Updated Telegram deployment guidance: keep a single webhook-facing bot instance and let other nodes run only the processing services to avoid duplicate replies.
-- Documented the image distribution workflow and `.env` overrides for easier rollout across multiple machines.
+- Runtime hotword settings can be toggled without restarting: `/process/settings/hotword` persists to `config/hotword_settings.json`, and Telegram 中新增 `/hotword_status` / `/hotword_toggle` 支持在线开关。
+- Telegram 机器人增加标签/热词交互提示、`/skip` 快捷命令，并在后台轮询 `/process/status/<id>` 自动推送字幕文件。
+- `scripts/build-and-push.sh` 新增 `bgutil-provider` 镜像构建；默认 Dockerfile 仅保留必需依赖，X11/VNC 相关组件以注释形式保留，构建镜像更轻量。
+- 后端提供 `/process/status/<id>?include_content=1` 以及 `/process/status/<id>/subtitle`，方便外部查询任务进度与字幕原文。
 
 <a name="english"></a>
 ## 🌍 English
@@ -47,6 +47,11 @@ A comprehensive subtitle processing service that automatically downloads, transc
   - Rich text formatting support
   - Seamless sync with Readwise Reader
   - Smart content segmentation for long videos
+- **Hotword Management**
+  - Runtime toggle API (`/process/settings/hotword`) with persisted JSON state
+  - Telegram commands `/hotword_status`、`/hotword_toggle` 查看/切换自动热词
+  - Conversation flow supports manual hotword input或 `/skip` 跳过
+  - `config/hotwords-example/` 与 `config/hotword_settings.json.example` 提供可定制模板
 
 ### 🛠️ Technical Stack
 - Backend: Python Flask
@@ -63,10 +68,16 @@ A comprehensive subtitle processing service that automatically downloads, transc
    TELEGRAM_TOKEN=your_telegram_bot_token
    READWISE_TOKEN=your_readwise_token
    ```
-4. Configure Firefox cookies for YouTube access:
+4. Configure hotword settings (optional but recommended):
+   ```bash
+   cp config/hotword_settings.json.example config/hotword_settings.json
+   # Edit config/hotword_settings.json to set defaults for auto_hotwords/post_process/mode/max_count
+   # For advanced generation rules, copy config/hotwords-example/hotwords_config-example.yml to config/hotwords/hotwords_config.yml
+   ```
+5. Configure Firefox cookies for YouTube access:
    - Copy your Firefox profile directory (located at `C:\Users\<USER_NAME>\AppData\Roaming\Mozilla\Firefox\Profiles\`) to the `firefox_profile` directory in the project
    - This enables downloading restricted YouTube videos using your Firefox login cookies
-5. Start the services:
+6. Start the services:
    ```bash
    docker-compose up --build
    ```
@@ -180,6 +191,10 @@ Special thanks to:
   - 支持富文本格式
   - 与 Readwise Reader 无缝同步
   - 智能分段处理长视频内容
+- **热词管理**
+  - 运行期热词开关可通过 `/process/settings/hotword` 与 Telegram 指令在线调整
+  - 标签/热词会话支持手动输入或 `/skip` 快捷跳过
+  - `config/hotword_settings.json.example`、`config/hotwords-example/` 提供自定义模板，轻松扩展自动热词策略
 
 ### 🛠️ 技术栈
 - 后端：Python Flask
@@ -196,10 +211,16 @@ Special thanks to:
    TELEGRAM_TOKEN=你的_telegram_机器人_token
    READWISE_TOKEN=你的_readwise_token
    ```
-4. 配置 Firefox cookies 以访问 YouTube：
+4. 可选：配置热词默认策略
+   ```bash
+   cp config/hotword_settings.json.example config/hotword_settings.json
+   # 编辑热词开关/模式/最大数量等默认值
+   # 如需自定义生成规则，可复制 config/hotwords-example/hotwords_config-example.yml 至 config/hotwords/hotwords_config.yml
+   ```
+5. 配置 Firefox cookies 以访问 YouTube：
    - 将 Firefox 配置文件目录（位于 `C:\Users\<USER_NAME>\AppData\Roaming\Mozilla\Firefox\Profiles\`）复制到项目中的 `firefox_profile` 目录
    - 这使您可以使用 Firefox 登录 cookie 下载受限制的 YouTube 视频
-5. 启动服务：
+6. 启动服务：
    ```bash
    docker-compose up --build
    ```

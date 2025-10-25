@@ -1,0 +1,11 @@
+{
+  "_comment": "复制此文件为 config/hotword_settings.json 后再修改，字段含义见下：",
+  "_comment_auto_hotwords": "auto_hotwords: 是否启用智能热词生成（true/false）",
+  "_comment_post_process": "post_process: 是否启用热词结果后处理（true/false）",
+  "_comment_mode": "mode: 自动生成热词的策略，可选 user_only / curated / experiment",
+  "_comment_max_count": "max_count: 最多保留的热词数量（0-100）",
+  "auto_hotwords": true,
+  "post_process": true,
+  "mode": "curated",
+  "max_count": 20
+}

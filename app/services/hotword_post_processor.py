@@ -4,9 +4,11 @@ import os
 import logging
 import difflib
 import re
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 import jieba
+
+from .hotword_settings import HotwordSettingsManager
 
 
 logger = logging.getLogger(__name__)
@@ -15,12 +17,11 @@ logger = logging.getLogger(__name__)
 class HotwordPostProcessor:
     """Apply hotword-aware corrections to transcription results."""
 
-    def __init__(self) -> None:
-        self.enabled = os.getenv("ENABLE_HOTWORD_POST_PROCESS", "false").lower() == "true"
+    def __init__(self, settings_manager: Optional[HotwordSettingsManager] = None) -> None:
+        self.settings_manager = settings_manager or HotwordSettingsManager.get_instance()
         self.similarity_threshold = float(os.getenv("HOTWORD_POST_SIMILARITY", "0.82"))
         self.enable_substring = os.getenv("ENABLE_HOTWORD_SUBSTRING", "false").lower() == "true"
-
-        if self.enabled:
+        if self.settings_manager.get_state().get("post_process"):
             logger.info(
                 "热词后处理已启用: similarity_threshold=%.2f, substring=%s",
                 self.similarity_threshold,
@@ -29,7 +30,8 @@ class HotwordPostProcessor:
 
     def process_result(self, result: Dict[str, Any], hotwords: List[str]) -> Dict[str, Any]:
         """Mutate result text according to hotword list."""
-        if not self.enabled or not hotwords or not result:
+        state = self.settings_manager.get_state()
+        if not state.get("post_process") or not hotwords or not result:
             return result
 
         text = result.get("text")

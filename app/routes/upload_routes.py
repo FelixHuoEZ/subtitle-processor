@@ -3,6 +3,7 @@
 import os
 import uuid
 import json
+import re
 import logging
 import threading
 import traceback
@@ -360,6 +361,12 @@ def _process_video_task(task_info, auto_transcribe):
             if result.get('subtitle_content'):
                 task_info['status'] = 'completed'
                 task_info['progress'] = 100
+                if not task_info.get('subtitle_path'):
+                    safe_title = task_info.get('video_info', {}).get('title') or process_id
+                    safe_title = re.sub(r'[\\/:*?"<>|]', "_", safe_title).strip() or process_id
+                    subtitle_filename = f"{safe_title}.srt"
+                    subtitle_path = file_service.save_file(result['subtitle_content'], subtitle_filename)
+                    task_info['subtitle_path'] = subtitle_path
                 logger.info(f"第2步完成：视频已有字幕，无需转录: {process_id}")
                 logger.info(f"第3步：开始发送内容到Readwise Reader: {process_id}")
 
@@ -429,6 +436,11 @@ def _process_video_task(task_info, auto_transcribe):
                             task_info['subtitle_content'] = srt_content
                             task_info['transcription_result'] = transcription_result
                             task_info['progress'] = 100
+                            safe_title = task_info.get('video_info', {}).get('title') or process_id
+                            safe_title = re.sub(r'[\\/:*?"<>|]', "_", safe_title).strip() or process_id
+                            subtitle_filename = f"{safe_title}.srt"
+                            subtitle_path = file_service.save_file(srt_content, subtitle_filename)
+                            task_info['subtitle_path'] = subtitle_path
                             logger.info(f"第2步完成：音频转录和SRT转换成功: {process_id}")
 
                             logger.info(f"第3步：开始发送内容到Readwise Reader: {process_id}")
@@ -474,6 +486,11 @@ def _process_video_task(task_info, auto_transcribe):
                     f"视频标题: {task_info.get('video_info', {}).get('title', '未知')}\n"
                     f"视频链接: {url}\n\n注意：音频转录暂时不可用，请手动处理字幕。"
                 )
+                safe_title = task_info.get('video_info', {}).get('title') or process_id
+                safe_title = re.sub(r'[\\/:*?"<>|]', "_", safe_title).strip() or process_id
+                subtitle_filename = f"{safe_title}.srt"
+                subtitle_path = file_service.save_file(task_info['subtitle_content'], subtitle_filename)
+                task_info['subtitle_path'] = subtitle_path
                 logger.warning(f"第2步跳过：转录不可用，返回基本信息: {process_id}")
 
                 logger.info(f"第3步：发送基本视频信息到Readwise Reader: {process_id}")
