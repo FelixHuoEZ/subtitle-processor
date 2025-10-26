@@ -905,9 +905,15 @@ class VideoService:
 
             # 检查配置文件中是否有指定的cookie路径
             cookie_path = get_config_value("cookies")
-            if cookie_path and os.path.exists(cookie_path):
-                logger.info(f"使用配置的cookie路径: {cookie_path}")
-                return cookie_path
+            if cookie_path:
+                if os.path.isdir(cookie_path):
+                    cookie_db = os.path.join(cookie_path, "cookies.sqlite")
+                    if os.path.exists(cookie_db):
+                        logger.info(f"使用配置的cookie目录: {cookie_path}")
+                        return cookie_path
+                    logger.warning(f"配置的cookie目录缺少cookies.sqlite: {cookie_db}")
+                else:
+                    logger.warning(f"配置的cookie路径不存在: {cookie_path}")
 
             # 在Docker容器中，Firefox配置文件路径
             firefox_config = "/root/.mozilla/firefox/profiles.ini"
@@ -935,18 +941,30 @@ class VideoService:
                                 config.has_option(section, "Name")
                                 and config.get(section, "Name") == "default-release"
                             ):
-                                logger.info(
-                                    f"使用default-release配置文件: {profile_path}"
+                                if os.path.isdir(profile_path) and os.path.exists(
+                                    os.path.join(profile_path, "cookies.sqlite")
+                                ):
+                                    logger.info(
+                                        f"使用default-release配置文件: {profile_path}"
+                                    )
+                                    return profile_path
+                                logger.warning(
+                                    f"default-release配置缺少cookies.sqlite: {profile_path}"
                                 )
-                                return profile_path
 
                             # 如果标记为默认配置文件
                             if (
                                 config.has_option(section, "Default")
                                 and config.getint(section, "Default", fallback=0) == 1
                             ):
-                                logger.info(f"使用默认配置文件: {profile_path}")
-                                return profile_path
+                                if os.path.isdir(profile_path) and os.path.exists(
+                                    os.path.join(profile_path, "cookies.sqlite")
+                                ):
+                                    logger.info(f"使用默认配置文件: {profile_path}")
+                                    return profile_path
+                                logger.warning(
+                                    f"默认配置缺少cookies.sqlite: {profile_path}"
+                                )
 
             logger.warning("未找到Firefox配置文件")
             return None

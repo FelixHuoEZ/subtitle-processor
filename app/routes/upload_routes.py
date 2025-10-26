@@ -480,43 +480,16 @@ def _process_video_task(task_info, auto_transcribe):
                     task_info['error'] = f'转录出错: {str(e)}'
                     logger.error(f"第2步错误：转录出错: {process_id} - {str(e)}")
             else:
-                task_info['status'] = 'completed'
-                task_info['progress'] = 100
-                task_info['subtitle_content'] = (
-                    f"视频标题: {task_info.get('video_info', {}).get('title', '未知')}\n"
-                    f"视频链接: {url}\n\n注意：音频转录暂时不可用，请手动处理字幕。"
-                )
-                safe_title = task_info.get('video_info', {}).get('title') or process_id
-                safe_title = re.sub(r'[\\/:*?"<>|]', "_", safe_title).strip() or process_id
-                subtitle_filename = f"{safe_title}.srt"
-                subtitle_path = file_service.save_file(task_info['subtitle_content'], subtitle_filename)
-                task_info['subtitle_path'] = subtitle_path
-                logger.warning(f"第2步跳过：转录不可用，返回基本信息: {process_id}")
-
-                logger.info(f"第3步：发送基本视频信息到Readwise Reader: {process_id}")
-                logger.debug("调试信息(基本信息) - task_info关键字段:")
-                logger.debug(f"  - video_info存在: {bool(task_info.get('video_info'))}")
-                logger.debug(f"  - subtitle_content存在: {bool(task_info.get('subtitle_content'))}")
-                logger.debug(f"  - subtitle_content长度: {len(task_info.get('subtitle_content', ''))}")
-                logger.debug(f"  - tags: {task_info.get('tags')}")
-
-                try:
-                    logger.info("调用readwise_service.create_article_from_subtitle(基本信息)...")
-                    readwise_result = readwise_service.create_article_from_subtitle(task_info)
-                    logger.info(f"Readwise调用返回结果(基本信息): {readwise_result}")
-
-                    if readwise_result:
-                        task_info['readwise_article_id'] = readwise_result.get('id')
-                        task_info['readwise_url'] = readwise_result.get('url')
-                        logger.info(f"第3步完成：Readwise文章(基本信息)创建成功: {process_id} -> {readwise_result.get('id')}")
-                    else:
-                        logger.warning(f"第3步失败：Readwise文章(基本信息)创建失败: {process_id}")
-                        logger.warning(f"readwise_service返回了None或False(基本信息): {readwise_result}")
-                except Exception as e:
-                    logger.error(f"第3步错误：发送基本信息到Readwise失败: {process_id} - {str(e)}")
-                    logger.error(f"异常堆栈(基本信息): {traceback.format_exc()}")
-
-                logger.info(f"=== 视频处理流程完成(仅基本信息) === {process_id}")
+                logger.error(f"第2步失败：未获取到可用音频文件，终止后续流程: {process_id}")
+                task_info['status'] = 'failed'
+                task_info['error'] = '音频下载失败，已终止后续流程'
+                task_info['progress'] = task_info.get('progress', 0)
+                task_info['subtitle_content'] = None
+                task_info['subtitle_path'] = None
+                task_info['transcription_result'] = None
+                task_info['readwise_article_id'] = None
+                task_info['readwise_url'] = None
+                task_info['updated_time'] = datetime.now().isoformat()
         else:
             task_info['status'] = 'failed'
             task_info['error'] = '视频处理失败'
