@@ -72,6 +72,14 @@ def _get_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _get_int(value: Any, default: int) -> int:
+    """将配置值转换为整数，无法解析时返回默认值"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _normalize_path(path: str) -> str:
     """确保 webhook 路径以单个斜杠开头"""
     if not path:
@@ -131,6 +139,27 @@ WEBHOOK_PUBLIC_URL = os.getenv(
     "TELEGRAM_WEBHOOK_URL", WEBHOOK_CONFIG.get("public_url") or DEFAULT_PUBLIC_URL
 )
 
+PROMPT_FLOW_CONFIG = (
+    TELEGRAM_SETTINGS.get("prompt_flow", {})
+    if isinstance(TELEGRAM_SETTINGS.get("prompt_flow"), dict)
+    else {}
+)
+
+REQUIRE_LOCATION_SELECTION = _get_bool(
+    PROMPT_FLOW_CONFIG.get("require_location"), True
+)
+REQUIRE_TAG_INPUT = _get_bool(PROMPT_FLOW_CONFIG.get("require_tags"), True)
+REQUIRE_HOTWORD_INPUT = _get_bool(
+    PROMPT_FLOW_CONFIG.get("require_hotwords"), True
+)
+TAGS_TIMEOUT_SECONDS = _get_int(
+    PROMPT_FLOW_CONFIG.get("tags_timeout_seconds"), 180
+)
+HOTWORDS_TIMEOUT_SECONDS = _get_int(
+    PROMPT_FLOW_CONFIG.get("hotwords_timeout_seconds"), 180
+)
+
+
 logger.info(f"使用的SUBTITLE_PROCESSOR_URL: {SUBTITLE_PROCESSOR_URL}")
 logger.info(f"使用的SERVER_DOMAIN: {SERVER_DOMAIN}")
 logger.info(
@@ -140,6 +169,15 @@ logger.info(
     WEBHOOK_LISTEN,
     WEBHOOK_PORT,
     WEBHOOK_PATH,
+)
+logger.info(
+    "Telegram输入流程配置: require_location=%s, require_tags=%s, require_hotwords=%s, "
+    "tags_timeout=%s, hotwords_timeout=%s",
+    REQUIRE_LOCATION_SELECTION,
+    REQUIRE_TAG_INPUT,
+    REQUIRE_HOTWORD_INPUT,
+    TAGS_TIMEOUT_SECONDS,
+    HOTWORDS_TIMEOUT_SECONDS,
 )
 
 # 获取环境变量
@@ -244,6 +282,14 @@ def log_update_metadata(prefix: str, update: Update) -> None:
 
 # 全局变量
 VALID_LOCATIONS = {"1": "new", "2": "later", "3": "archive", "4": "feed"}
+
+DEFAULT_LOCATION = str(TELEGRAM_SETTINGS.get("default_location", "new")).lower()
+if DEFAULT_LOCATION not in VALID_LOCATIONS.values():
+    logger.warning(
+        "配置的 default_location=%s 无效，将使用 new",
+        TELEGRAM_SETTINGS.get("default_location"),
+    )
+    DEFAULT_LOCATION = "new"
 
 TAGS_HELP_MESSAGE = "请输入标签，多个标签用逗号分隔（例如：'youtube字幕,学习笔记,英语学习'）。\n输入 /skip 跳过添加标签。"
 HOTWORDS_HELP_MESSAGE = "请输入热词，多个热词用逗号分隔（例如：'人工智能,机器学习,AI语音'）。\n输入 /skip 跳过添加热词。"
@@ -665,6 +711,13 @@ async def ask_tags(
 ) -> None:
     """询问用户输入tags"""
     user_id = update.effective_user.id
+    if not REQUIRE_TAG_INPUT:
+        logger.info(
+            "ask_tags: user=%s 配置禁用标签输入，跳过该步骤", user_id
+        )
+        await ask_hotwords(update, context, url, location, [])
+        return
+
     logger.info(
         "ask_tags: user=%s location=%s url=%s", user_id, location, url
     )
@@ -678,12 +731,13 @@ async def ask_tags(
     await update.message.reply_text(TAGS_HELP_MESSAGE)
 
     # 设置超时
-    context.job_queue.run_once(
-        tags_timeout,
-        180,  # 3分钟超时
-        data={"user_id": user_id, "chat_id": update.effective_chat.id},
-        name=f"tags_timeout_{user_id}",
-    )
+    if TAGS_TIMEOUT_SECONDS > 0:
+        context.job_queue.run_once(
+            tags_timeout,
+            TAGS_TIMEOUT_SECONDS,
+            data={"user_id": user_id, "chat_id": update.effective_chat.id},
+            name=f"tags_timeout_{user_id}",
+        )
 
 
 async def ask_hotwords(
@@ -695,6 +749,15 @@ async def ask_hotwords(
 ) -> None:
     """询问用户输入热词"""
     user_id = update.effective_user.id
+    if not REQUIRE_HOTWORD_INPUT:
+        logger.info(
+            "ask_hotwords: user=%s 配置禁用热词输入，跳过该步骤", user_id
+        )
+        await finalize_user_request(
+            update, context, url, location, tags or [], []
+        )
+        return
+
     logger.info(
         "ask_hotwords: user=%s location=%s url=%s tags=%s",
         user_id,
@@ -712,12 +775,51 @@ async def ask_hotwords(
 
     await update.message.reply_text(HOTWORDS_HELP_MESSAGE)
 
-    context.job_queue.run_once(
-        hotwords_timeout,
-        180,
-        data={"user_id": user_id, "chat_id": update.effective_chat.id},
-        name=f"hotwords_timeout_{user_id}",
+    if HOTWORDS_TIMEOUT_SECONDS > 0:
+        context.job_queue.run_once(
+            hotwords_timeout,
+            HOTWORDS_TIMEOUT_SECONDS,
+            data={"user_id": user_id, "chat_id": update.effective_chat.id},
+            name=f"hotwords_timeout_{user_id}",
+        )
+
+
+async def finalize_user_request(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    url: str,
+    location: str,
+    tags: Optional[List[str]],
+    hotwords: Optional[List[str]],
+) -> None:
+    """发送确认消息并调度后台处理任务"""
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user:
+        logger.error(
+            "finalize_user_request: 缺少聊天或用户信息 url=%s location=%s", url, location
+        )
+        return
+
+    await context.bot.send_message(
+        chat_id=chat.id,
+        text="✅ 已收到请求，正在后台处理...",
     )
+    schedule_background_task(
+        context,
+        process_url_with_location(
+            user.id,
+            chat.id,
+            url,
+            location,
+            context,
+            tags or [],
+            hotwords or [],
+        ),
+    )
+
+    if user.id in user_states:
+        del user_states[user.id]
 
 
 async def tags_timeout(context: CallbackContext) -> None:
@@ -815,25 +917,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         logger.info("handle_message: user=%s 热词=%s", user_id, hotwords)
         tags = user_state.get("tags", [])
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="✅ 已收到请求，正在后台处理...",
-        )
-        schedule_background_task(
+        await finalize_user_request(
+            update,
             context,
-            process_url_with_location(
-                user_id,
-                update.effective_chat.id,
-                user_state["url"],
-                user_state["location"],
-                context,
-                tags,
-                hotwords,
-            ),
+            user_state["url"],
+            user_state["location"],
+            tags,
+            hotwords,
         )
-
-        if user_id in user_states:
-            del user_states[user_id]
         return
 
     # 如果用户正在等待选择location
@@ -868,12 +959,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # 检查是否是视频URL
-    url = update.message.text
+    url = (update.message.text or "").strip()
     if any(
         platform in url.lower()
         for platform in ["youtube.com", "youtu.be", "bilibili.com", "b23.tv"]
     ):
-        await ask_location(update, context, url)
+        if REQUIRE_LOCATION_SELECTION:
+            await ask_location(update, context, url)
+        else:
+            logger.info(
+                "handle_message: user=%s 跳过location选择，使用默认位置=%s",
+                user_id,
+                DEFAULT_LOCATION,
+            )
+            await ask_tags(update, context, url, DEFAULT_LOCATION)
     else:
         await update.message.reply_text("请发送YouTube或Bilibili视频链接")
 

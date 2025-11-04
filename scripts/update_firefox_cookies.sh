@@ -19,25 +19,38 @@ if [[ ! -f "${PROFILES_INI}" ]]; then
 fi
 
 # 使用 Python 解析 profiles.ini，定位 Default=1 的配置
-DEFAULT_RELATIVE_PATH=$(python3 - <<'PY'
+eval "$(python3 - <<'PY'
 import configparser
 import os
+import shlex
+import sys
 
 cfg = configparser.RawConfigParser()
-cfg.read(os.environ['PROFILES_INI'])
+if not cfg.read(os.environ['PROFILES_INI']):
+    print('ERROR: 无法读取 profiles.ini', file=sys.stderr)
+    raise SystemExit(1)
 
-default_path = None
 for section in cfg.sections():
     if cfg.has_option(section, 'Default') and cfg.get(section, 'Default') == '1':
-        default_path = cfg.get(section, 'Path')
+        path = cfg.get(section, 'Path')
+        name = cfg.get(section, 'Name', fallback=os.path.basename(path.rstrip('/'))) or os.path.basename(path.rstrip('/'))
         break
+else:
+    print('ERROR: profiles.ini 中未找到 Default profile', file=sys.stderr)
+    raise SystemExit(1)
 
-if not default_path:
-    raise SystemExit('Default profile not found in profiles.ini')
+def export(key, value):
+    print(f"{key}={shlex.quote(value or '')}")
 
-print(default_path)
+export('DEFAULT_RELATIVE_PATH', path)
+export('DEFAULT_PROFILE_NAME', name)
 PY
-)
+)"
+
+if [[ -z "${DEFAULT_RELATIVE_PATH:-}" ]]; then
+  echo "ERROR: 无法解析默认 Firefox profile" >&2
+  exit 1
+fi
 
 PROFILE_PATH=${FIREFOX_PROFILE_PATH:-${DEFAULT_RELATIVE_PATH}}
 
@@ -56,6 +69,7 @@ resolve_profile_path() {
 }
 
 SOURCE_PROFILE_DIR="$(resolve_profile_path "${PROFILE_PATH}")"
+PROFILE_SECTION_NAME="${DEFAULT_PROFILE_NAME:-$(basename "${SOURCE_PROFILE_DIR}")}"
 
 # 如果默认 profile 没有 cookies，尝试自动寻找 *.default-release
 if [[ ! -f "${SOURCE_PROFILE_DIR}/cookies.sqlite" && -z "${FIREFOX_PROFILE_PATH:-}" ]]; then
@@ -63,6 +77,7 @@ if [[ ! -f "${SOURCE_PROFILE_DIR}/cookies.sqlite" && -z "${FIREFOX_PROFILE_PATH:
   if [[ -n "${CANDIDATE}" && -f "${CANDIDATE}/cookies.sqlite" ]]; then
     echo "WARN: 默认 profile 未包含 cookies.sqlite，改用 ${CANDIDATE}" >&2
     SOURCE_PROFILE_DIR="${CANDIDATE}"
+    PROFILE_SECTION_NAME="$(basename "${SOURCE_PROFILE_DIR}")"
   fi
 fi
 
@@ -78,7 +93,14 @@ TARGET_PROFILE_DIR="${TARGET_ROOT}/$(basename "${SOURCE_PROFILE_DIR}")"
 mkdir -p "${TARGET_ROOT}"
 
 mkdir -p "${TARGET_PROFILE_DIR}"
-FILES_TO_COPY=(cookies.sqlite cookies.sqlite-wal cookies.sqlite-shm key4.db)
+FILES_TO_COPY=(
+  cookies.sqlite
+  cookies.sqlite-wal
+  cookies.sqlite-shm
+  key4.db
+  cert9.db
+  pkcs11.txt
+)
 
 COPIED=0
 echo "INFO: 正在同步必要的 Firefox cookies 文件:"
@@ -96,6 +118,19 @@ if [[ ${COPIED} -eq 0 || ! -f "${COOKIES_DB}" ]]; then
   echo "WARN: 未找到可用的 cookies.sqlite，可能需要重新登录或指定正确的 profile。" >&2
   exit 0
 fi
+
+TARGET_PROFILES_INI="${TARGET_ROOT}/profiles.ini"
+TARGET_PROFILE_NAME="$(basename "${TARGET_PROFILE_DIR}")"
+
+{
+  echo "[Profile0]"
+  echo "Name=${PROFILE_SECTION_NAME:-${TARGET_PROFILE_NAME}}"
+  echo "IsRelative=1"
+  echo "Path=${TARGET_PROFILE_NAME}"
+  echo "Default=1"
+} > "${TARGET_PROFILES_INI}"
+
+echo "INFO: 已生成 firefox_profile/profiles.ini (Path=${TARGET_PROFILE_NAME})"
 
 export COOKIES_DB WARN_DAYS
 

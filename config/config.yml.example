@@ -53,6 +53,12 @@ telegram:
     public_url: https://subtitle-telegram-bot.example.com/telegram/webhook
     drop_pending_updates: true
     # secret_token: change_me
+  prompt_flow:
+    require_location: true
+    require_tags: true
+    require_hotwords: true
+    tags_timeout_seconds: 180
+    hotwords_timeout_seconds: 180
 
 # Translation Settings
 translation:

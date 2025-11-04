@@ -15,6 +15,10 @@ set -euo pipefail
 #   LOAD_LOCAL_PLATFORM When PUSH=true, set to 'false' to skip the local --load pass (default: true).
 #   EXTRA_TAGS     Optional comma separated extra tags to publish (e.g. "latest,prod").
 #   DOCKERFILE_*   Optional overrides for dockerfile path per service (see map below).
+#   SKIP_SERVICES  Comma separated service names to skip for this run (e.g. "subtitle-processor,telegram-bot").
+#   CACHE_MODE     Select cache strategy: full (default), download, or none. When unset, the script
+#                  prompts on interactive TTYs. Legacy USE_CACHE=true/false still works.
+#   USE_CACHE      Deprecated boolean alias; true -> CACHE_MODE=full, false -> CACHE_MODE=none.
 #
 # Services and build contexts:
 #   subtitle-processor -> ./ (Dockerfile)
@@ -44,6 +48,126 @@ mkdir -p "${CACHE_DIR}"
 log_debug() {
   echo "DEBUG: $*" >&2
 }
+
+to_lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+normalize_bool() {
+  local value="${1:-}"
+  value=$(to_lower "${value}")
+  case "${value}" in
+    y|yes|true|1)
+      printf '%s' "true"
+      return 0
+      ;;
+    n|no|false|0)
+      printf '%s' "false"
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+normalize_cache_mode() {
+  local value="${1:-}"
+  value=$(to_lower "${value}")
+  case "${value}" in
+    full|all|layers|cache|true|yes|y|1)
+      printf '%s' "full"
+      return 0
+      ;;
+    download|dl|packages|pkg|partial|read)
+      printf '%s' "download"
+      return 0
+      ;;
+    none|no|false|off|0)
+      printf '%s' "none"
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+select_cache_mode() {
+  local resolved=""
+
+  if [[ -n "${CACHE_MODE:-}" ]]; then
+    if resolved="$(normalize_cache_mode "${CACHE_MODE}")"; then
+      CACHE_MODE="${resolved}"
+      return
+    else
+      echo "WARN: Invalid CACHE_MODE '${CACHE_MODE}', falling back to legacy flags/prompt." >&2
+    fi
+  fi
+
+  if [[ -n "${USE_CACHE:-}" ]]; then
+    if resolved="$(normalize_bool "${USE_CACHE}")"; then
+      CACHE_MODE=$([[ "${resolved}" == "true" ]] && printf '%s' "full" || printf '%s' "none")
+      return
+    else
+      echo "WARN: Invalid legacy USE_CACHE value '${USE_CACHE}', falling back to prompt." >&2
+    fi
+  fi
+
+  if [[ -t 0 && -t 1 ]]; then
+    while true; do
+      printf "Select cache mode: [F]ull layers+downloads, [D]ownload-only, [N]o cache (default F): " >&2
+      local answer=""
+      if ! read -r answer; then
+        echo >&2
+        echo "INFO: Input stream closed; defaulting to full cache." >&2
+        break
+      fi
+      echo >&2
+      answer=$(to_lower "${answer}")
+      case "${answer}" in
+        ""|f|full|y|yes|1)
+          CACHE_MODE="full"
+          return
+          ;;
+        d|download|dl|2)
+          CACHE_MODE="download"
+          return
+          ;;
+        n|none|no|0|3)
+          CACHE_MODE="none"
+          return
+          ;;
+        *)
+          echo "Please choose F, D, or N." >&2
+          continue
+      esac
+    done
+  fi
+
+  CACHE_MODE="full"
+}
+
+select_cache_mode
+
+case "${CACHE_MODE}" in
+  full)
+    CACHE_MODE="full"
+    CACHE_USE_LAYER_CACHE=true
+    CACHE_USE_DOWNLOAD_CACHE=true
+    echo "INFO: Cache mode: full (reuse and update layer/download caches)." >&2
+    ;;
+  download)
+    CACHE_USE_LAYER_CACHE=false
+    CACHE_USE_DOWNLOAD_CACHE=true
+    echo "INFO: Cache mode: download-only (reuse existing caches, skip storing new layer cache)." >&2
+    ;;
+  none)
+    CACHE_USE_LAYER_CACHE=false
+    CACHE_USE_DOWNLOAD_CACHE=false
+    echo "INFO: Cache mode: none (no cache reuse, --no-cache)." >&2
+    ;;
+esac
 
 add_cli_plugin_dir() {
   local plugin_dir="$1"
@@ -178,9 +302,44 @@ check_buildx() {
 
 trim() {
   local value="$1"
-  # shellcheck disable=SC2001
-  value="$(echo "$value" | sed -e 's/^\s*//' -e 's/\s*$//')"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
   printf '%s' "$value"
+}
+
+SKIP_SERVICES_DISPLAY=""
+SKIP_SERVICES_ARRAY=()
+if [[ -n "${SKIP_SERVICES:-}" ]]; then
+  IFS=',' read -r -a __skip_raw <<< "${SKIP_SERVICES}"
+  for item in "${__skip_raw[@]}"; do
+    local_name=$(trim "${item}")
+    if [[ -n "${local_name}" ]]; then
+      local_name=$(to_lower "${local_name}")
+      SKIP_SERVICES_ARRAY+=("${local_name}")
+      if [[ -n "${SKIP_SERVICES_DISPLAY}" ]]; then
+        SKIP_SERVICES_DISPLAY="${SKIP_SERVICES_DISPLAY}, ${local_name}"
+      else
+        SKIP_SERVICES_DISPLAY="${local_name}"
+      fi
+    fi
+  done
+fi
+
+log_debug "Skip services: ${SKIP_SERVICES_DISPLAY:-<none>}"
+
+should_skip_service() {
+  local candidate
+  candidate=$(to_lower "$1")
+  if [[ ${#SKIP_SERVICES_ARRAY[@]} -eq 0 ]]; then
+    return 1
+  fi
+  for skip in "${SKIP_SERVICES_ARRAY[@]}"; do
+    if [[ "${skip}" == "${candidate}" ]]; then
+      log_debug "Matched skip rule '${candidate}'"
+      return 0
+    fi
+  done
+  return 1
 }
 
 detect_host_platform() {
@@ -247,7 +406,7 @@ import hashlib, os, sys
 path = sys.argv[1]
 # Skip transient build artefacts and large mounted directories so hashing stays fast.
 exclude_dirs = {'.git', '.docker', '.image-cache', '__pycache__', '.pycache',
-                '.venv', 'venv', 'env',
+                '.venv', 'venv', 'env', 'scripts',
                 'uploads', 'videos', 'outputs', 'models', 'firefox_profile'}
 exclude_prefixes = (
     'chrome-extension/node_modules',
@@ -335,15 +494,22 @@ build_service() {
 
   local cache_dir="${CACHE_DIR}/${name}-layers"
   mkdir -p "${cache_dir}"
-  local cache_args=()
+  local cache_from_args=()
+  local cache_to_args=()
+  local use_no_cache=false
+  if [[ "${CACHE_MODE}" == "none" ]]; then
+    use_no_cache=true
+  fi
+  if [[ "${CACHE_USE_DOWNLOAD_CACHE:-false}" == "true" && -f "${cache_dir}/index.json" ]]; then
+    cache_from_args=(--cache-from "type=local,src=${cache_dir}")
+  fi
+  if [[ "${CACHE_USE_LAYER_CACHE:-false}" == "true" ]]; then
+    cache_to_args=(--cache-to "type=local,dest=${cache_dir},mode=max")
+  fi
   local build_platform="${PLATFORMS}"
 
   if [[ "${USE_BUILDX}" == "true" ]]; then
     log_debug "Building ${name} via buildx for platform(s) ${build_platform}"
-    cache_args=(--cache-to "type=local,dest=${cache_dir},mode=max")
-    if [[ -f "${cache_dir}/index.json" ]]; then
-      cache_args=(--cache-from "type=local,src=${cache_dir}" "${cache_args[@]}")
-    fi
 
     local output_args=()
     if [[ "${PUSH}" == "true" ]]; then
@@ -358,12 +524,22 @@ build_service() {
     fi
 
     echo "==> Building ${tags[*]}"
-    local cmd=(docker buildx build "${context}" --platform "${build_platform}" -f "${context}/${dockerfile}")
+    local cmd=(docker buildx build)
+    cmd+=("--platform" "${build_platform}" "-f" "${context}/${dockerfile}")
     for tag in "${tags[@]}"; do
       cmd+=(-t "${tag}")
     done
-    cmd+=("${cache_args[@]}")
+    if [[ ${#cache_from_args[@]} -gt 0 ]]; then
+      cmd+=("${cache_from_args[@]}")
+    fi
+    if [[ ${#cache_to_args[@]} -gt 0 ]]; then
+      cmd+=("${cache_to_args[@]}")
+    fi
     cmd+=("${output_args[@]}")
+    if [[ "${use_no_cache}" == "true" ]]; then
+      cmd+=(--no-cache)
+    fi
+    cmd+=("${context}")
 
     log_debug "Executing: ${cmd[*]}"
     if "${cmd[@]}"; then
@@ -375,15 +551,21 @@ build_service() {
         if host_platform=$(detect_host_platform); then
           log_debug "Loading ${name} for host platform ${host_platform}"
           echo "==> Loading ${tags[0]} locally for ${host_platform}"
-          local load_cmd=(docker buildx build "${context}" --platform "${host_platform}" -f "${context}/${dockerfile}" --load)
+          local load_cmd=(docker buildx build)
+          load_cmd+=("--platform" "${host_platform}" "-f" "${context}/${dockerfile}" "--load")
           for tag in "${tags[@]}"; do
             load_cmd+=(-t "${tag}")
           done
-          local load_cache_args=(--cache-to "type=local,dest=${cache_dir},mode=max")
-          if [[ -f "${cache_dir}/index.json" ]]; then
-            load_cache_args=(--cache-from "type=local,src=${cache_dir}" "${load_cache_args[@]}")
+          if [[ ${#cache_from_args[@]} -gt 0 ]]; then
+            load_cmd+=("${cache_from_args[@]}")
           fi
-          load_cmd+=("${load_cache_args[@]}")
+          if [[ ${#cache_to_args[@]} -gt 0 ]]; then
+            load_cmd+=("${cache_to_args[@]}")
+          fi
+          if [[ "${use_no_cache}" == "true" ]]; then
+            load_cmd+=(--no-cache)
+          fi
+          load_cmd+=("${context}")
           log_debug "Executing load command: ${load_cmd[*]}"
           if ! "${load_cmd[@]}"; then
             echo "WARN: failed to load local image for ${name} (${host_platform}); continuing without local copy" >&2
@@ -406,10 +588,18 @@ build_service() {
     echo "NOTE: docker build always loads the resulting image into the local engine." >&2
   fi
   echo "==> Building ${tags[*]} (docker build fallback)"
-  local build_cmd=(docker build "${context}" -f "${context}/${dockerfile}")
+  local build_cmd=(docker build)
+  if [[ "${CACHE_MODE}" == "download" ]]; then
+    echo "WARN: Download-only cache mode requires buildx; falling back to no-cache build." >&2
+  fi
+  if [[ "${use_no_cache}" == "true" || "${CACHE_MODE}" == "download" ]]; then
+    build_cmd+=(--no-cache)
+  fi
+  build_cmd+=(-f "${context}/${dockerfile}")
   for tag in "${tags[@]}"; do
     build_cmd+=(-t "${tag}")
   done
+  build_cmd+=("${context}")
   if "${build_cmd[@]}"; then
     printf '%s\n' "${context_hash}" > "${cache_file}"
     if [[ "${PUSH}" == "true" ]]; then
@@ -438,7 +628,11 @@ for entry in "${SERVICES[@]}"; do
     exit 1
   fi
 
-  build_service "${name}" "${context}" "${dockerfile}"
+  if should_skip_service "${name}"; then
+    echo "==> Skipping ${name}; listed in SKIP_SERVICES"
+  else
+    build_service "${name}" "${context}" "${dockerfile}"
+  fi
 
 done
 log_debug "Completed service build loop"

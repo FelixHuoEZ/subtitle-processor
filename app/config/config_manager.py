@@ -109,13 +109,23 @@ class ConfigManager:
                 if not isinstance(value, dict):
                     if is_last:
                         break
-                    logger.warning(f"配置路径 {'.'.join(keys[:i])} 的值不是字典: {value}")
+                    logger.warning(
+                        "配置文件 %s 中的路径 '%s' 不是字典结构，当前值: %r",
+                        self.config_path,
+                        ".".join(keys[:i]),
+                        value,
+                    )
                     return default
                 if key not in value:
-                    logger.warning(f"配置路径 {'.'.join(keys[:i+1])} 不存在")
+                    missing_path = ".".join(keys[: i + 1])
+                    logger.warning(
+                        "配置文件 %s 中未找到路径 '%s'，请确认 config.yml 是否包含该字段或更新环境变量。",
+                        self.config_path,
+                        missing_path,
+                    )
                     return default
                 value = value[key]
-                
+
             logger.debug(f"获取配置 {key_path}: {value}")
             return value
         except Exception as e:

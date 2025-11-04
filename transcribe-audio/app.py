@@ -23,6 +23,31 @@ FUNASR_MODELS = [
     "Qwen-Audio", "Qwen-Audio-Chat", "emotion2vec+large"
 ]
 
+MODEL_MAPPINGS = {
+    "main": {
+        "paraformer-zh": "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+        "paraformer-zh-streaming": "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+        "paraformer-zh-vad-punc": "iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+        "paraformer-en": "damo/speech_paraformer-large_asr_nat-en-16k-common-vocab10020",
+        "conformer-en": "damo/speech_conformer_asr_nat-en-16k-common-vocab10020",
+        "SenseVoiceSmall": "damo/speech_SenseVoiceSmall_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+        "fa-zh": "damo/speech_FastConformer_asr_nat-zh-cn-16k-common-vocab8404",
+        "Qwen-Audio": "damo/speech_qwen_audio_asr_nat-zh-cn-16k-common-vocab8404",
+        "Qwen-Audio-Chat": "damo/speech_qwen_audio_chat_asr_nat-zh-cn-16k-common-vocab8404",
+        "emotion2vec+large": "damo/speech_emotion2vec_large_sv_zh-cn_16k-common",
+    },
+    "vad": {
+        "fsmn-vad": "damo/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+        "fsmn-kws": "damo/speech_fsmn_kws_zh-cn-16k-common-pytorch",
+    },
+    "punc": {
+        "ct-punc": "damo/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+    },
+    "spk": {
+        "cam++": "damo/speech_campplus_sv_zh-cn_16k-common",
+    },
+}
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -200,31 +225,8 @@ def download_model(model_id, revision, cache_dir):
 
 def get_model_id(model_type, model_name):
     """获取完整的模型ID"""
-    model_mappings = {
-        "main": {
-            "paraformer-zh": "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-            "paraformer-zh-streaming": "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-            "paraformer-zh-vad-punc": "iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-            "paraformer-en": "damo/speech_paraformer-large_asr_nat-en-16k-common-vocab10020",
-            "conformer-en": "damo/speech_conformer_asr_nat-en-16k-common-vocab10020",
-            "SenseVoiceSmall": "damo/speech_SenseVoiceSmall_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-            "fa-zh": "damo/speech_FastConformer_asr_nat-zh-cn-16k-common-vocab8404",
-            "Qwen-Audio": "damo/speech_qwen_audio_asr_nat-zh-cn-16k-common-vocab8404",
-            "Qwen-Audio-Chat": "damo/speech_qwen_audio_chat_asr_nat-zh-cn-16k-common-vocab8404",
-            "emotion2vec+large": "damo/speech_emotion2vec_large_sv_zh-cn_16k-common"
-        },
-        "vad": {
-            "fsmn-vad": "damo/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-            "fsmn-kws": "damo/speech_fsmn_kws_zh-cn-16k-common-pytorch"
-        },
-        "punc": {
-            "ct-punc": "damo/punc_ct-transformer_zh-cn-common-vocab272727-pytorch"
-        },
-        "spk": {
-            "cam++": "damo/speech_campplus_sv_zh-cn_16k-common"
-        }
-    }
-    
+    model_mappings = MODEL_MAPPINGS
+
     # 检查是否是完整的模型ID（包含仓库前缀）
     if "/" in model_name:
         return model_name
@@ -256,6 +258,32 @@ def get_model_id(model_type, model_name):
             logger.warning(f"未知的模型类型: {model_type}，将直接添加damo/前缀")
             return f"damo/{model_name}"
 
+
+def resolve_model_config(model_type: str, model_name: str):
+    """标准化模型配置，返回运行时所需名称与ID."""
+    normalized = (model_name or "").strip()
+    mapping = MODEL_MAPPINGS.get(model_type, {})
+    requires_trust_remote_code = False
+
+    if "/" in normalized:
+        alias = next((alias for alias, full_id in mapping.items() if full_id == normalized), None)
+        if alias:
+            runtime_name = alias
+        else:
+            runtime_name = normalized
+            requires_trust_remote_code = True
+    else:
+        runtime_name = normalized
+
+    model_id = get_model_id(model_type, normalized)
+
+    return {
+        "name": normalized or runtime_name,
+        "id": model_id,
+        "runtime": runtime_name,
+        "requires_trust_remote_code": requires_trust_remote_code,
+    }
+
 def ensure_models():
     """确保模型文件存在，如果不存在则下载"""
     # 运行时目录与共享目录解耦，避免共享卷上的文件锁问题
@@ -278,10 +306,10 @@ def ensure_models():
     
     # 获取完整的模型ID
     model_configs = {
-        "main": {"name": model_name, "id": get_model_id("main", model_name)},
-        "vad": {"name": vad_model, "id": get_model_id("vad", vad_model)} if vad_model else None,
-        "punc": {"name": punc_model, "id": get_model_id("punc", punc_model)} if punc_model else None,
-        "spk": {"name": spk_model, "id": get_model_id("spk", spk_model)} if spk_model else None,
+        "main": resolve_model_config("main", model_name) if model_name else None,
+        "vad": resolve_model_config("vad", vad_model) if vad_model else None,
+        "punc": resolve_model_config("punc", punc_model) if punc_model else None,
+        "spk": resolve_model_config("spk", spk_model) if spk_model else None,
     }
     
     logger.info("检查模型配置：")
@@ -289,7 +317,7 @@ def ensure_models():
         if not config:
             logger.info(f"{model_type}模型: 已禁用")
             continue
-        logger.info(f"{model_type}模型: {config['name']} (ID: {config['id']})")
+        logger.info(f"{model_type}模型: {config['runtime']} (ID: {config['id']})")
     
     # 检查所有模型文件是否存在
     def _model_exists(model_id: str) -> bool:
@@ -403,32 +431,39 @@ def init_model():
         try:
             # 尝试使用指定的模型
             init_kwargs = {
-                "model": model_info["main"]["id"],
+                "model": model_info["main"]["runtime"],
                 "device": device,
                 "model_dir": model_dir,
                 "batch_size": 1 if device == "cpu" else 4,
                 "disable_update": True,
                 "use_local": True,
             }
+            trust_remote_code = model_info["main"].get("requires_trust_remote_code", False)
             vad_config = model_info.get("vad")
             if vad_config:
                 init_kwargs.update({
-                    "vad_model": vad_config["id"],
+                    "vad_model": vad_config["runtime"],
                     "vad_kwargs": {"max_single_segment_time": 60000},
                     "vad_model_dir": model_dir,
                 })
+                trust_remote_code = trust_remote_code or vad_config.get("requires_trust_remote_code", False)
             punc_config = model_info.get("punc")
             if punc_config:
                 init_kwargs.update({
-                    "punc_model": punc_config["id"],
+                    "punc_model": punc_config["runtime"],
                     "punc_model_dir": model_dir,
                 })
+                trust_remote_code = trust_remote_code or punc_config.get("requires_trust_remote_code", False)
             spk_config = model_info.get("spk")
             if spk_config:
                 init_kwargs.update({
-                    "spk_model": spk_config["id"],
+                    "spk_model": spk_config["runtime"],
                     "spk_model_dir": model_dir,
                 })
+                trust_remote_code = trust_remote_code or spk_config.get("requires_trust_remote_code", False)
+
+            if trust_remote_code:
+                init_kwargs["trust_remote_code"] = True
 
             logger.info("FunASR初始化参数: %s", {k: v if k != "hotword" else "***" for k, v in init_kwargs.items()})
             model = AutoModel(**init_kwargs)
@@ -454,7 +489,7 @@ def init_model():
             
             # 使用默认模型
             fallback_kwargs = {
-                "model": "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+                "model": "paraformer-zh",
                 "device": device,
                 "model_dir": model_dir,
                 "batch_size": 1 if device == "cpu" else 4,
@@ -462,12 +497,12 @@ def init_model():
                 "use_local": True,
             }
             fallback_kwargs.update({
-                "vad_model": "damo/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+                "vad_model": "fsmn-vad",
                 "vad_kwargs": {"max_single_segment_time": 60000},
                 "vad_model_dir": model_dir,
-                "punc_model": "damo/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+                "punc_model": "ct-punc",
                 "punc_model_dir": model_dir,
-                "spk_model": "damo/speech_campplus_sv_zh-cn_16k-common",
+                "spk_model": "cam++",
                 "spk_model_dir": model_dir,
             })
 

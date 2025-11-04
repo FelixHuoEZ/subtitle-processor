@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.6
 FROM python:3.11-slim
 ARG TARGETARCH
 
@@ -12,7 +13,9 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources && \
     echo "deb https://mirrors.aliyun.com/debian-security bookworm-security main non-free-firmware" >> /etc/apt/sources.list && \
     echo "deb https://mirrors.aliyun.com/debian/ bookworm-updates main non-free-firmware" >> /etc/apt/sources.list
 
-RUN apt-get update && \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
@@ -29,7 +32,8 @@ WORKDIR /app
 
 # 复制并安装Python依赖
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir -r requirements.txt
 
 # 复制应用文件 - 新模块化架构
 COPY app/ ./app/

@@ -76,7 +76,54 @@ class VideoService:
             },
         }
         logger.info("yt-dlp 将使用 bgutil provider: %s", self.bgutil_provider_url)
+        self._configure_cookie_support(base_opts)
         self.yt_dlp_opts = base_opts
+
+    def _configure_cookie_support(self, base_opts: Dict[str, Any]) -> None:
+        """为yt-dlp配置cookie，优先使用显式配置"""
+        cookie_file_env = os.getenv("YTDLP_COOKIE_FILE")
+        if cookie_file_env:
+            if os.path.isfile(cookie_file_env):
+                base_opts["cookiefile"] = cookie_file_env
+                logger.info("使用环境变量指定的cookie文件: %s", cookie_file_env)
+                return
+            logger.warning(
+                "环境变量 YTDLP_COOKIE_FILE 指定的路径 %s 不存在或不可读，请确认容器内已挂载正确的 cookie 文件。",
+                cookie_file_env,
+            )
+
+        config_cookie_path = get_config_value("cookies")
+        if config_cookie_path:
+            if os.path.isfile(config_cookie_path):
+                base_opts["cookiefile"] = config_cookie_path
+                logger.info("使用配置文件指定的cookie文件: %s", config_cookie_path)
+                return
+            if os.path.isdir(config_cookie_path):
+                cookie_db = os.path.join(config_cookie_path, "cookies.sqlite")
+                if os.path.exists(cookie_db):
+                    base_opts["cookiesfrombrowser"] = ("firefox", config_cookie_path)
+                    logger.info("使用配置文件指定的Firefox cookie目录: %s", config_cookie_path)
+                    return
+                logger.warning(
+                    "配置文件中的 cookies 目录 %s 缺少 cookies.sqlite，"
+                    "请运行 scripts/update_firefox_cookies.sh 同步或更新 config.yml。",
+                    cookie_db,
+                )
+            else:
+                logger.warning(
+                    "配置文件中的 cookies 路径 %s 不存在，请检查 config/config.yml 并确保该路径已挂载到容器。",
+                    config_cookie_path,
+                )
+
+        firefox_profile = self._get_firefox_profile_path()
+        if firefox_profile:
+            base_opts["cookiesfrombrowser"] = ("firefox", firefox_profile)
+            logger.info("使用自动发现的Firefox cookie目录: %s", firefox_profile)
+        else:
+            logger.warning(
+                "未找到可用的 YouTube cookie，后续请求可能触发验证。"
+                "请同步 firefox_profile 目录或设置 YTDLP_COOKIE_FILE。",
+            )
 
     def _extract_youtube_info(self, url: str) -> Optional[Dict[str, Any]]:
         try:
@@ -471,7 +518,10 @@ class VideoService:
                 logger.info(f"使用Firefox配置文件: {firefox_profile}")
                 base_opts["cookiesfrombrowser"] = ("firefox", firefox_profile)
             else:
-                logger.warning("未找到Firefox配置文件，将尝试不使用cookie下载")
+                logger.warning(
+                    "未在 /root/.mozilla/firefox 中找到可用 profile，将临时跳过 cookie 下载。"
+                    "请确认已挂载 firefox_profile 或在 config.yml 中配置 cookies 字段。",
+                )
 
             # 按优先级尝试不同的格式
             format_attempts = [
@@ -911,9 +961,15 @@ class VideoService:
                     if os.path.exists(cookie_db):
                         logger.info(f"使用配置的cookie目录: {cookie_path}")
                         return cookie_path
-                    logger.warning(f"配置的cookie目录缺少cookies.sqlite: {cookie_db}")
+                    logger.warning(
+                        "配置的 cookies 目录 %s 缺少 cookies.sqlite，请确认同步的 Firefox profile 完整或重新导出。",
+                        cookie_db,
+                    )
                 else:
-                    logger.warning(f"配置的cookie路径不存在: {cookie_path}")
+                    logger.warning(
+                        "配置的 cookies 路径 %s 不存在，请检查 config.yml 中的 cookies 字段。",
+                        cookie_path,
+                    )
 
             # 在Docker容器中，Firefox配置文件路径
             firefox_config = "/root/.mozilla/firefox/profiles.ini"
@@ -949,7 +1005,8 @@ class VideoService:
                                     )
                                     return profile_path
                                 logger.warning(
-                                    f"default-release配置缺少cookies.sqlite: {profile_path}"
+                                    "default-release 配置目录 %s 缺少 cookies.sqlite，请重新同步 Firefox profile。",
+                                    profile_path,
                                 )
 
                             # 如果标记为默认配置文件
@@ -963,10 +1020,13 @@ class VideoService:
                                     logger.info(f"使用默认配置文件: {profile_path}")
                                     return profile_path
                                 logger.warning(
-                                    f"默认配置缺少cookies.sqlite: {profile_path}"
+                                    "默认 Firefox 配置目录 %s 缺少 cookies.sqlite，请确认 profile 是否完整。",
+                                    profile_path,
                                 )
 
-            logger.warning("未找到Firefox配置文件")
+            logger.warning(
+                "未在 /root/.mozilla/firefox 下找到可用的 Firefox 配置，请挂载 firefox_profile 目录或执行 scripts/update_firefox_cookies.sh 同步。"
+            )
             return None
         except Exception as e:
             logger.error(f"获取Firefox配置文件路径时出错: {str(e)}")
