@@ -26,7 +26,7 @@ import yaml
 import threading
 import asyncio
 import tempfile
-from typing import Any, Dict, Awaitable, List, Optional
+from typing import Any, Dict, Awaitable, List, Optional, Tuple
 from flask import Flask, request, jsonify
 from threading import Thread
 
@@ -296,6 +296,127 @@ HOTWORDS_HELP_MESSAGE = "请输入热词，多个热词用逗号分隔（例如�
 
 # 用户状态存储
 user_states = {}
+last_user_requests: Dict[Tuple[int, int], Dict[str, Any]] = {}
+
+
+def _request_key(user_id: int, chat_id: int) -> Tuple[int, int]:
+    return (int(user_id), int(chat_id))
+
+
+def _start_processing_attempt(
+    user_id: int,
+    chat_id: int,
+    url: str,
+    location: str,
+    tags: Optional[List[str]],
+    hotwords: Optional[List[str]],
+    origin: str,
+) -> Dict[str, Any]:
+    """初始化或更新用户的最后一次处理记录"""
+    key = _request_key(user_id, chat_id)
+    previous = last_user_requests.get(key, {})
+    attempts = int(previous.get("attempts", 0)) + 1
+    record = {
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "url": url,
+        "location": location,
+        "tags": list(tags or []),
+        "hotwords": list(hotwords or []),
+        "status": "pending",
+        "error": None,
+        "origin": origin,
+        "attempts": attempts,
+        "updated_at": time.time(),
+    }
+    # 保留上一次的标准化URL以支持重试
+    if "normalized_url" in previous:
+        record["normalized_url"] = previous["normalized_url"]
+    if "platform" in previous:
+        record["platform"] = previous["platform"]
+    last_user_requests[key] = record
+    logger.debug(
+        "start_processing_attempt: user=%s chat=%s origin=%s attempts=%s",
+        user_id,
+        chat_id,
+        origin,
+        attempts,
+    )
+    return record
+
+
+def _update_last_request(
+    user_id: int,
+    chat_id: int,
+    **updates: Any,
+) -> None:
+    """更新最后一次请求状态"""
+    key = _request_key(user_id, chat_id)
+    if key not in last_user_requests:
+        last_user_requests[key] = {
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "attempts": 0,
+        }
+    last_user_requests[key].update(updates)
+    last_user_requests[key]["updated_at"] = time.time()
+    logger.debug(
+        "update_last_request: user=%s chat=%s updates=%s",
+        user_id,
+        chat_id,
+        updates,
+    )
+
+
+def _get_last_request(user_id: int, chat_id: int) -> Optional[Dict[str, Any]]:
+    return last_user_requests.get(_request_key(user_id, chat_id))
+
+
+async def submit_request_via_context(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    chat_id: int,
+    url: str,
+    location: str,
+    tags: Optional[List[str]],
+    hotwords: Optional[List[str]],
+    confirmation_text: Optional[str],
+    origin: str,
+    reply_to_message_id: Optional[int] = None,
+) -> None:
+    """记录请求并调度后台任务"""
+    safe_tags = list(tags or [])
+    safe_hotwords = list(hotwords or [])
+    _start_processing_attempt(
+        user_id,
+        chat_id,
+        url,
+        location,
+        safe_tags,
+        safe_hotwords,
+        origin,
+    )
+
+    if confirmation_text:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=confirmation_text,
+            reply_to_message_id=reply_to_message_id,
+        )
+
+    schedule_background_task(
+        context,
+        process_url_with_location(
+            user_id,
+            chat_id,
+            url,
+            location,
+            context,
+            safe_tags,
+            safe_hotwords,
+        ),
+    )
+last_user_requests: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
 # 全局变量追踪应用状态与心跳指标
 last_activity = time.time()
@@ -791,6 +912,8 @@ async def finalize_user_request(
     location: str,
     tags: Optional[List[str]],
     hotwords: Optional[List[str]],
+    confirmation_text: str = "✅ 已收到请求，正在后台处理...",
+    origin: str = "user",
 ) -> None:
     """发送确认消息并调度后台处理任务"""
     chat = update.effective_chat
@@ -801,21 +924,17 @@ async def finalize_user_request(
         )
         return
 
-    await context.bot.send_message(
-        chat_id=chat.id,
-        text="✅ 已收到请求，正在后台处理...",
-    )
-    schedule_background_task(
+    await submit_request_via_context(
         context,
-        process_url_with_location(
-            user.id,
-            chat.id,
-            url,
-            location,
-            context,
-            tags or [],
-            hotwords or [],
-        ),
+        user.id,
+        chat.id,
+        url,
+        location,
+        tags,
+        hotwords,
+        confirmation_text,
+        origin,
+        reply_to_message_id=update.message.message_id if update.message else None,
     )
 
     if user.id in user_states:
@@ -835,14 +954,16 @@ async def tags_timeout(context: CallbackContext) -> None:
         # 使用默认的空tags继续处理
         url = user_states[user_id]["url"]
         location = user_states[user_id]["location"]
-        await context.bot.send_message(
-            chat_id=chat_id, text="✅ 已收到请求，正在后台处理..."
-        )
-        schedule_background_task(
+        await submit_request_via_context(
             context,
-            process_url_with_location(
-                user_id, chat_id, url, location, context, [], []
-            ),
+            user_id,
+            chat_id,
+            url,
+            location,
+            [],
+            [],
+            "✅ 已收到请求，正在后台处理...",
+            "tags_timeout",
         )
 
         # 清理状态
@@ -864,11 +985,16 @@ async def hotwords_timeout(context: CallbackContext) -> None:
         await context.bot.send_message(
             chat_id=chat_id, text="⌛ 热词输入超时，将不添加热词继续处理。"
         )
-        schedule_background_task(
+        await submit_request_via_context(
             context,
-            process_url_with_location(
-                user_id, chat_id, url, location, context, tags, []
-            ),
+            user_id,
+            chat_id,
+            url,
+            location,
+            tags,
+            [],
+            None,
+            "hotwords_timeout",
         )
         del user_states[user_id]
 
@@ -996,18 +1122,16 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         target_url = parts[1].strip()
         await update.message.reply_text("✅ 已收到请求，正在后台处理...")
-
-        schedule_background_task(
+        await submit_request_via_context(
             context,
-            process_url_with_location(
-                update.effective_user.id,
-                update.effective_chat.id,
-                target_url,
-                "new",
-                context,
-                [],
-                [],
-            ),
+            update.effective_user.id,
+            update.effective_chat.id,
+            target_url,
+            "new",
+            [],
+            [],
+            None,
+            "process_command",
         )
     except Exception as e:
         logger.error(f"处理 /process 命令时出错: {str(e)}")
@@ -1032,27 +1156,71 @@ async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await ask_hotwords(update, context, user_state["url"], user_state["location"], [])
     elif state == "waiting_for_hotwords":
         tags = user_state.get("tags", [])
-        await update.message.reply_text("✅ 热词已跳过，正在后台处理...")
-        schedule_background_task(
+        await finalize_user_request(
+            update,
             context,
-            process_url_with_location(
-                user_id,
-                update.effective_chat.id,
-                user_state["url"],
-                user_state["location"],
-                context,
-                tags,
-                [],
-            ),
+            user_state["url"],
+            user_state["location"],
+            tags,
+            [],
+            confirmation_text="✅ 热词已跳过，正在后台处理...",
+            origin="skip_hotwords",
         )
-        if user_id in user_states:
-            del user_states[user_id]
     elif state == "waiting_for_location":
         await update.message.reply_text("❌ 请选择一个保存位置（1-4），暂不支持跳过。")
     else:
         await update.message.reply_text("当前没有可跳过的步骤。")
 
 
+async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """重试上一次失败的处理请求"""
+    record_update(update)
+    log_update_metadata("/retry", update)
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user:
+        logger.error("/retry 缺少chat或user信息")
+        return
+
+    entry = _get_last_request(user.id, chat.id)
+    if not entry or not entry.get("url"):
+        await update.message.reply_text("当前没有可以重试的请求，请先发送一个视频链接。")
+        return
+
+    status = entry.get("status")
+    if status in {"pending", "processing", "queued"}:
+        await update.message.reply_text("上一条请求仍在处理中，请稍后再试。")
+        return
+    if status == "completed":
+        await update.message.reply_text("上一条请求已完成，如需再次处理请重新发送链接。")
+        return
+
+    url_to_use = entry.get("normalized_url") or entry.get("url")
+    location = entry.get("location") or DEFAULT_LOCATION
+    tags = entry.get("tags") or []
+    hotwords = entry.get("hotwords") or []
+
+    logger.info(
+        "/retry command: user=%s chat=%s status=%s url=%s location=%s",
+        user.id,
+        chat.id,
+        status,
+        url_to_use,
+        location,
+    )
+
+    await submit_request_via_context(
+        context,
+        user.id,
+        chat.id,
+        url_to_use,
+        location,
+        tags,
+        hotwords,
+        "♻️ 已重新提交上一次请求，正在后台处理...",
+        "retry_command",
+        reply_to_message_id=update.message.message_id if update.message else None,
+    )
 async def hotword_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查看热词配置状态"""
     record_update(update)
@@ -1130,6 +1298,7 @@ async def hotword_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def monitor_process_completion(
     context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
     chat_id: int,
     message_id: int,
     process_id: str,
@@ -1182,6 +1351,12 @@ async def monitor_process_completion(
                 )
             except Exception as edit_err:
                 logger.debug("更新消息失败: %s", edit_err)
+            _update_last_request(
+                user_id,
+                chat_id,
+                status="failed",
+                error="未找到处理任务",
+            )
             return
 
         if response.status_code >= 500:
@@ -1276,6 +1451,12 @@ async def monitor_process_completion(
                     )
                 except Exception as edit_err:
                     logger.debug("更新消息失败: %s", edit_err)
+                _update_last_request(
+                    user_id,
+                    chat_id,
+                    status="failed",
+                    error="字幕内容为空",
+                )
                 return
 
             try:
@@ -1316,6 +1497,12 @@ async def monitor_process_completion(
                 len(subtitle_content),
             )
             await send_subtitle_file(DummyUpdate(chat_id), context, result_payload)
+            _update_last_request(
+                user_id,
+                chat_id,
+                status="completed",
+                error=None,
+            )
             return
 
         if status == "failed":
@@ -1328,6 +1515,12 @@ async def monitor_process_completion(
                 )
             except Exception as edit_err:
                 logger.debug("更新消息失败: %s", edit_err)
+            _update_last_request(
+                user_id,
+                chat_id,
+                status="failed",
+                error=error_message,
+            )
             return
 
         await asyncio.sleep(poll_interval)
@@ -1341,6 +1534,12 @@ async def monitor_process_completion(
         )
     except Exception as edit_err:
         logger.debug("更新消息失败: %s", edit_err)
+    _update_last_request(
+        user_id,
+        chat_id,
+        status="failed",
+        error="处理超时",
+    )
 
 
 async def process_url_with_location(
@@ -1354,6 +1553,7 @@ async def process_url_with_location(
 ) -> None:
     """使用指定的location处理URL"""
     try:
+        _update_last_request(user_id, chat_id, status="processing", error=None)
         logger.info(
             "process_url_with_location: user=%s chat=%s url=%s location=%s tags=%s hotwords=%s",
             user_id,
@@ -1367,12 +1567,31 @@ async def process_url_with_location(
         normalized_url, platform = normalize_url(url)
         if not normalized_url:
             await context.bot.send_message(chat_id=chat_id, text="❌ 无效的URL格式")
+            _update_last_request(
+                user_id,
+                chat_id,
+                status="failed",
+                error="无效的URL格式",
+            )
             return
+
+        _update_last_request(
+            user_id,
+            chat_id,
+            normalized_url=normalized_url,
+            platform=platform,
+        )
 
         # 获取video_id
         video_id = extract_video_id(normalized_url, platform)
         if not video_id:
             await context.bot.send_message(chat_id=chat_id, text="❌ 无法提取视频ID")
+            _update_last_request(
+                user_id,
+                chat_id,
+                status="failed",
+                error="无法提取视频ID",
+            )
             return
 
         # 记录处理信息
@@ -1385,6 +1604,13 @@ async def process_url_with_location(
         # 发送处理中的消息
         processing_message = await context.bot.send_message(
             chat_id=chat_id, text="⏳ 正在处理您的请求..."
+        )
+        _update_last_request(
+            user_id,
+            chat_id,
+            status="processing",
+            message_id=processing_message.message_id,
+            error=None,
         )
 
         # 准备请求数据
@@ -1431,13 +1657,27 @@ async def process_url_with_location(
                         context,
                         monitor_process_completion(
                             context,
+                            user_id,
                             chat_id,
                             processing_message.message_id,
                             process_id,
                         ),
                     )
+                    _update_last_request(
+                        user_id,
+                        chat_id,
+                        status="queued",
+                        error=None,
+                        process_id=process_id,
+                    )
                 else:
                     logger.warning("202 响应缺少 process_id，无法继续跟踪")
+                    _update_last_request(
+                        user_id,
+                        chat_id,
+                        status="failed",
+                        error="处理队列返回缺少process_id",
+                    )
                 return
 
             response.raise_for_status()
@@ -1449,6 +1689,12 @@ async def process_url_with_location(
                     chat_id=chat_id,
                     message_id=processing_message.message_id,
                 )
+                _update_last_request(
+                    user_id,
+                    chat_id,
+                    status="failed",
+                    error="未收到字幕结果",
+                )
                 return
 
             if not result.get("subtitle_content"):
@@ -1457,6 +1703,12 @@ async def process_url_with_location(
                     "⚠️ 字幕生成结果暂不可用，请稍后在网页查询。",
                     chat_id=chat_id,
                     message_id=processing_message.message_id,
+                )
+                _update_last_request(
+                    user_id,
+                    chat_id,
+                    status="failed",
+                    error="字幕生成结果缺失",
                 )
                 return
 
@@ -1478,6 +1730,12 @@ async def process_url_with_location(
                     self.effective_chat = DummyChat(chat_id)
 
             await send_subtitle_file(DummyUpdate(chat_id), context, result)
+            _update_last_request(
+                user_id,
+                chat_id,
+                status="completed",
+                error=None,
+            )
 
         except requests.exceptions.RequestException as e:
             error_message = f"处理请求时出错: {str(e)}"
@@ -1486,6 +1744,12 @@ async def process_url_with_location(
                 f"❌ {error_message}",
                 chat_id=chat_id,
                 message_id=processing_message.message_id,
+            )
+            _update_last_request(
+                user_id,
+                chat_id,
+                status="failed",
+                error=error_message,
             )
             return
 
@@ -1496,6 +1760,12 @@ async def process_url_with_location(
             await context.bot.send_message(chat_id=chat_id, text=f"❌ {error_message}")
         except:
             pass
+        _update_last_request(
+            user_id,
+            chat_id,
+            status="failed",
+            error=error_message,
+        )
 
 
 def signal_handler(signum, frame):
@@ -1645,6 +1915,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("process", process_url))
     application.add_handler(CommandHandler("skip", skip_command))
+    application.add_handler(CommandHandler("retry", retry_command))
     application.add_handler(CommandHandler("hotword_status", hotword_status))
     application.add_handler(CommandHandler("hotword_toggle", hotword_toggle))
     # 处理普通消息
