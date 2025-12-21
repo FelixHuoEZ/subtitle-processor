@@ -1,16 +1,18 @@
 """Video processing service for handling multiple video platforms."""
 
-import os
 import json
-import re
 import logging
+import os
+import re
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
+
 import requests
 import yt_dlp
 from yt_dlp.utils import DownloadError
-import time
-from datetime import datetime
-from urllib.parse import urlparse
-from typing import Dict, Any, Optional, Tuple, List
+
 from ..config.config_manager import get_config_value
 from ..utils.file_utils import sanitize_filename
 
@@ -38,7 +40,6 @@ class VideoService:
         if not parsed.scheme or not parsed.netloc:
             return default_url
         return parsed.geturl().rstrip("/") or default_url
-
 
     def _setup_yt_dlp_options(self):
         """设置yt-dlp默认选项"""
@@ -79,6 +80,39 @@ class VideoService:
         self._configure_cookie_support(base_opts)
         self.yt_dlp_opts = base_opts
 
+    def _get_platform_headers(
+        self, platform: Optional[str], url: Optional[str] = None
+    ) -> Dict[str, str]:
+        """构建平台所需的请求头，避免跨站Referer触发拦截"""
+        origin = None
+        if platform == "youtube":
+            origin = "https://www.youtube.com"
+        elif platform == "bilibili":
+            origin = "https://www.bilibili.com"
+        elif platform == "acfun":
+            origin = "https://www.acfun.cn"
+        elif url:
+            parsed = urlparse(url)
+            if parsed.scheme and parsed.netloc:
+                origin = f"{parsed.scheme}://{parsed.netloc}"
+
+        if not origin:
+            return {}
+
+        return {"Origin": origin, "Referer": f"{origin}/"}
+
+    def _get_yt_dlp_opts_for_platform(
+        self, platform: str, url: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """为指定平台生成yt-dlp选项，覆盖可能导致403的请求头"""
+        opts = dict(self.yt_dlp_opts)
+        headers = dict(opts.get("http_headers", {}))
+        platform_headers = self._get_platform_headers(platform, url)
+        if platform_headers:
+            headers.update(platform_headers)
+            opts["http_headers"] = headers
+        return opts
+
     def _configure_cookie_support(self, base_opts: Dict[str, Any]) -> None:
         """为yt-dlp配置cookie，优先使用显式配置"""
         cookie_file_env = os.getenv("YTDLP_COOKIE_FILE")
@@ -102,7 +136,9 @@ class VideoService:
                 cookie_db = os.path.join(config_cookie_path, "cookies.sqlite")
                 if os.path.exists(cookie_db):
                     base_opts["cookiesfrombrowser"] = ("firefox", config_cookie_path)
-                    logger.info("使用配置文件指定的Firefox cookie目录: %s", config_cookie_path)
+                    logger.info(
+                        "使用配置文件指定的Firefox cookie目录: %s", config_cookie_path
+                    )
                     return
                 logger.warning(
                     "配置文件中的 cookies 目录 %s 缺少 cookies.sqlite，"
@@ -236,7 +272,8 @@ class VideoService:
     def get_bilibili_info(self, url: str) -> Optional[Dict[str, Any]]:
         """获取Bilibili视频信息"""
         try:
-            with yt_dlp.YoutubeDL(self.yt_dlp_opts) as ydl:
+            opts = self._get_yt_dlp_opts_for_platform("bilibili", url)
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
 
                 video_info = {
@@ -267,7 +304,8 @@ class VideoService:
     def get_acfun_info(self, url: str) -> Optional[Dict[str, Any]]:
         """获取AcFun视频信息"""
         try:
-            with yt_dlp.YoutubeDL(self.yt_dlp_opts) as ydl:
+            opts = self._get_yt_dlp_opts_for_platform("acfun", url)
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
 
                 video_info = {
@@ -420,13 +458,17 @@ class VideoService:
             return url
 
     def download_video(
-        self, url: str, output_folder: Optional[str] = None
+        self,
+        url: str,
+        output_folder: Optional[str] = None,
+        platform: Optional[str] = None,
     ) -> Optional[str]:
         """下载视频并提取音频
 
         Args:
             url: 视频URL
             output_folder: 输出目录，默认使用配置的上传目录
+            platform: 平台名称，用于设置正确的请求头
 
         Returns:
             str: 下载的音频文件路径，失败返回None
@@ -504,13 +546,15 @@ class VideoService:
                         "base_url": [self.bgutil_provider_url],
                     },
                 },
-                "http_headers": {
-                    "Accept": "*/*",
-                    "Accept-Language": "en-US,en;q=0.5",
-                    "Origin": "https://www.youtube.com",
-                    "Referer": "https://www.youtube.com/",
-                },
             }
+            base_headers = {
+                "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.5",
+            }
+            platform_headers = self._get_platform_headers(platform, url)
+            if not platform_headers:
+                platform_headers = self._get_platform_headers("youtube", url)
+            base_opts["http_headers"] = {**base_headers, **platform_headers}
 
             # 尝试获取Firefox配置文件路径
             firefox_profile = self._get_firefox_profile_path()
@@ -646,8 +690,9 @@ class VideoService:
     def _convert_to_audio(self, video_file: str, output_dir: str) -> Optional[str]:
         """将视频转换为音频格式"""
         try:
-            from pydub import AudioSegment
             import subprocess
+
+            from pydub import AudioSegment
 
             # 生成音频文件路径
             base_name = os.path.splitext(os.path.basename(video_file))[0]
@@ -674,8 +719,8 @@ class VideoService:
                         )
 
                         # 使用安全的临时文件转换方案
-                        import uuid
                         import shutil
+                        import uuid
 
                         temp_file = os.path.join(
                             output_dir,
@@ -789,8 +834,8 @@ class VideoService:
 
                     if video_file == audio_file:
                         # 如果输入输出文件相同，使用更安全的临时文件处理方案
-                        import tempfile
                         import shutil
+                        import tempfile
                         import uuid
 
                         # 生成唯一的临时文件名，避免冲突
@@ -1099,7 +1144,8 @@ class VideoService:
     ) -> Optional[str]:
         """下载Bilibili字幕"""
         try:
-            with yt_dlp.YoutubeDL(self.yt_dlp_opts) as ydl:
+            opts = self._get_yt_dlp_opts_for_platform("bilibili", url)
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
 
                 available_subtitles = info.get("subtitles", {})
@@ -1130,7 +1176,8 @@ class VideoService:
     ) -> Optional[str]:
         """下载AcFun字幕"""
         try:
-            with yt_dlp.YoutubeDL(self.yt_dlp_opts) as ydl:
+            opts = self._get_yt_dlp_opts_for_platform("acfun", url)
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
 
                 available_subtitles = info.get("subtitles", {})
@@ -1227,7 +1274,7 @@ class VideoService:
             audio_file = None
             if not subtitle_content:
                 logger.info("未找到字幕，开始下载音频用于转录")
-                audio_file = self.download_video(url)
+                audio_file = self.download_video(url, platform=platform)
 
             return {
                 "video_info": video_info,
