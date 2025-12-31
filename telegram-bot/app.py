@@ -346,6 +346,14 @@ def _shorten_url(url: str, max_length: int = 64) -> str:
     return f"{clean[:head_len]}...{clean[-tail_len:]}"
 
 
+def _shorten_text(text: str, max_length: int = 80) -> str:
+    """缩短提示文本，避免消息过长."""
+    clean = (text or "").strip()
+    if len(clean) <= max_length:
+        return clean
+    return f"{clean[: max_length - 3]}..."
+
+
 def _queue_total(state: Dict[str, Any]) -> int:
     """计算当前队列总数."""
     index = int(state.get("queue_index", 1))
@@ -468,7 +476,7 @@ def _update_active_task_status(
 
 
 def _remove_active_task(user_id: int, chat_id: int, process_id: str) -> None:
-    """移除已完成/失败的任务."""
+    """移除已完成任务."""
     key = _request_key(user_id, chat_id)
     tasks = active_tasks.get(key)
     if not tasks:
@@ -476,6 +484,24 @@ def _remove_active_task(user_id: int, chat_id: int, process_id: str) -> None:
     tasks.pop(process_id, None)
     if not tasks:
         active_tasks.pop(key, None)
+
+
+def _clear_failed_tasks(user_id: int, chat_id: int) -> int:
+    """清理失败任务，返回清理数量."""
+    key = _request_key(user_id, chat_id)
+    tasks = active_tasks.get(key)
+    if not tasks:
+        return 0
+    failed_ids = [
+        process_id
+        for process_id, task in tasks.items()
+        if (task.get("status") or "").lower() == "failed"
+    ]
+    for process_id in failed_ids:
+        tasks.pop(process_id, None)
+    if not tasks:
+        active_tasks.pop(key, None)
+    return len(failed_ids)
 
 
 def _list_active_tasks(user_id: int, chat_id: int) -> List[Dict[str, Any]]:
@@ -491,6 +517,8 @@ def _status_label(status: str) -> str:
         "queued": "排队中",
         "processing": "处理中",
         "pending": "准备中",
+        "failed": "失败",
+        "completed": "已完成",
         "unknown": "处理中",
     }
     return mapping.get(status, status)
@@ -802,10 +830,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """发送启动消息"""
     record_update(update)  # 更新活动时间与update信息
     await update.message.reply_text(
-        "Hi! 发送YouTube视频链接给我，我会帮你处理字幕。\n"
+        "Hi! 发送视频链接给我，我会帮你处理字幕。\n"
         "支持的格式:\n"
-        "1. 直接发送YouTube URL\n"
-        "2. 使用命令 /process <YouTube URL>"
+        "1. 直接发送YouTube/Bilibili URL\n"
+        "2. 使用命令 /process URL\n"
+        "3. 一次发送多条URL（换行/空格/逗号分隔），将自动跳过标签/热词并并行处理\n"
+        "4. 使用 /queue 查看当前任务列表，/queue_clear 清理失败任务"
     )
 
 
@@ -1117,6 +1147,45 @@ async def _start_input_flow(
     await _advance_queue_or_cleanup(context, user_id, chat_id)
 
 
+async def _process_queue_without_prompts(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    chat_id: int,
+    location: str,
+) -> None:
+    """批量模式下并行提交队列，跳过标签/热词."""
+    state = user_states.get(user_id)
+    if not state:
+        return
+    urls: List[str] = []
+    if state.get("url"):
+        urls.append(state["url"])
+    urls.extend(state.get("pending_urls", []))
+    if not urls:
+        user_states.pop(user_id, None)
+        return
+
+    for idx, url in enumerate(urls, start=1):
+        state["queue_index"] = idx
+        state["url"] = url
+        state["location"] = location
+        schedule_background_task(
+            context,
+            process_url_with_location(
+                user_id,
+                chat_id,
+                url,
+                location,
+                context,
+                tags=[],
+                hotwords=[],
+                await_completion=False,
+            ),
+        )
+
+    user_states.pop(user_id, None)
+
+
 async def _advance_queue_or_cleanup(
     context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int
 ) -> None:
@@ -1424,42 +1493,83 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             pass
 
         # 询问用户输入tags
+        if user_state.get("skip_inputs"):
+            schedule_background_task(
+                context,
+                _process_queue_without_prompts(
+                    context, user_id, update.effective_chat.id, location
+                ),
+            )
+            await update.message.reply_text("✅ 批量处理已开始，可用 /queue 查看进度。")
+            return
+
         await ask_tags(update, context, user_state["url"], location)
         return
 
     # 检查是否是视频URL
     if incoming_urls:
-        state = _start_queue_state(user_id, incoming_urls)
         if len(incoming_urls) > 1:
+            state = _start_queue_state(user_id, incoming_urls)
+            state["skip_inputs"] = True
             await update.message.reply_text(
-                f"✅ 已收到 {len(incoming_urls)} 条链接，将按顺序询问标签/热词。"
+                f"✅ 已收到 {len(incoming_urls)} 条链接，批量模式将跳过标签/热词并顺序处理。"
             )
-        if REQUIRE_LOCATION_SELECTION:
-            await _prompt_location(
-                context,
-                update.effective_chat.id,
-                user_id,
-                state["url"],
-                reply_to_message_id=update.message.message_id
-                if update.message
-                else None,
-            )
+            if REQUIRE_LOCATION_SELECTION:
+                await _prompt_location(
+                    context,
+                    update.effective_chat.id,
+                    user_id,
+                    state["url"],
+                    reply_to_message_id=update.message.message_id
+                    if update.message
+                    else None,
+                )
+            else:
+                logger.info(
+                    "handle_message: user=%s 跳过location选择，使用默认位置=%s",
+                    user_id,
+                    DEFAULT_LOCATION,
+                )
+                schedule_background_task(
+                    context,
+                    _process_queue_without_prompts(
+                        context,
+                        user_id,
+                        update.effective_chat.id,
+                        DEFAULT_LOCATION,
+                    ),
+                )
+                await update.message.reply_text(
+                    "✅ 批量处理已开始，可用 /queue 查看进度。"
+                )
         else:
-            logger.info(
-                "handle_message: user=%s 跳过location选择，使用默认位置=%s",
-                user_id,
-                DEFAULT_LOCATION,
-            )
-            await _start_input_flow(
-                context,
-                update.effective_chat.id,
-                user_id,
-                state["url"],
-                DEFAULT_LOCATION,
-                reply_to_message_id=update.message.message_id
-                if update.message
-                else None,
-            )
+            state = _start_queue_state(user_id, incoming_urls)
+            if REQUIRE_LOCATION_SELECTION:
+                await _prompt_location(
+                    context,
+                    update.effective_chat.id,
+                    user_id,
+                    state["url"],
+                    reply_to_message_id=update.message.message_id
+                    if update.message
+                    else None,
+                )
+            else:
+                logger.info(
+                    "handle_message: user=%s 跳过location选择，使用默认位置=%s",
+                    user_id,
+                    DEFAULT_LOCATION,
+                )
+                await _start_input_flow(
+                    context,
+                    update.effective_chat.id,
+                    user_id,
+                    state["url"],
+                    DEFAULT_LOCATION,
+                    reply_to_message_id=update.message.message_id
+                    if update.message
+                    else None,
+                )
     else:
         await update.message.reply_text("请发送YouTube或Bilibili视频链接")
 
@@ -1479,16 +1589,54 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = text.split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
             await update.message.reply_text(
-                "❌ 请在命令后提供视频URL，例如 /process <url>"
+                "❌ 请在命令后提供视频URL，例如 /process URL"
             )
             return
 
-        target_url = parts[1].strip()
+        payload = parts[1].strip()
+        urls = extract_video_urls(payload) or [payload]
+
+        user_id = update.effective_user.id
+        chat_id = update.effective_chat.id
+        user_state = user_states.get(user_id)
+        if user_state and user_state.get("state") in {
+            "waiting_for_tags",
+            "waiting_for_hotwords",
+            "waiting_for_location",
+        }:
+            user_state.setdefault("queue_index", 1)
+            user_state.setdefault("pending_urls", [])
+            added = _append_pending_urls(user_state, urls)
+            if added > 0:
+                total = _queue_total(user_state)
+                await update.message.reply_text(
+                    f"✅ 已加入队列（+{added}），共 {total} 条。请先完成当前输入。"
+                )
+            else:
+                await update.message.reply_text("链接已在队列中，无需重复添加。")
+            return
+
+        if len(urls) > 1:
+            state = _start_queue_state(user_id, urls)
+            state["skip_inputs"] = True
+            await update.message.reply_text(
+                f"✅ 已收到 {len(urls)} 条链接，批量模式将跳过标签/热词并顺序处理。"
+            )
+            schedule_background_task(
+                context,
+                _process_queue_without_prompts(
+                    context, user_id, chat_id, DEFAULT_LOCATION
+                ),
+            )
+            await update.message.reply_text("✅ 批量处理已开始，可用 /queue 查看进度。")
+            return
+
+        target_url = urls[0].strip()
         await update.message.reply_text("✅ 已收到请求，正在后台处理...")
         await submit_request_via_context(
             context,
-            update.effective_user.id,
-            update.effective_chat.id,
+            user_id,
+            chat_id,
             target_url,
             "new",
             [],
@@ -1598,20 +1746,55 @@ async def queue_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     log_update_metadata("/queue", update)
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    tasks = _list_active_tasks(user_id, chat_id)
-    if not tasks:
+    active_tasks_list = []
+    failed_tasks = []
+    for task in _list_active_tasks(user_id, chat_id):
+        status = (task.get("status") or "").lower()
+        if status == "completed":
+            continue
+        if status == "failed":
+            failed_tasks.append(task)
+        else:
+            active_tasks_list.append(task)
+    if not active_tasks_list and not failed_tasks:
         await update.message.reply_text("当前没有正在处理的任务。")
         return
 
     lines = []
-    for idx, task in enumerate(tasks, start=1):
-        url_display = _shorten_url(task.get("url") or "")
-        status_label = _status_label(task.get("status", "processing"))
-        lines.append(f"{idx}. {url_display} ({status_label})")
+    if active_tasks_list:
+        lines.append(f"正在处理 {len(active_tasks_list)} 个任务：")
+        for idx, task in enumerate(active_tasks_list, start=1):
+            url_display = _shorten_url(task.get("url") or "")
+            status_label = _status_label(task.get("status", "processing"))
+            lines.append(f"{idx}. {url_display} ({status_label})")
 
-    await update.message.reply_text(
-        f"当前正在处理 {len(tasks)} 个任务：\n" + "\n".join(lines)
-    )
+    if failed_tasks:
+        if lines:
+            lines.append("")
+        lines.append(f"失败 {len(failed_tasks)} 个任务：")
+        for idx, task in enumerate(failed_tasks, start=1):
+            url_display = _shorten_url(task.get("url") or "")
+            error = _shorten_text(task.get("error") or "")
+            if error:
+                lines.append(f"{idx}. {url_display} (失败: {error})")
+            else:
+                lines.append(f"{idx}. {url_display} (失败)")
+        lines.append("可使用 /queue_clear 清理失败任务。")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def queue_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """清理失败任务"""
+    record_update(update)
+    log_update_metadata("/queue_clear", update)
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    cleared = _clear_failed_tasks(user_id, chat_id)
+    if cleared == 0:
+        await update.message.reply_text("当前没有可清理的失败任务。")
+        return
+    await update.message.reply_text(f"已清理 {cleared} 条失败任务。")
 
 
 async def hotword_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1759,7 +1942,6 @@ async def monitor_process_completion(
             _update_active_task_status(
                 user_id, chat_id, process_id, "failed", error="未找到处理任务"
             )
-            _remove_active_task(user_id, chat_id, process_id)
             return
 
         if response.status_code >= 500:
@@ -1860,6 +2042,9 @@ async def monitor_process_completion(
                     status="failed",
                     error="字幕内容为空",
                 )
+                _update_active_task_status(
+                    user_id, chat_id, process_id, "failed", error="字幕内容为空"
+                )
                 return
 
             try:
@@ -1899,14 +2084,26 @@ async def monitor_process_completion(
                 filename,
                 len(subtitle_content),
             )
-            await send_subtitle_file(DummyUpdate(chat_id), context, result_payload)
-            _update_last_request(
-                user_id,
-                chat_id,
-                status="completed",
-                error=None,
-            )
-            _remove_active_task(user_id, chat_id, process_id)
+            try:
+                await send_subtitle_file(DummyUpdate(chat_id), context, result_payload)
+                _update_last_request(
+                    user_id,
+                    chat_id,
+                    status="completed",
+                    error=None,
+                )
+                _remove_active_task(user_id, chat_id, process_id)
+            except Exception as send_error:
+                logger.error("发送字幕失败(%s): %s", process_id, send_error)
+                _update_last_request(
+                    user_id,
+                    chat_id,
+                    status="failed",
+                    error="发送字幕失败",
+                )
+                _update_active_task_status(
+                    user_id, chat_id, process_id, "failed", error="发送字幕失败"
+                )
             return
 
         if status == "failed":
@@ -1928,7 +2125,6 @@ async def monitor_process_completion(
             _update_active_task_status(
                 user_id, chat_id, process_id, "failed", error=error_message
             )
-            _remove_active_task(user_id, chat_id, process_id)
             return
 
         await asyncio.sleep(poll_interval)
@@ -1949,7 +2145,6 @@ async def monitor_process_completion(
         error="处理超时",
     )
     _update_active_task_status(user_id, chat_id, process_id, "failed", error="处理超时")
-    _remove_active_task(user_id, chat_id, process_id)
 
 
 async def process_url_with_location(
@@ -1960,6 +2155,7 @@ async def process_url_with_location(
     context: ContextTypes.DEFAULT_TYPE,
     tags: Optional[List[str]] = None,
     hotwords: Optional[List[str]] = None,
+    await_completion: bool = False,
 ) -> None:
     """使用指定的location处理URL"""
     try:
@@ -2074,16 +2270,25 @@ async def process_url_with_location(
                         "queued",
                         message_id=processing_message.message_id,
                     )
-                    schedule_background_task(
-                        context,
-                        monitor_process_completion(
+                    if await_completion:
+                        await monitor_process_completion(
                             context,
                             user_id,
                             chat_id,
                             processing_message.message_id,
                             process_id,
-                        ),
-                    )
+                        )
+                    else:
+                        schedule_background_task(
+                            context,
+                            monitor_process_completion(
+                                context,
+                                user_id,
+                                chat_id,
+                                processing_message.message_id,
+                                process_id,
+                            ),
+                        )
                     _update_last_request(
                         user_id,
                         chat_id,
@@ -2336,6 +2541,7 @@ def main():
     application.add_handler(CommandHandler("skip", skip_command))
     application.add_handler(CommandHandler("retry", retry_command))
     application.add_handler(CommandHandler("queue", queue_status))
+    application.add_handler(CommandHandler("queue_clear", queue_clear))
     application.add_handler(CommandHandler("hotword_status", hotword_status))
     application.add_handler(CommandHandler("hotword_toggle", hotword_toggle))
     # 处理普通消息

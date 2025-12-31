@@ -1,123 +1,295 @@
-{% extends "base.html" %}
-
-{% block content %}
+{% extends "base.html" %} {% block content %}
 <a href="/" class="back-link">← 返回列表</a>
 <h1>字幕文件列表</h1>
 
 <form class="youtube-form" onsubmit="return submitYouTubeUrl()">
-    <input type="text" id="youtube-url" placeholder="输入视频URL">
+    <textarea
+        id="youtube-url"
+        rows="3"
+        placeholder="输入一个或多个视频URL，支持换行/空格/逗号分隔"
+    ></textarea>
     <select id="save-location">
         <option value="new">New</option>
         <option value="later">Later</option>
         <option value="archive">Archive</option>
         <option value="feed">Feed</option>
     </select>
-    <input type="text" id="tags" class="tags-input" placeholder="输入标签，用逗号分隔">
+    <input
+        type="text"
+        id="tags"
+        class="tags-input"
+        placeholder="输入标签，用逗号分隔"
+    />
     <div class="tags-help">标签示例：youtube字幕,学习笔记,英语学习</div>
-    <input type="text" id="hotwords" class="tags-input" placeholder="输入热词，用逗号分隔">
+    <input
+        type="text"
+        id="hotwords"
+        class="tags-input"
+        placeholder="输入热词，用逗号分隔"
+    />
     <div class="tags-help">热词示例：重要概念,关键词,专有名词</div>
+    <div id="batch-hint" class="tags-help" style="display: none">
+        已检测到多条URL，标签/热词将自动跳过。
+    </div>
     <button type="submit">处理</button>
     <div id="progress"></div>
     <div id="error-message" class="error-message"></div>
 </form>
 
 <ul class="file-list">
-{% for file in files %}
+    {% for file in files %}
     <li class="file-item">
         <a href="{{ file.url }}" class="file-link">{{ file.filename }}</a>
         <div class="file-time">{{ file.upload_time }}</div>
     </li>
-{% endfor %}
+    {% endfor %}
 </ul>
-{% endblock %}
-
-{% block scripts %}
+{% endblock %} {% block scripts %}
 <script>
     function submitYouTubeUrl() {
-        var url = document.getElementById('youtube-url').value;
-        var location = document.getElementById('save-location').value;
-        var tags = document.getElementById('tags').value;
-        var hotwords = document.getElementById('hotwords').value;
-        if (!url) {
-            showError('请输入视频 URL');
-            return false;
+        handleSubmit();
+        return false;
+    }
+
+    function splitUrls(text) {
+        return text
+            .split(/[\s,，]+/)
+            .map((item) => item.trim())
+            .filter((item) => item);
+    }
+
+    function updateBatchMode() {
+        var urlText = document.getElementById("youtube-url").value;
+        var urls = splitUrls(urlText);
+        var isBatch = urls.length > 1;
+        var tagsInput = document.getElementById("tags");
+        var hotwordsInput = document.getElementById("hotwords");
+        var hint = document.getElementById("batch-hint");
+        tagsInput.disabled = isBatch;
+        hotwordsInput.disabled = isBatch;
+        hint.style.display = isBatch ? "block" : "none";
+    }
+
+    function sleep(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    async function waitForCompletion(processId) {
+        var attempts = 0;
+        var maxAttempts = 120;
+        while (attempts < maxAttempts) {
+            attempts += 1;
+            try {
+                var response = await fetch("/process/status/" + processId);
+                if (!response.ok) {
+                    await sleep(3000);
+                    continue;
+                }
+                var data = await response.json();
+                var status = (data.status || "").toLowerCase();
+                if (status === "completed" || status === "failed") {
+                    return data;
+                }
+            } catch (error) {
+                // ignore and retry
+            }
+            await sleep(5000);
         }
-        
-        // 获取视频ID和平台信息
+        return { status: "timeout" };
+    }
+
+    async function submitSingleUrl(url, location, tagsList, hotwordsList) {
         var videoInfo = extractVideoId(url);
         if (!videoInfo) {
-            showError('不支持的视频URL格式');
-            return false;
+            throw new Error("不支持的视频URL格式");
         }
-        
-        // 显示进度
-        document.getElementById('progress').style.display = 'block';
-        document.getElementById('progress').innerText = '正在处理...';
-        document.getElementById('error-message').style.display = 'none';
-        
-        // 发送请求
-        fetch('/process', {
-            method: 'POST',
+
+        var response = await fetch("/process", {
+            method: "POST",
             headers: {
-                'Content-Type': 'application/json',
+                "Content-Type": "application/json",
             },
             body: JSON.stringify({
                 url: url,
                 platform: videoInfo.platform,
                 location: location,
                 video_id: videoInfo.id,
-                tags: tags.split(',').map(tag => tag.trim()).filter(tag => tag),
-                hotwords: hotwords.split(',').map(word => word.trim()).filter(word => word)
-            })
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.error) {
-                showError(data.error);
-            } else if (data.view_url) {
-                window.location.href = data.view_url;
-            } else {
-                showError('处理成功但未返回查看链接');
-            }
-        })
-        .catch(error => {
-            showError('请求失败: ' + error);
+                tags: tagsList,
+                hotwords: hotwordsList,
+            }),
         });
-        
-        return false;
+
+        var data = {};
+        try {
+            data = await response.json();
+        } catch (error) {
+            data = {};
+        }
+
+        if (data.error) {
+            throw new Error(data.error);
+        }
+
+        if (data.process_id) {
+            var statusData = await waitForCompletion(data.process_id);
+            statusData.process_id = data.process_id;
+            return statusData;
+        }
+
+        return data;
     }
-    
+
+    async function handleSubmit() {
+        var urlText = document.getElementById("youtube-url").value;
+        var location = document.getElementById("save-location").value;
+        var tagsInput = document.getElementById("tags").value;
+        var hotwordsInput = document.getElementById("hotwords").value;
+        var urls = splitUrls(urlText);
+
+        if (urls.length === 0) {
+            showError("请输入视频 URL");
+            return;
+        }
+
+        var isBatch = urls.length > 1;
+        updateBatchMode();
+        var tagsList = isBatch
+            ? []
+            : tagsInput
+                  .split(",")
+                  .map((tag) => tag.trim())
+                  .filter((tag) => tag);
+        var hotwordsList = isBatch
+            ? []
+            : hotwordsInput
+                  .split(",")
+                  .map((word) => word.trim())
+                  .filter((word) => word);
+
+        // 显示进度
+        var progressEl = document.getElementById("progress");
+        progressEl.style.display = "block";
+        progressEl.innerText = isBatch
+            ? "批量模式已启用，自动跳过标签/热词。"
+            : "正在处理...";
+        document.getElementById("error-message").style.display = "none";
+
+        if (urls.length === 1) {
+            try {
+                var singleResult = await submitSingleUrl(
+                    urls[0],
+                    location,
+                    tagsList,
+                    hotwordsList,
+                );
+                if (singleResult.view_url) {
+                    window.location.href = singleResult.view_url;
+                    return;
+                }
+                if (singleResult.process_id) {
+                    window.location.href =
+                        "/process/video/" + singleResult.process_id;
+                    return;
+                }
+            } catch (error) {
+                showError("处理失败: " + (error.message || String(error)));
+                return;
+            }
+            progressEl.innerText = "处理完成。";
+            return;
+        }
+
+        var failures = [];
+        var completed = 0;
+        progressEl.innerText =
+            "已提交 " + urls.length + " 条，完成 0/" + urls.length;
+
+        var tasks = urls.map(function (currentUrl) {
+            return submitSingleUrl(currentUrl, location, tagsList, hotwordsList)
+                .then(function (result) {
+                    if (
+                        result.status &&
+                        result.status.toLowerCase() === "failed"
+                    ) {
+                        failures.push({
+                            url: currentUrl,
+                            error: result.error || "处理失败",
+                        });
+                    }
+                    if (
+                        result.status &&
+                        result.status.toLowerCase() === "timeout"
+                    ) {
+                        failures.push({ url: currentUrl, error: "处理超时" });
+                    }
+                })
+                .catch(function (error) {
+                    failures.push({
+                        url: currentUrl,
+                        error: error.message || String(error),
+                    });
+                })
+                .finally(function () {
+                    completed += 1;
+                    progressEl.innerText =
+                        "并行处理中 " + completed + "/" + urls.length;
+                });
+        });
+
+        await Promise.all(tasks);
+
+        if (failures.length > 0) {
+            var errorText = failures
+                .map((item) => item.url + ": " + item.error)
+                .join("；");
+            showError(
+                "批量处理完成，但有 " +
+                    failures.length +
+                    " 条失败：" +
+                    errorText,
+            );
+            return;
+        }
+
+        progressEl.innerText = "处理完成。";
+    }
+
+    updateBatchMode();
+    document
+        .getElementById("youtube-url")
+        .addEventListener("input", updateBatchMode);
+
     function extractVideoId(url) {
         // YouTube
         var match = url.match(/[?&]v=([^&]+)/);
         if (match) {
-            return { platform: 'youtube', id: match[1] };
+            return { platform: "youtube", id: match[1] };
         }
         match = url.match(/youtu\.be\/([^?]+)/);
         if (match) {
-            return { platform: 'youtube', id: match[1] };
+            return { platform: "youtube", id: match[1] };
         }
-        
+
         // Bilibili
         match = url.match(/bilibili\.com\/video\/(BV[\w]+)/);
         if (match) {
-            return { platform: 'bilibili', id: match[1] };
+            return { platform: "bilibili", id: match[1] };
         }
-        
+
         // AcFun
         match = url.match(/acfun\.cn\/v\/ac(\d+)/);
         if (match) {
-            return { platform: 'acfun', id: match[1] };
+            return { platform: "acfun", id: match[1] };
         }
-        
+
         return null;
     }
-    
+
     function showError(message) {
-        var errorDiv = document.getElementById('error-message');
+        var errorDiv = document.getElementById("error-message");
         errorDiv.innerText = message;
-        errorDiv.style.display = 'block';
-        document.getElementById('progress').style.display = 'none';
+        errorDiv.style.display = "block";
+        document.getElementById("progress").style.display = "none";
     }
 </script>
 {% endblock %}
