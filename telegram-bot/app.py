@@ -1,34 +1,35 @@
-import os
+import asyncio
+import datetime
+import json
 import logging
+import os
+import re
+import signal
+import sys
+import tempfile
+import threading
+import time
+import traceback
+from threading import Thread
+from typing import Any, Awaitable, Dict, List, Optional, Tuple
+
+import httpx
+import pytz
 import requests
 import telegram
+import urllib3
+import yaml
+from flask import Flask, jsonify, request
 from telegram import Update
+from telegram.error import Conflict, NetworkError, TelegramError
 from telegram.ext import (
     Application,
+    CallbackContext,
     CommandHandler,
+    ContextTypes,
     MessageHandler,
     filters,
-    ContextTypes,
-    CallbackContext,
 )
-from telegram.error import Conflict, NetworkError, TelegramError
-import urllib3
-import httpx
-import json
-import traceback
-import sys
-import signal
-import time
-import datetime
-import pytz
-import re
-import yaml
-import threading
-import asyncio
-import tempfile
-from typing import Any, Dict, Awaitable, List, Optional, Tuple
-from flask import Flask, request, jsonify
-from threading import Thread
 
 # 配置日志
 logging.basicConfig(
@@ -145,16 +146,10 @@ PROMPT_FLOW_CONFIG = (
     else {}
 )
 
-REQUIRE_LOCATION_SELECTION = _get_bool(
-    PROMPT_FLOW_CONFIG.get("require_location"), True
-)
+REQUIRE_LOCATION_SELECTION = _get_bool(PROMPT_FLOW_CONFIG.get("require_location"), True)
 REQUIRE_TAG_INPUT = _get_bool(PROMPT_FLOW_CONFIG.get("require_tags"), True)
-REQUIRE_HOTWORD_INPUT = _get_bool(
-    PROMPT_FLOW_CONFIG.get("require_hotwords"), True
-)
-TAGS_TIMEOUT_SECONDS = _get_int(
-    PROMPT_FLOW_CONFIG.get("tags_timeout_seconds"), 180
-)
+REQUIRE_HOTWORD_INPUT = _get_bool(PROMPT_FLOW_CONFIG.get("require_hotwords"), True)
+TAGS_TIMEOUT_SECONDS = _get_int(PROMPT_FLOW_CONFIG.get("tags_timeout_seconds"), 180)
 HOTWORDS_TIMEOUT_SECONDS = _get_int(
     PROMPT_FLOW_CONFIG.get("hotwords_timeout_seconds"), 180
 )
@@ -237,6 +232,7 @@ def update_hotword_settings_on_server(payload: Dict[str, Any]) -> Dict[str, Any]
 # 禁用不安全的HTTPS警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+
 # 后台任务调度工具，确保异常被记录
 def schedule_background_task(
     context: ContextTypes.DEFAULT_TYPE, coro: Awaitable[Any]
@@ -280,6 +276,7 @@ def log_update_metadata(prefix: str, update: Update) -> None:
     except Exception as exc:
         logger.debug("log_update_metadata error: %s", exc, exc_info=True)
 
+
 # 全局变量
 VALID_LOCATIONS = {"1": "new", "2": "later", "3": "archive", "4": "feed"}
 
@@ -293,10 +290,136 @@ if DEFAULT_LOCATION not in VALID_LOCATIONS.values():
 
 TAGS_HELP_MESSAGE = "请输入标签，多个标签用逗号分隔（例如：'youtube字幕,学习笔记,英语学习'）。\n输入 /skip 跳过添加标签。"
 HOTWORDS_HELP_MESSAGE = "请输入热词，多个热词用逗号分隔（例如：'人工智能,机器学习,AI语音'）。\n输入 /skip 跳过添加热词。"
+LOCATION_HELP_MESSAGE = (
+    "请选择保存位置：\n"
+    "1. 新内容 (New)\n"
+    "2. 稍后阅读 (Later)\n"
+    "3. 已归档 (Archive)\n"
+    "4. Feed"
+)
+VIDEO_URL_DOMAINS = ("youtube.com", "youtu.be", "bilibili.com", "b23.tv")
 
 # 用户状态存储
 user_states = {}
 last_user_requests: Dict[Tuple[int, int], Dict[str, Any]] = {}
+
+
+def _clean_url_token(token: str) -> str:
+    """清理URL分隔符带来的多余字符."""
+    if not token:
+        return ""
+    cleaned = token.strip().strip("()[]<>\"'")
+    return cleaned.rstrip(".,;!?")
+
+
+def extract_video_urls(text: str) -> List[str]:
+    """从文本中提取可能的视频URL，支持空格/换行/逗号分隔."""
+    if not text:
+        return []
+    tokens = re.split(r"[\s,，]+", text.strip())
+    urls: List[str] = []
+    seen = set()
+    for token in tokens:
+        cleaned = _clean_url_token(token)
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if not any(domain in lowered for domain in VIDEO_URL_DOMAINS):
+            continue
+        if cleaned in seen:
+            continue
+        urls.append(cleaned)
+        seen.add(cleaned)
+    return urls
+
+
+def _shorten_url(url: str, max_length: int = 64) -> str:
+    """缩短URL显示，避免提示过长."""
+    clean = (url or "").strip()
+    if len(clean) <= max_length:
+        return clean
+    tail_len = 14
+    head_len = max_length - tail_len - 3
+    if head_len < 10:
+        return clean[:max_length]
+    return f"{clean[:head_len]}...{clean[-tail_len:]}"
+
+
+def _queue_total(state: Dict[str, Any]) -> int:
+    """计算当前队列总数."""
+    index = int(state.get("queue_index", 1))
+    pending_count = len(state.get("pending_urls", []))
+    return max(index + pending_count, 1)
+
+
+def _queue_context_text(state: Dict[str, Any]) -> str:
+    """生成当前队列上下文提示."""
+    url = state.get("url")
+    if not url:
+        return ""
+    index = int(state.get("queue_index", 1))
+    total = _queue_total(state)
+    url_display = _shorten_url(url)
+    if total > 1:
+        prefix = f"当前处理 #{index}/{total}: {url_display}"
+    else:
+        prefix = f"当前处理: {url_display}"
+    return f"{prefix}\n本次输入仅作用于该链接。"
+
+
+def _upsert_user_state(user_id: int, **updates: Any) -> Dict[str, Any]:
+    """更新用户状态并保留队列信息."""
+    state = user_states.get(user_id, {})
+    state.update(updates)
+    user_states[user_id] = state
+    return state
+
+
+def _append_pending_urls(state: Dict[str, Any], urls: List[str]) -> int:
+    """追加待处理URL，返回新增数量."""
+    pending = list(state.get("pending_urls", []))
+    current = state.get("url")
+    seen = set(pending)
+    if current:
+        seen.add(current)
+    added = 0
+    for url in urls:
+        if url in seen:
+            continue
+        pending.append(url)
+        seen.add(url)
+        added += 1
+    state["pending_urls"] = pending
+    return added
+
+
+def _build_prompt(base_message: str, state: Dict[str, Any]) -> str:
+    """拼接带队列上下文的提示文案."""
+    prefix = _queue_context_text(state)
+    if prefix:
+        return f"{prefix}\n{base_message}"
+    return base_message
+
+
+def _start_queue_state(user_id: int, urls: List[str]) -> Dict[str, Any]:
+    """初始化队列状态并返回当前用户状态."""
+    first_url = urls[0]
+    return _upsert_user_state(
+        user_id,
+        url=first_url,
+        queue_index=1,
+        pending_urls=list(urls[1:]),
+    )
+
+
+def _pop_next_queue_url(state: Dict[str, Any]) -> Optional[str]:
+    """弹出下一个待处理URL."""
+    pending = list(state.get("pending_urls", []))
+    if not pending:
+        return None
+    next_url = pending.pop(0)
+    state["pending_urls"] = pending
+    return next_url
 
 
 def _request_key(user_id: int, chat_id: int) -> Tuple[int, int]:
@@ -416,6 +539,8 @@ async def submit_request_via_context(
             safe_hotwords,
         ),
     )
+
+
 last_user_requests: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
 # 全局变量追踪应用状态与心跳指标
@@ -769,38 +894,194 @@ async def send_subtitle_file(
         )
 
 
+async def _prompt_location(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_id: int,
+    url: str,
+    reply_to_message_id: Optional[int] = None,
+) -> None:
+    """发送location选择提示."""
+    logger.info("ask_location: user=%s url=%s", user_id, url)
+    state = _upsert_user_state(
+        user_id,
+        state="waiting_for_location",
+        url=url,
+        last_interaction=datetime.datetime.now(pytz.UTC),
+    )
+
+    message = await context.bot.send_message(
+        chat_id=chat_id,
+        text=_build_prompt(LOCATION_HELP_MESSAGE, state),
+        reply_to_message_id=reply_to_message_id,
+    )
+
+    state["message_id"] = message.message_id
+
+    context.job_queue.run_once(
+        location_timeout,
+        180,
+        data={"user_id": user_id, "chat_id": chat_id},
+        name="location_timeout",
+    )
+
+
+async def _prompt_tags(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_id: int,
+    url: str,
+    location: str,
+    reply_to_message_id: Optional[int] = None,
+) -> None:
+    """发送标签输入提示."""
+    logger.info("ask_tags: user=%s location=%s url=%s", user_id, location, url)
+    state = _upsert_user_state(
+        user_id,
+        state="waiting_for_tags",
+        url=url,
+        location=location,
+        last_interaction=datetime.datetime.now(pytz.UTC),
+    )
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=_build_prompt(TAGS_HELP_MESSAGE, state),
+        reply_to_message_id=reply_to_message_id,
+    )
+
+    if TAGS_TIMEOUT_SECONDS > 0:
+        context.job_queue.run_once(
+            tags_timeout,
+            TAGS_TIMEOUT_SECONDS,
+            data={"user_id": user_id, "chat_id": chat_id},
+            name=f"tags_timeout_{user_id}",
+        )
+
+
+async def _prompt_hotwords(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_id: int,
+    url: str,
+    location: str,
+    tags: List[str],
+    reply_to_message_id: Optional[int] = None,
+) -> None:
+    """发送热词输入提示."""
+    logger.info(
+        "ask_hotwords: user=%s location=%s url=%s tags=%s",
+        user_id,
+        location,
+        url,
+        tags,
+    )
+    state = _upsert_user_state(
+        user_id,
+        state="waiting_for_hotwords",
+        url=url,
+        location=location,
+        tags=tags,
+        last_interaction=datetime.datetime.now(pytz.UTC),
+    )
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=_build_prompt(HOTWORDS_HELP_MESSAGE, state),
+        reply_to_message_id=reply_to_message_id,
+    )
+
+    if HOTWORDS_TIMEOUT_SECONDS > 0:
+        context.job_queue.run_once(
+            hotwords_timeout,
+            HOTWORDS_TIMEOUT_SECONDS,
+            data={"user_id": user_id, "chat_id": chat_id},
+            name=f"hotwords_timeout_{user_id}",
+        )
+
+
+async def _start_input_flow(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_id: int,
+    url: str,
+    location: str,
+    reply_to_message_id: Optional[int] = None,
+) -> None:
+    """根据配置启动标签/热词输入流程."""
+    if REQUIRE_TAG_INPUT:
+        await _prompt_tags(
+            context,
+            chat_id,
+            user_id,
+            url,
+            location,
+            reply_to_message_id=reply_to_message_id,
+        )
+        return
+
+    if REQUIRE_HOTWORD_INPUT:
+        await _prompt_hotwords(
+            context,
+            chat_id,
+            user_id,
+            url,
+            location,
+            [],
+            reply_to_message_id=reply_to_message_id,
+        )
+        return
+
+    await submit_request_via_context(
+        context,
+        user_id,
+        chat_id,
+        url,
+        location,
+        [],
+        [],
+        "✅ 已收到请求，正在后台处理...",
+        "auto_skip_prompts",
+        reply_to_message_id=reply_to_message_id,
+    )
+    await _advance_queue_or_cleanup(context, user_id, chat_id)
+
+
+async def _advance_queue_or_cleanup(
+    context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int
+) -> None:
+    """进入下一条队列或清理状态."""
+    state = user_states.get(user_id)
+    if not state:
+        return
+
+    next_url = _pop_next_queue_url(state)
+    if not next_url:
+        user_states.pop(user_id, None)
+        return
+
+    state["queue_index"] = int(state.get("queue_index", 1)) + 1
+    state.pop("tags", None)
+    state.pop("hotwords", None)
+    state["url"] = next_url
+    state["location"] = None
+
+    if REQUIRE_LOCATION_SELECTION:
+        await _prompt_location(context, chat_id, user_id, next_url)
+    else:
+        await _start_input_flow(context, chat_id, user_id, next_url, DEFAULT_LOCATION)
+
+
 async def ask_location(
     update: Update, context: ContextTypes.DEFAULT_TYPE, url: str
 ) -> None:
     """询问用户选择location"""
-    user_id = update.effective_user.id
-    logger.info("ask_location: user=%s url=%s", user_id, url)
-
-    # 保存用户状态
-    user_states[user_id] = {
-        "state": "waiting_for_location",
-        "url": url,
-        "last_interaction": datetime.datetime.now(pytz.UTC),
-    }
-
-    # 发送选择提示
-    message = await update.message.reply_text(
-        "请选择保存位置：\n"
-        "1. 新内容 (New)\n"
-        "2. 稍后阅读 (Later)\n"
-        "3. 已归档 (Archive)\n"
-        "4. Feed"
-    )
-
-    # 保存提示消息ID以便后续删除
-    user_states[user_id]["message_id"] = message.message_id
-
-    # 设置超时
-    context.job_queue.run_once(
-        location_timeout,
-        180,  # 3分钟超时
-        data={"user_id": user_id, "chat_id": update.effective_chat.id},
-        name="location_timeout",
+    await _prompt_location(
+        context,
+        update.effective_chat.id,
+        update.effective_user.id,
+        url,
+        reply_to_message_id=update.message.message_id if update.message else None,
     )
 
 
@@ -833,32 +1114,17 @@ async def ask_tags(
     """询问用户输入tags"""
     user_id = update.effective_user.id
     if not REQUIRE_TAG_INPUT:
-        logger.info(
-            "ask_tags: user=%s 配置禁用标签输入，跳过该步骤", user_id
-        )
+        logger.info("ask_tags: user=%s 配置禁用标签输入，跳过该步骤", user_id)
         await ask_hotwords(update, context, url, location, [])
         return
-
-    logger.info(
-        "ask_tags: user=%s location=%s url=%s", user_id, location, url
+    await _prompt_tags(
+        context,
+        update.effective_chat.id,
+        user_id,
+        url,
+        location,
+        reply_to_message_id=update.message.message_id if update.message else None,
     )
-    user_states[user_id] = {
-        "state": "waiting_for_tags",
-        "url": url,
-        "location": location,
-        "last_interaction": datetime.datetime.now(pytz.UTC),
-    }
-
-    await update.message.reply_text(TAGS_HELP_MESSAGE)
-
-    # 设置超时
-    if TAGS_TIMEOUT_SECONDS > 0:
-        context.job_queue.run_once(
-            tags_timeout,
-            TAGS_TIMEOUT_SECONDS,
-            data={"user_id": user_id, "chat_id": update.effective_chat.id},
-            name=f"tags_timeout_{user_id}",
-        )
 
 
 async def ask_hotwords(
@@ -871,38 +1137,18 @@ async def ask_hotwords(
     """询问用户输入热词"""
     user_id = update.effective_user.id
     if not REQUIRE_HOTWORD_INPUT:
-        logger.info(
-            "ask_hotwords: user=%s 配置禁用热词输入，跳过该步骤", user_id
-        )
-        await finalize_user_request(
-            update, context, url, location, tags or [], []
-        )
+        logger.info("ask_hotwords: user=%s 配置禁用热词输入，跳过该步骤", user_id)
+        await finalize_user_request(update, context, url, location, tags or [], [])
         return
-
-    logger.info(
-        "ask_hotwords: user=%s location=%s url=%s tags=%s",
+    await _prompt_hotwords(
+        context,
+        update.effective_chat.id,
         user_id,
-        location,
         url,
-        tags,
+        location,
+        tags or [],
+        reply_to_message_id=update.message.message_id if update.message else None,
     )
-    user_states[user_id] = {
-        "state": "waiting_for_hotwords",
-        "url": url,
-        "location": location,
-        "tags": tags or [],
-        "last_interaction": datetime.datetime.now(pytz.UTC),
-    }
-
-    await update.message.reply_text(HOTWORDS_HELP_MESSAGE)
-
-    if HOTWORDS_TIMEOUT_SECONDS > 0:
-        context.job_queue.run_once(
-            hotwords_timeout,
-            HOTWORDS_TIMEOUT_SECONDS,
-            data={"user_id": user_id, "chat_id": update.effective_chat.id},
-            name=f"hotwords_timeout_{user_id}",
-        )
 
 
 async def finalize_user_request(
@@ -920,7 +1166,9 @@ async def finalize_user_request(
     user = update.effective_user
     if not chat or not user:
         logger.error(
-            "finalize_user_request: 缺少聊天或用户信息 url=%s location=%s", url, location
+            "finalize_user_request: 缺少聊天或用户信息 url=%s location=%s",
+            url,
+            location,
         )
         return
 
@@ -936,9 +1184,7 @@ async def finalize_user_request(
         origin,
         reply_to_message_id=update.message.message_id if update.message else None,
     )
-
-    if user.id in user_states:
-        del user_states[user.id]
+    await _advance_queue_or_cleanup(context, user.id, chat.id)
 
 
 async def tags_timeout(context: CallbackContext) -> None:
@@ -965,10 +1211,7 @@ async def tags_timeout(context: CallbackContext) -> None:
             "✅ 已收到请求，正在后台处理...",
             "tags_timeout",
         )
-
-        # 清理状态
-        if user_id in user_states:
-            del user_states[user_id]
+        await _advance_queue_or_cleanup(context, user_id, chat_id)
 
 
 async def hotwords_timeout(context: CallbackContext) -> None:
@@ -996,7 +1239,7 @@ async def hotwords_timeout(context: CallbackContext) -> None:
             None,
             "hotwords_timeout",
         )
-        del user_states[user_id]
+        await _advance_queue_or_cleanup(context, user_id, chat_id)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1012,10 +1255,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         user_state.get("state") if isinstance(user_state, dict) else None,
         text_preview,
     )
+    text = text_preview or ""
+    incoming_urls = extract_video_urls(text)
+
+    if user_state and user_state.get("state") in {
+        "waiting_for_tags",
+        "waiting_for_hotwords",
+        "waiting_for_location",
+    }:
+        if incoming_urls:
+            user_state.setdefault("queue_index", 1)
+            user_state.setdefault("pending_urls", [])
+            added = _append_pending_urls(user_state, incoming_urls)
+            if added > 0:
+                total = _queue_total(user_state)
+                if user_state.get("state") == "waiting_for_tags":
+                    step_hint = "输入标签或发送 /skip"
+                elif user_state.get("state") == "waiting_for_hotwords":
+                    step_hint = "输入热词或发送 /skip"
+                else:
+                    step_hint = "选择保存位置(1-4)"
+                await update.message.reply_text(
+                    f"✅ 已加入队列（+{added}），共 {total} 条。\n"
+                    f"{_queue_context_text(user_state)}\n"
+                    f"请继续{step_hint}。"
+                )
+            else:
+                await update.message.reply_text("链接已在队列中，无需重复添加。")
+            return
 
     # 如果用户正在等待输入tags
     if user_state and user_state.get("state") == "waiting_for_tags":
-        text = (update.message.text or "").strip()
         if not text:
             await update.message.reply_text("❌ 标签不能为空，请输入标签或发送 /skip")
             logger.info("handle_message: user=%s 提供空标签", user_id)
@@ -1029,11 +1299,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         await update.message.reply_text("✅ 标签已记录。")
         logger.info("handle_message: user=%s 标签=%s", user_id, tags)
-        await ask_hotwords(update, context, user_state["url"], user_state["location"], tags)
+        await ask_hotwords(
+            update, context, user_state["url"], user_state["location"], tags
+        )
         return
 
     if user_state and user_state.get("state") == "waiting_for_hotwords":
-        text = (update.message.text or "").strip()
         normalized = text.replace("，", ",").replace("\n", ",")
 
         if not text or normalized.lower() in {"skip", "跳过"}:
@@ -1056,7 +1327,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # 如果用户正在等待选择location
     if user_state and user_state.get("state") == "waiting_for_location":
         location_input = update.message.text.lower().strip()
-        logger.info("handle_message: user=%s 选择location输入=%s", user_id, location_input)
+        logger.info(
+            "handle_message: user=%s 选择location输入=%s", user_id, location_input
+        )
 
         # 检查输入是否有效
         if location_input in VALID_LOCATIONS.values():
@@ -1085,20 +1358,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # 检查是否是视频URL
-    url = (update.message.text or "").strip()
-    if any(
-        platform in url.lower()
-        for platform in ["youtube.com", "youtu.be", "bilibili.com", "b23.tv"]
-    ):
+    if incoming_urls:
+        state = _start_queue_state(user_id, incoming_urls)
+        if len(incoming_urls) > 1:
+            await update.message.reply_text(
+                f"✅ 已收到 {len(incoming_urls)} 条链接，将按顺序询问标签/热词。"
+            )
         if REQUIRE_LOCATION_SELECTION:
-            await ask_location(update, context, url)
+            await _prompt_location(
+                context,
+                update.effective_chat.id,
+                user_id,
+                state["url"],
+                reply_to_message_id=update.message.message_id
+                if update.message
+                else None,
+            )
         else:
             logger.info(
                 "handle_message: user=%s 跳过location选择，使用默认位置=%s",
                 user_id,
                 DEFAULT_LOCATION,
             )
-            await ask_tags(update, context, url, DEFAULT_LOCATION)
+            await _start_input_flow(
+                context,
+                update.effective_chat.id,
+                user_id,
+                state["url"],
+                DEFAULT_LOCATION,
+                reply_to_message_id=update.message.message_id
+                if update.message
+                else None,
+            )
     else:
         await update.message.reply_text("请发送YouTube或Bilibili视频链接")
 
@@ -1117,7 +1408,9 @@ async def process_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (update.message.text or "").strip()
         parts = text.split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
-            await update.message.reply_text("❌ 请在命令后提供视频URL，例如 /process <url>")
+            await update.message.reply_text(
+                "❌ 请在命令后提供视频URL，例如 /process <url>"
+            )
             return
 
         target_url = parts[1].strip()
@@ -1153,7 +1446,9 @@ async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = user_state.get("state")
     if state == "waiting_for_tags":
         await update.message.reply_text("✅ 标签已跳过。")
-        await ask_hotwords(update, context, user_state["url"], user_state["location"], [])
+        await ask_hotwords(
+            update, context, user_state["url"], user_state["location"], []
+        )
     elif state == "waiting_for_hotwords":
         tags = user_state.get("tags", [])
         await finalize_user_request(
@@ -1184,7 +1479,9 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     entry = _get_last_request(user.id, chat.id)
     if not entry or not entry.get("url"):
-        await update.message.reply_text("当前没有可以重试的请求，请先发送一个视频链接。")
+        await update.message.reply_text(
+            "当前没有可以重试的请求，请先发送一个视频链接。"
+        )
         return
 
     status = entry.get("status")
@@ -1192,7 +1489,9 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("上一条请求仍在处理中，请稍后再试。")
         return
     if status == "completed":
-        await update.message.reply_text("上一条请求已完成，如需再次处理请重新发送链接。")
+        await update.message.reply_text(
+            "上一条请求已完成，如需再次处理请重新发送链接。"
+        )
         return
 
     url_to_use = entry.get("normalized_url") or entry.get("url")
@@ -1221,6 +1520,8 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "retry_command",
         reply_to_message_id=update.message.message_id if update.message else None,
     )
+
+
 async def hotword_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查看热词配置状态"""
     record_update(update)
@@ -1250,7 +1551,11 @@ async def hotword_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     record_update(update)
     log_update_metadata("/hotword_toggle", update)
     user_id = update.effective_user.id
-    logger.info("/hotword_toggle command: user=%s text=%r", user_id, update.message.text if update.message else None)
+    logger.info(
+        "/hotword_toggle command: user=%s text=%r",
+        user_id,
+        update.message.text if update.message else None,
+    )
     if not is_admin_user(user_id):
         await update.message.reply_text("❌ 仅管理员可以执行该操作。")
         return
@@ -1266,7 +1571,9 @@ async def hotword_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif arg in {"off", "false", "disable", "0", "关闭", "close"}:
             desired_state = False
         else:
-            await update.message.reply_text("❌ 参数无效，请使用 /hotword_toggle [on|off]")
+            await update.message.reply_text(
+                "❌ 参数无效，请使用 /hotword_toggle [on|off]"
+            )
             return
 
     current_settings = context.application.bot_data.get("hotword_settings", {})
@@ -1413,9 +1720,7 @@ async def monitor_process_completion(
                         if subtitle_candidate.strip():
                             subtitle_content = subtitle_candidate
                     elif subtitle_response.status_code == 202:
-                        logger.debug(
-                            "字幕接口返回未就绪状态(202): %s", process_id
-                        )
+                        logger.debug("字幕接口返回未就绪状态(202): %s", process_id)
                     else:
                         logger.debug(
                             "字幕接口返回状态码 %s: %s",
@@ -1469,10 +1774,10 @@ async def monitor_process_completion(
                 logger.debug("更新消息失败: %s", edit_err)
 
             original_name = (
-                video_info.get("title")
-                if isinstance(video_info, dict)
-                else None
-            ) or payload.get("original_filename") or process_id
+                (video_info.get("title") if isinstance(video_info, dict) else None)
+                or payload.get("original_filename")
+                or process_id
+            )
 
             result_payload = {
                 "subtitle_content": subtitle_content,
@@ -1642,7 +1947,10 @@ async def process_url_with_location(
 
             if status_code == 202:
                 process_id = result.get("process_id")
-                message_text = result.get("message") or "⏳ 视频已进入后台处理，完成后我会继续跟进。"
+                message_text = (
+                    result.get("message")
+                    or "⏳ 视频已进入后台处理，完成后我会继续跟进。"
+                )
                 try:
                     await context.bot.edit_message_text(
                         message_text,
@@ -1857,9 +2165,7 @@ def main():
     # 构建应用
     application = application_builder.build()
     application.bot_data["hotword_settings"] = fetch_hotword_settings_from_server()
-    logger.info(
-        "初始化热词设置: %s", application.bot_data.get("hotword_settings", {})
-    )
+    logger.info("初始化热词设置: %s", application.bot_data.get("hotword_settings", {}))
 
     # 启动连接监控器
     connection_monitor(application)
