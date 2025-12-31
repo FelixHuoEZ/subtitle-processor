@@ -302,6 +302,7 @@ VIDEO_URL_DOMAINS = ("youtube.com", "youtu.be", "bilibili.com", "b23.tv")
 # 用户状态存储
 user_states = {}
 last_user_requests: Dict[Tuple[int, int], Dict[str, Any]] = {}
+active_tasks: Dict[Tuple[int, int], Dict[str, Dict[str, Any]]] = {}
 
 
 def _clean_url_token(token: str) -> str:
@@ -424,6 +425,75 @@ def _pop_next_queue_url(state: Dict[str, Any]) -> Optional[str]:
 
 def _request_key(user_id: int, chat_id: int) -> Tuple[int, int]:
     return (int(user_id), int(chat_id))
+
+
+def _register_active_task(
+    user_id: int,
+    chat_id: int,
+    process_id: str,
+    url: str,
+    status: str,
+    message_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """登记一个正在处理的任务."""
+    key = _request_key(user_id, chat_id)
+    entry = {
+        "process_id": process_id,
+        "url": url,
+        "status": status,
+        "message_id": message_id,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    active_tasks.setdefault(key, {})[process_id] = entry
+    return entry
+
+
+def _update_active_task_status(
+    user_id: int,
+    chat_id: int,
+    process_id: str,
+    status: str,
+    error: Optional[str] = None,
+) -> None:
+    """更新任务状态."""
+    key = _request_key(user_id, chat_id)
+    tasks = active_tasks.get(key)
+    if not tasks or process_id not in tasks:
+        return
+    tasks[process_id]["status"] = status
+    tasks[process_id]["updated_at"] = time.time()
+    if error:
+        tasks[process_id]["error"] = error
+
+
+def _remove_active_task(user_id: int, chat_id: int, process_id: str) -> None:
+    """移除已完成/失败的任务."""
+    key = _request_key(user_id, chat_id)
+    tasks = active_tasks.get(key)
+    if not tasks:
+        return
+    tasks.pop(process_id, None)
+    if not tasks:
+        active_tasks.pop(key, None)
+
+
+def _list_active_tasks(user_id: int, chat_id: int) -> List[Dict[str, Any]]:
+    """列出当前用户/聊天中的任务."""
+    key = _request_key(user_id, chat_id)
+    tasks = list(active_tasks.get(key, {}).values())
+    return sorted(tasks, key=lambda item: item.get("created_at", 0))
+
+
+def _status_label(status: str) -> str:
+    """友好的状态展示."""
+    mapping = {
+        "queued": "排队中",
+        "processing": "处理中",
+        "pending": "准备中",
+        "unknown": "处理中",
+    }
+    return mapping.get(status, status)
 
 
 def _start_processing_attempt(
@@ -1522,6 +1592,28 @@ async def retry_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def queue_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """查询当前正在处理的任务列表"""
+    record_update(update)
+    log_update_metadata("/queue", update)
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    tasks = _list_active_tasks(user_id, chat_id)
+    if not tasks:
+        await update.message.reply_text("当前没有正在处理的任务。")
+        return
+
+    lines = []
+    for idx, task in enumerate(tasks, start=1):
+        url_display = _shorten_url(task.get("url") or "")
+        status_label = _status_label(task.get("status", "processing"))
+        lines.append(f"{idx}. {url_display} ({status_label})")
+
+    await update.message.reply_text(
+        f"当前正在处理 {len(tasks)} 个任务：\n" + "\n".join(lines)
+    )
+
+
 async def hotword_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查看热词配置状态"""
     record_update(update)
@@ -1664,6 +1756,10 @@ async def monitor_process_completion(
                 status="failed",
                 error="未找到处理任务",
             )
+            _update_active_task_status(
+                user_id, chat_id, process_id, "failed", error="未找到处理任务"
+            )
+            _remove_active_task(user_id, chat_id, process_id)
             return
 
         if response.status_code >= 500:
@@ -1691,6 +1787,8 @@ async def monitor_process_completion(
             status,
             payload.get("progress"),
         )
+        if status:
+            _update_active_task_status(user_id, chat_id, process_id, status)
 
         if status == "completed":
             subtitle_content = payload.get("subtitle_content") or ""
@@ -1808,6 +1906,7 @@ async def monitor_process_completion(
                 status="completed",
                 error=None,
             )
+            _remove_active_task(user_id, chat_id, process_id)
             return
 
         if status == "failed":
@@ -1826,6 +1925,10 @@ async def monitor_process_completion(
                 status="failed",
                 error=error_message,
             )
+            _update_active_task_status(
+                user_id, chat_id, process_id, "failed", error=error_message
+            )
+            _remove_active_task(user_id, chat_id, process_id)
             return
 
         await asyncio.sleep(poll_interval)
@@ -1845,6 +1948,8 @@ async def monitor_process_completion(
         status="failed",
         error="处理超时",
     )
+    _update_active_task_status(user_id, chat_id, process_id, "failed", error="处理超时")
+    _remove_active_task(user_id, chat_id, process_id)
 
 
 async def process_url_with_location(
@@ -1961,6 +2066,14 @@ async def process_url_with_location(
                     logger.debug("更新排队消息失败: %s", edit_err)
 
                 if process_id:
+                    _register_active_task(
+                        user_id,
+                        chat_id,
+                        process_id,
+                        normalized_url,
+                        "queued",
+                        message_id=processing_message.message_id,
+                    )
                     schedule_background_task(
                         context,
                         monitor_process_completion(
@@ -2222,6 +2335,7 @@ def main():
     application.add_handler(CommandHandler("process", process_url))
     application.add_handler(CommandHandler("skip", skip_command))
     application.add_handler(CommandHandler("retry", retry_command))
+    application.add_handler(CommandHandler("queue", queue_status))
     application.add_handler(CommandHandler("hotword_status", hotword_status))
     application.add_handler(CommandHandler("hotword_toggle", hotword_toggle))
     # 处理普通消息
