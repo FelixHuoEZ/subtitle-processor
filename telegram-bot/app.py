@@ -441,6 +441,9 @@ def _register_active_task(
     process_id: str,
     url: str,
     status: str,
+    location: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    hotwords: Optional[List[str]] = None,
     message_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """登记一个正在处理的任务."""
@@ -449,6 +452,9 @@ def _register_active_task(
         "process_id": process_id,
         "url": url,
         "status": status,
+        "location": location,
+        "tags": list(tags or []),
+        "hotwords": list(hotwords or []),
         "message_id": message_id,
         "created_at": time.time(),
         "updated_at": time.time(),
@@ -835,7 +841,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. 直接发送YouTube/Bilibili URL\n"
         "2. 使用命令 /process URL\n"
         "3. 一次发送多条URL（换行/空格/逗号分隔），将自动跳过标签/热词并并行处理\n"
-        "4. 使用 /queue 查看当前任务列表，/queue_clear 清理失败任务"
+        "4. 使用 /queue 查看当前任务列表，/queue_clear 清理失败任务\n"
+        "5. 使用 /retry_failed 批量重试失败任务"
     )
 
 
@@ -1779,7 +1786,7 @@ async def queue_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 lines.append(f"{idx}. {url_display} (失败: {error})")
             else:
                 lines.append(f"{idx}. {url_display} (失败)")
-        lines.append("可使用 /queue_clear 清理失败任务。")
+        lines.append("可使用 /retry_failed 批量重试，或 /queue_clear 清理失败任务。")
 
     await update.message.reply_text("\n".join(lines))
 
@@ -1795,6 +1802,58 @@ async def queue_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("当前没有可清理的失败任务。")
         return
     await update.message.reply_text(f"已清理 {cleared} 条失败任务。")
+
+
+async def retry_failed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """批量重试失败任务"""
+    record_update(update)
+    log_update_metadata("/retry_failed", update)
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user:
+        logger.error("/retry_failed 缺少chat或user信息")
+        return
+
+    failed_tasks = [
+        task
+        for task in _list_active_tasks(user.id, chat.id)
+        if (task.get("status") or "").lower() == "failed"
+    ]
+    if not failed_tasks:
+        await update.message.reply_text("当前没有失败任务。")
+        return
+
+    retry_items = []
+    for task in failed_tasks:
+        url = task.get("url")
+        if not url:
+            continue
+        location = task.get("location") or DEFAULT_LOCATION
+        tags = task.get("tags") or []
+        hotwords = task.get("hotwords") or []
+        retry_items.append((url, location, tags, hotwords))
+
+    if not retry_items:
+        await update.message.reply_text("失败任务缺少URL，无法重试。")
+        return
+
+    for url, location, tags, hotwords in retry_items:
+        schedule_background_task(
+            context,
+            process_url_with_location(
+                user.id,
+                chat.id,
+                url,
+                location,
+                context,
+                tags=tags,
+                hotwords=hotwords,
+            ),
+        )
+
+    await update.message.reply_text(
+        f"♻️ 已重新提交 {len(retry_items)} 条失败任务，处理中。失败记录仍保留，可用 /queue_clear 清理。"
+    )
 
 
 async def hotword_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2268,6 +2327,9 @@ async def process_url_with_location(
                         process_id,
                         normalized_url,
                         "queued",
+                        location=location,
+                        tags=tags,
+                        hotwords=hotwords,
                         message_id=processing_message.message_id,
                     )
                     if await_completion:
@@ -2542,6 +2604,7 @@ def main():
     application.add_handler(CommandHandler("retry", retry_command))
     application.add_handler(CommandHandler("queue", queue_status))
     application.add_handler(CommandHandler("queue_clear", queue_clear))
+    application.add_handler(CommandHandler("retry_failed", retry_failed))
     application.add_handler(CommandHandler("hotword_status", hotword_status))
     application.add_handler(CommandHandler("hotword_toggle", hotword_toggle))
     # 处理普通消息

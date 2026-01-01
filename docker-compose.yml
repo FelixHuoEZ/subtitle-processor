@@ -35,6 +35,9 @@ services:
       - TZ=Asia/Shanghai
       - FLASK_APP=run_app.py
       - FLASK_ENV=development
+      - STORAGE_BACKEND=redis
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_KEY_PREFIX=subtitle_processor
       # 热词策略可选开关
       - HOTWORD_MODE=curated # user_only/curated/experiment
       # - HOTWORD_MAX_COUNT=20           # 自动热词最大数量
@@ -58,6 +61,7 @@ services:
       - "host.docker.internal:host-gateway"
     depends_on:
       - bgutil-provider
+      - redis
     #   - deeplx
 
   transcribe-audio:
@@ -121,6 +125,18 @@ services:
     restart: unless-stopped
     ports:
       - "4416:4416"
+    networks:
+      - srt-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: subtitle-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ./redis-data:/data
     networks:
       - srt-network
 

@@ -1,11 +1,18 @@
 """File management service for the subtitle processing application."""
 
 import errno
-import os
 import json
 import logging
+import os
 import tempfile
 import time
+from typing import Any, Dict, Optional
+
+try:
+    import redis
+except ImportError:  # pragma: no cover - defensive for optional dependency
+    redis = None
+
 from ..config.config_manager import get_config_value
 from ..utils.file_utils import detect_file_encoding, sanitize_filename
 
@@ -14,22 +21,115 @@ logger = logging.getLogger(__name__)
 
 class FileService:
     """文件管理服务"""
-    
+
     def __init__(self, upload_folder=None, output_folder=None):
         """初始化文件服务
-        
+
         Args:
             upload_folder: 上传文件目录
             output_folder: 输出文件目录
         """
-        self.upload_folder = upload_folder or get_config_value('app.upload_folder', '/app/uploads')
-        self.output_folder = output_folder or get_config_value('app.output_folder', '/app/outputs')
-        self.files_info_path = os.path.join(self.upload_folder, 'files_info.json')
-        
+        self.upload_folder = upload_folder or get_config_value(
+            "app.upload_folder", "/app/uploads"
+        )
+        self.output_folder = output_folder or get_config_value(
+            "app.output_folder", "/app/outputs"
+        )
+        self.files_info_path = os.path.join(self.upload_folder, "files_info.json")
+        self.storage_backend = (
+            (
+                self._get_env_or_config("STORAGE_BACKEND", "storage.backend", "json")
+                or "json"
+            )
+            .strip()
+            .lower()
+        )
+        self.redis_url = self._get_env_or_config("REDIS_URL", "storage.redis.url")
+        self.redis_key_prefix = (
+            self._get_env_or_config(
+                "REDIS_KEY_PREFIX", "storage.redis.key_prefix", "subtitle_processor"
+            )
+            or "subtitle_processor"
+        )
+        self.redis_ttl_seconds = int(
+            self._get_env_or_config("REDIS_TTL_SECONDS", "storage.redis.ttl_seconds", 0)
+            or 0
+        )
+        self.redis_connect_retries = int(
+            self._get_env_or_config(
+                "REDIS_CONNECT_RETRIES", "storage.redis.connect_retries", 5
+            )
+            or 5
+        )
+        self.redis_connect_delay = float(
+            self._get_env_or_config(
+                "REDIS_CONNECT_DELAY", "storage.redis.connect_delay", 1.0
+            )
+            or 1.0
+        )
+        self.redis_client = None
+
         # 确保目录存在
         self._ensure_directories()
-        self._ensure_files_info_exists()
-    
+        if self.storage_backend == "redis":
+            if not self._init_redis():
+                logger.warning("Redis不可用，自动回退到JSON存储。")
+                self.storage_backend = "json"
+                self.redis_client = None
+                self._ensure_files_info_exists()
+        else:
+            self._ensure_files_info_exists()
+
+    @staticmethod
+    def _get_env_or_config(
+        env_key: str, config_key: str, default: Optional[Any] = None
+    ) -> Any:
+        value = os.getenv(env_key)
+        if value is not None and value != "":
+            return value
+        return get_config_value(config_key, default)
+
+    def _use_redis(self) -> bool:
+        return self.storage_backend == "redis" and self.redis_client is not None
+
+    def _redis_hash_key(self) -> str:
+        prefix = (self.redis_key_prefix or "").strip()
+        if prefix:
+            return f"{prefix}:files_info"
+        return "files_info"
+
+    def _init_redis(self) -> bool:
+        if redis is None:
+            logger.error("redis依赖未安装，无法使用Redis存储")
+            return False
+        if not self.redis_url:
+            logger.error("storage.backend=redis 但未配置 storage.redis.url/REDIS_URL")
+            return False
+        last_error = None
+        for attempt in range(1, self.redis_connect_retries + 1):
+            try:
+                self.redis_client = redis.Redis.from_url(
+                    self.redis_url,
+                    decode_responses=True,
+                )
+                self.redis_client.ping()
+                logger.info("连接Redis成功: %s", self.redis_url)
+                self._migrate_files_info_to_redis()
+                return True
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "连接Redis失败(%s/%s): %s",
+                    attempt,
+                    self.redis_connect_retries,
+                    e,
+                )
+                if attempt < self.redis_connect_retries:
+                    time.sleep(self.redis_connect_delay * attempt)
+        logger.error("连接Redis失败，将回退到JSON存储: %s", last_error)
+        self.redis_client = None
+        return False
+
     def _ensure_directories(self):
         """确保必要的目录存在"""
         try:
@@ -39,7 +139,7 @@ class FileService:
         except Exception as e:
             logger.error(f"创建目录失败: {str(e)}")
             raise
-    
+
     def _ensure_files_info_exists(self):
         """确保files_info.json文件存在"""
         try:
@@ -48,20 +148,27 @@ class FileService:
                 logger.info(f"创建文件信息存储文件: {self.files_info_path}")
         except Exception as e:
             logger.error(f"创建文件信息存储文件失败: {str(e)}")
-    
+
     def load_files_info(self):
         """加载文件信息"""
+        if self._use_redis():
+            return self._load_files_info_from_redis()
+        return self._load_files_info_from_disk()
+
+    def _load_files_info_from_disk(self) -> Dict[str, Any]:
         attempts = 3
         for attempt in range(attempts):
             try:
-                with open(self.files_info_path, 'r', encoding='utf-8') as f:
+                with open(self.files_info_path, "r", encoding="utf-8") as f:
                     files_info = json.load(f)
                 if isinstance(files_info, list):
                     files_info = self._migrate_files_info()
                 return files_info
             except OSError as e:
                 if e.errno == errno.EDEADLK and attempt < attempts - 1:
-                    logger.warning(f"加载文件信息时遇到文件锁冲突，重试({attempt + 1}/{attempts})")
+                    logger.warning(
+                        f"加载文件信息时遇到文件锁冲突，重试({attempt + 1}/{attempts})"
+                    )
                     time.sleep(0.05 * (attempt + 1))
                     continue
                 logger.error(f"加载文件信息时出错: {str(e)}")
@@ -70,23 +177,49 @@ class FileService:
                 logger.error(f"加载文件信息时出错: {str(e)}")
                 return {}
         return {}
-    
+
     def save_files_info(self, files_info):
         """保存文件信息"""
+        if self._use_redis():
+            self._save_files_info_to_redis(files_info)
+            return
+        self._save_files_info_to_disk(files_info)
+
+    def _save_files_info_to_disk(self, files_info):
         try:
             self._atomic_write(files_info)
             logger.debug("文件信息已保存")
         except Exception as e:
             logger.error(f"保存文件信息时出错: {str(e)}")
-    
+
+    def _save_files_info_to_redis(self, files_info: Dict[str, Any]) -> None:
+        try:
+            key = self._redis_hash_key()
+            pipe = self.redis_client.pipeline()
+            pipe.delete(key)
+            if files_info:
+                mapping = {
+                    file_id: json.dumps(info, ensure_ascii=False)
+                    for file_id, info in files_info.items()
+                }
+                pipe.hset(key, mapping=mapping)
+            pipe.execute()
+            if self.redis_ttl_seconds > 0:
+                self.redis_client.expire(key, self.redis_ttl_seconds)
+            logger.debug("文件信息已保存到Redis")
+        except Exception as e:
+            logger.error(f"保存文件信息到Redis时出错: {str(e)}")
+
     def _atomic_write(self, data, ensure_dir=False):
         """原子写入JSON，避免部分写入造成的锁冲突"""
         directory = os.path.dirname(self.files_info_path)
         if ensure_dir:
             os.makedirs(directory, exist_ok=True)
-        fd, temp_path = tempfile.mkstemp(dir=directory, prefix='files_info_', suffix='.tmp')
+        fd, temp_path = tempfile.mkstemp(
+            dir=directory, prefix="files_info_", suffix=".tmp"
+        )
         try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as tmp_file:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
                 json.dump(data, tmp_file, ensure_ascii=False, indent=2)
                 tmp_file.flush()
                 os.fsync(tmp_file.fileno())
@@ -97,172 +230,248 @@ class FileService:
                     os.unlink(temp_path)
                 except OSError:
                     pass
-    
+
     def _migrate_files_info(self):
         """将文件信息从列表格式迁移到字典格式"""
         try:
-            with open(self.files_info_path, 'r', encoding='utf-8') as f:
+            with open(self.files_info_path, "r", encoding="utf-8") as f:
                 old_files_info = json.load(f)
-                
+
             if isinstance(old_files_info, list):
                 new_files_info = {}
                 for file_info in old_files_info:
-                    if 'id' in file_info:
-                        new_files_info[file_info['id']] = file_info
-                
-                with open(self.files_info_path, 'w', encoding='utf-8') as f:
+                    if "id" in file_info:
+                        new_files_info[file_info["id"]] = file_info
+
+                with open(self.files_info_path, "w", encoding="utf-8") as f:
                     json.dump(new_files_info, f, ensure_ascii=False, indent=2)
-                    
+
                 logger.info("成功将文件信息从列表格式迁移到字典格式")
                 return new_files_info
         except Exception as e:
             logger.error(f"迁移文件信息时出错: {str(e)}")
             return {}
-    
+
+    def _migrate_files_info_to_redis(self) -> None:
+        if not os.path.exists(self.files_info_path):
+            return
+        try:
+            key = self._redis_hash_key()
+            if self.redis_client.hlen(key) > 0:
+                return
+            disk_info = self._load_files_info_from_disk()
+            if not disk_info:
+                return
+            mapping = {
+                file_id: json.dumps(info, ensure_ascii=False)
+                for file_id, info in disk_info.items()
+            }
+            self.redis_client.hset(key, mapping=mapping)
+            logger.info("已将 %s 条任务从JSON迁移到Redis", len(mapping))
+        except Exception as e:
+            logger.error("迁移文件信息到Redis失败: %s", e)
+
+    def _load_files_info_from_redis(self) -> Dict[str, Any]:
+        try:
+            key = self._redis_hash_key()
+            data = self.redis_client.hgetall(key)
+            if not data:
+                return {}
+            result = {}
+            for file_id, raw in data.items():
+                try:
+                    result[file_id] = json.loads(raw)
+                except Exception as decode_error:
+                    logger.warning(
+                        "解析Redis文件信息失败(%s): %s", file_id, decode_error
+                    )
+            return result
+        except Exception as e:
+            logger.error(f"加载Redis文件信息时出错: {str(e)}")
+            return {}
+
+    def _redis_set_file_info(self, file_id: str, file_info: Dict[str, Any]) -> None:
+        key = self._redis_hash_key()
+        payload = json.dumps(file_info, ensure_ascii=False)
+        self.redis_client.hset(key, file_id, payload)
+        if self.redis_ttl_seconds > 0:
+            self.redis_client.expire(key, self.redis_ttl_seconds)
+
+    def _redis_get_file_info(self, file_id: str) -> Optional[Dict[str, Any]]:
+        key = self._redis_hash_key()
+        raw = self.redis_client.hget(key, file_id)
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception as decode_error:
+            logger.warning("解析Redis文件信息失败(%s): %s", file_id, decode_error)
+            return None
+
+    def _redis_delete_file_info(self, file_id: str) -> None:
+        key = self._redis_hash_key()
+        self.redis_client.hdel(key, file_id)
+
     def add_file_info(self, file_id, file_info):
         """添加文件信息
-        
+
         Args:
             file_id: 文件ID
             file_info: 文件信息字典
         """
         try:
-            files_info = self.load_files_info()
-            files_info[file_id] = file_info
-            self.save_files_info(files_info)
+            if self._use_redis():
+                self._redis_set_file_info(file_id, file_info)
+            else:
+                files_info = self.load_files_info()
+                files_info[file_id] = file_info
+                self.save_files_info(files_info)
             logger.debug(f"添加文件信息: {file_id}")
         except Exception as e:
             logger.error(f"添加文件信息失败: {str(e)}")
-    
+
     def get_file_info(self, file_id):
         """获取文件信息
-        
+
         Args:
             file_id: 文件ID
-            
+
         Returns:
             dict: 文件信息，如果不存在返回None
         """
         try:
+            if self._use_redis():
+                return self._redis_get_file_info(file_id)
             files_info = self.load_files_info()
             return files_info.get(file_id)
         except Exception as e:
             logger.error(f"获取文件信息失败: {str(e)}")
             return None
-    
+
     def update_file_info(self, file_id, updates):
         """更新文件信息
-        
+
         Args:
             file_id: 文件ID
             updates: 更新的字段字典
         """
         try:
-            files_info = self.load_files_info()
-            if file_id in files_info:
-                files_info[file_id].update(updates)
-                self.save_files_info(files_info)
-                logger.debug(f"更新文件信息: {file_id}")
+            if self._use_redis():
+                current = self._redis_get_file_info(file_id) or {}
+                if not current:
+                    logger.warning(f"尝试更新不存在的文件信息: {file_id}")
+                current.update(updates)
+                self._redis_set_file_info(file_id, current)
             else:
-                logger.warning(f"尝试更新不存在的文件信息: {file_id}")
+                files_info = self.load_files_info()
+                if file_id in files_info:
+                    files_info[file_id].update(updates)
+                    self.save_files_info(files_info)
+                    logger.debug(f"更新文件信息: {file_id}")
+                else:
+                    logger.warning(f"尝试更新不存在的文件信息: {file_id}")
         except Exception as e:
             logger.error(f"更新文件信息失败: {str(e)}")
-    
+
     def delete_file_info(self, file_id):
         """删除文件信息
-        
+
         Args:
             file_id: 文件ID
         """
         try:
-            files_info = self.load_files_info()
-            if file_id in files_info:
-                del files_info[file_id]
-                self.save_files_info(files_info)
+            if self._use_redis():
+                self._redis_delete_file_info(file_id)
                 logger.debug(f"删除文件信息: {file_id}")
             else:
-                logger.warning(f"尝试删除不存在的文件信息: {file_id}")
+                files_info = self.load_files_info()
+                if file_id in files_info:
+                    del files_info[file_id]
+                    self.save_files_info(files_info)
+                    logger.debug(f"删除文件信息: {file_id}")
+                else:
+                    logger.warning(f"尝试删除不存在的文件信息: {file_id}")
         except Exception as e:
             logger.error(f"删除文件信息失败: {str(e)}")
-    
+
     def list_files(self):
         """列出所有文件信息
-        
+
         Returns:
             dict: 所有文件信息
         """
         return self.load_files_info()
-    
+
     def save_file(self, file_content, filename, folder=None):
         """保存文件内容到指定目录
-        
+
         Args:
             file_content: 文件内容
             filename: 文件名
             folder: 保存目录，默认为output_folder
-            
+
         Returns:
             str: 保存的文件路径
         """
         try:
             # 清理文件名
             clean_filename = sanitize_filename(filename)
-            
+
             # 确定保存目录
             save_folder = folder or self.output_folder
             os.makedirs(save_folder, exist_ok=True)
-            
+
             # 构建文件路径
             file_path = os.path.join(save_folder, clean_filename)
-            
+
             # 保存文件
             if isinstance(file_content, str):
                 # 文本内容
-                with open(file_path, 'w', encoding='utf-8') as f:
+                with open(file_path, "w", encoding="utf-8") as f:
                     f.write(file_content)
             else:
                 # 二进制内容
-                with open(file_path, 'wb') as f:
+                with open(file_path, "wb") as f:
                     f.write(file_content)
-            
+
             logger.info(f"文件已保存: {file_path}")
             return file_path
         except Exception as e:
             logger.error(f"保存文件失败: {str(e)}")
             raise
-    
+
     def read_file(self, file_path, encoding=None):
         """读取文件内容
-        
+
         Args:
             file_path: 文件路径
             encoding: 文件编码，None时自动检测
-            
+
         Returns:
             str: 文件内容
         """
         try:
             if not os.path.exists(file_path):
                 raise FileNotFoundError(f"文件不存在: {file_path}")
-            
+
             if encoding is None:
                 # 自动检测编码
-                with open(file_path, 'rb') as f:
+                with open(file_path, "rb") as f:
                     raw_content = f.read()
                 encoding = detect_file_encoding(raw_content)
-            
-            with open(file_path, 'r', encoding=encoding) as f:
+
+            with open(file_path, "r", encoding=encoding) as f:
                 content = f.read()
-            
+
             logger.debug(f"读取文件成功: {file_path}, 编码: {encoding}")
             return content
         except Exception as e:
             logger.error(f"读取文件失败: {str(e)}")
             raise
-    
+
     def delete_file(self, file_path):
         """删除文件
-        
+
         Args:
             file_path: 文件路径
         """
@@ -274,13 +483,13 @@ class FileService:
                 logger.warning(f"尝试删除不存在的文件: {file_path}")
         except Exception as e:
             logger.error(f"删除文件失败: {str(e)}")
-    
+
     def get_file_size(self, file_path):
         """获取文件大小
-        
+
         Args:
             file_path: 文件路径
-            
+
         Returns:
             int: 文件大小（字节）
         """
@@ -289,13 +498,13 @@ class FileService:
         except Exception as e:
             logger.error(f"获取文件大小失败: {str(e)}")
             return 0
-    
+
     def file_exists(self, file_path):
         """检查文件是否存在
-        
+
         Args:
             file_path: 文件路径
-            
+
         Returns:
             bool: 文件是否存在
         """

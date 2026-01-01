@@ -11,3 +11,4 @@ pytz
 pyyaml>=6.0.1
 jieba
 pytest
+redis>=5.0.0

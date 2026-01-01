@@ -18,6 +18,7 @@ videos/
 models/
 outputs/
 firefox_profile/
+redis-data/
 
 # Docker本地配置
 docker-config/

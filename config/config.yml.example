@@ -8,6 +8,14 @@ app:
   upload_folder: "/app/uploads"
   output_folder: "/app/outputs"
 
+# Storage Settings
+storage:
+  backend: json  # json/redis
+  redis:
+    url: redis://redis:6379/0
+    key_prefix: subtitle_processor
+    # ttl_seconds: 0
+
 # API Tokens
 tokens:
   readwise:
