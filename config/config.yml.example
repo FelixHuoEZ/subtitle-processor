@@ -41,6 +41,7 @@ servers:
   transcribe:
     default_url: http://transcribe-audio:10095
     timeout: 300
+    balance_mode: priority # priority/weight/round_robin
     servers:
       - name: server1
         url: http://server1.example.com:10095
