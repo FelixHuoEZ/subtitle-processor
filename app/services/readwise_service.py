@@ -113,7 +113,7 @@ class ReadwiseService:
                 summary if summary is not None else article_data.get("summary")
             )
             if not summary_value or not str(summary_value).strip():
-                article_data["summary"] = " "
+                article_data["summary"] = "**********"
             else:
                 article_data["summary"] = str(summary_value)
 
