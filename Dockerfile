@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.6
 FROM python:3.11-slim
 ARG TARGETARCH
+ARG DENO_VERSION=2.6.5
 
 # 设置pip镜像源为阿里云
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
@@ -21,12 +22,26 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     curl \
     iputils-ping \
     net-tools \
+    nodejs \
+    unzip \
     # firefox-esr \
     # x11vnc \
     # xvfb \
     # openbox \
     supervisor \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Deno for yt-dlp JS challenge solving.
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) DENO_ARCH="x86_64-unknown-linux-gnu" ;; \
+      arm64) DENO_ARCH="aarch64-unknown-linux-gnu" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-${DENO_ARCH}.zip" -o /tmp/deno.zip; \
+    unzip -q /tmp/deno.zip -d /usr/local/bin; \
+    rm -f /tmp/deno.zip; \
+    chmod +x /usr/local/bin/deno
 
 WORKDIR /app
 

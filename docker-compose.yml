@@ -46,14 +46,15 @@ services:
       # - HOTWORD_POST_SIMILARITY=0.82
       # - ENABLE_HOTWORD_SUBSTRING=false
       # 只对外部请求使用代理
-      # - NO_PROXY=transcribe-audio,localhost,127.0.0.1
-      # - ALL_PROXY=http://host.docker.internal:20172
-      # - HTTP_PROXY=http://host.docker.internal:20172
-      # - HTTPS_PROXY=http://host.docker.internal:20172
+      # - NO_PROXY=subtitle-processor,telegram-bot,transcribe-audio,redis,bgutil-provider,localhost,127.0.0.1
+      # - ALL_PROXY=http://host.docker.internal:10808
+      # - HTTP_PROXY=http://host.docker.internal:10808
+      # - HTTPS_PROXY=http://host.docker.internal:10808
       # 从配置文件读取所有配置
       - CONFIG_PATH=/app/config/config.yml
       - BGUTIL_PROVIDER_URL=${BGUTIL_PROVIDER_URL:-http://bgutil-provider:4416}
       - YT_DLP_EXTRACTOR_ARGS=youtubepot-bgutilhttp:base_url=http://bgutil-provider:4416
+      - YTDLP_PLAYER_CLIENTS=tv,web_safari,web
 
     networks:
       - srt-network

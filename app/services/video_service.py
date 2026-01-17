@@ -29,6 +29,17 @@ class VideoService:
             os.getenv("BGUTIL_PROVIDER_URL", "http://bgutil-provider:4416")
         )
         self._setup_yt_dlp_options()
+        self._log_js_runtime_status()
+
+    def _get_youtube_player_clients(self) -> List[str]:
+        """获取YouTube player_client列表，支持环境变量覆盖。"""
+        env_value = os.getenv("YTDLP_PLAYER_CLIENTS")
+        if env_value:
+            clients = [item.strip() for item in env_value.split(",") if item.strip()]
+            if clients:
+                return clients
+
+        return ["tv", "web_safari", "web"]
 
     @staticmethod
     def _normalize_bgutil_url(url: Optional[str]) -> str:
@@ -43,6 +54,7 @@ class VideoService:
 
     def _setup_yt_dlp_options(self):
         """设置yt-dlp默认选项"""
+        player_clients = self._get_youtube_player_clients()
 
         # 自定义日志处理器
         class QuietLogger:
@@ -68,8 +80,8 @@ class VideoService:
             "format": "bestaudio/best",
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["default", "mweb"],
-                    "fetch_pot": ["always"],
+                    "player_client": player_clients,
+                    "fetch_pot": ["auto"],
                 },
                 "youtubepot-bgutilhttp": {
                     "base_url": [self.bgutil_provider_url],
@@ -77,8 +89,61 @@ class VideoService:
             },
         }
         logger.info("yt-dlp 将使用 bgutil provider: %s", self.bgutil_provider_url)
+        logger.info("yt-dlp YouTube player clients: %s", player_clients)
         self._configure_cookie_support(base_opts)
         self.yt_dlp_opts = base_opts
+
+    def _log_js_runtime_status(self) -> None:
+        """快速检测JS运行时，辅助排查YouTube挑战失败问题。"""
+        runtime = self._detect_js_runtime()
+        if runtime:
+            name, version = runtime
+            if version:
+                logger.info("检测到JS运行时: %s (%s)", name, version)
+            else:
+                logger.info("检测到JS运行时: %s", name)
+            return
+
+        logger.warning(
+            "未检测到JS运行时(Node/QuickJS)，可能导致YouTube n challenge失败。"
+        )
+
+    def _detect_js_runtime(self) -> Optional[Tuple[str, Optional[str]]]:
+        """检测可用的JS运行时，并尽量获取版本信息。"""
+        try:
+            import shutil
+            import subprocess
+        except Exception:
+            return None
+
+        candidates = [
+            ("deno", ["deno", "--version"]),
+            ("node", ["node", "-v"]),
+            ("qjs", ["qjs", "--version"]),
+            ("quickjs", ["quickjs", "--version"]),
+        ]
+
+        for name, cmd in candidates:
+            if not shutil.which(cmd[0]):
+                continue
+
+            version = None
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                )
+                output = (result.stdout or result.stderr or "").strip()
+                if output:
+                    version = output.splitlines()[0]
+            except Exception:
+                version = None
+
+            return name, version
+
+        return None
 
     def _get_platform_headers(
         self, platform: Optional[str], url: Optional[str] = None
@@ -484,14 +549,15 @@ class VideoService:
             # 先尝试检查视频信息
             info = None
             try:
+                player_clients = self._get_youtube_player_clients()
                 # 添加率限制防止IP被封
                 time.sleep(2)
                 temp_opts = {
                     "quiet": True,
                     "extractor_args": {
                         "youtube": {
-                            "player_client": ["default", "mweb"],
-                            "fetch_pot": ["always"],
+                            "player_client": player_clients,
+                            "fetch_pot": ["auto"],
                         },
                         "youtubepot-bgutilhttp": {
                             "base_url": [self.bgutil_provider_url],
@@ -530,6 +596,7 @@ class VideoService:
             logger.info(f"预期视频ID: {expected_video_id}")
 
             # 基础下载选项
+            player_clients = self._get_youtube_player_clients()
             base_opts = {
                 "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
                 "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -539,8 +606,8 @@ class VideoService:
                 "no_check_certificate": True,
                 "extractor_args": {
                     "youtube": {
-                        "player_client": ["default", "mweb"],
-                        "fetch_pot": ["always"],
+                        "player_client": player_clients,
+                        "fetch_pot": ["auto"],
                     },
                     "youtubepot-bgutilhttp": {
                         "base_url": [self.bgutil_provider_url],
