@@ -854,6 +854,7 @@ def normalize_url(url):
     - https://www.youtube.com/watch?v=VIDEO_ID
     - https://youtu.be/VIDEO_ID
     - https://youtube.com/shorts/VIDEO_ID
+    - https://youtube.com/live/VIDEO_ID
     - https://m.youtube.com/watch?v=VIDEO_ID
     - https://youtube.com/v/VIDEO_ID
     - https://youtube.com/embed/VIDEO_ID
@@ -874,6 +875,7 @@ def normalize_url(url):
         r"(?:https?:\/\/)?(?:www\.|m\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]+)",
         r"(?:https?:\/\/)?youtu\.be\/([a-zA-Z0-9_-]+)",
         r"(?:https?:\/\/)?(?:www\.|m\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]+)",
+        r"(?:https?:\/\/)?(?:www\.|m\.)?youtube\.com\/live\/([a-zA-Z0-9_-]+)",
         r"(?:https?:\/\/)?(?:www\.|m\.)?youtube\.com\/v\/([a-zA-Z0-9_-]+)",
         r"(?:https?:\/\/)?(?:www\.|m\.)?youtube\.com\/embed\/([a-zA-Z0-9_-]+)",
     ]
@@ -2191,7 +2193,7 @@ async def monitor_process_completion(
     logger.warning("任务超时未完成: %s", process_id)
     try:
         await context.bot.edit_message_text(
-            "⚠️ 处理时间超过预期，请稍后重试或在网页查询结果。",
+            "⏳ 处理时间超过预期，但仍在后台处理中。请稍后使用 /queue 或网页查询结果。",
             chat_id=chat_id,
             message_id=message_id,
         )
@@ -2200,10 +2202,10 @@ async def monitor_process_completion(
     _update_last_request(
         user_id,
         chat_id,
-        status="failed",
-        error="处理超时",
+        status="processing",
+        error=None,
     )
-    _update_active_task_status(user_id, chat_id, process_id, "failed", error="处理超时")
+    _update_active_task_status(user_id, chat_id, process_id, "processing")
 
 
 async def process_url_with_location(

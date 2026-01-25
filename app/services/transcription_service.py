@@ -58,6 +58,34 @@ class TranscriptionService:
         self.transcribe_timeout_factor = max(
             0.1, float(os.getenv("TRANSCRIBE_TIMEOUT_FACTOR", "1.5"))
         )
+        self.transcribe_concurrency = self._parse_optional_concurrency_env(
+            "TRANSCRIBE_CONCURRENCY", "转录"
+        )
+        self._transcribe_semaphore = None
+        if self.transcribe_concurrency:
+            self._transcribe_semaphore = threading.BoundedSemaphore(
+                self.transcribe_concurrency
+            )
+            logger.info("转录并发限制: %s", self.transcribe_concurrency)
+        else:
+            logger.info("转录并发限制: 未启用")
+
+    @staticmethod
+    def _parse_optional_concurrency_env(key: str, label: str) -> Optional[int]:
+        """解析可选并发环境变量，未设置时返回None。"""
+        raw = os.getenv(key)
+        if raw is None or not str(raw).strip():
+            return None
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning("%s 并发设置 %s 无效，将忽略", label, raw)
+            return None
+        if value <= 1:
+            if value <= 0:
+                logger.info("%s 并发设置为 %s，按串行处理", label, value)
+            return 1
+        return value
 
     def _load_transcribe_servers(self) -> List[Dict[str, Any]]:
         """加载转录服务器列表"""
@@ -174,18 +202,31 @@ class TranscriptionService:
         tags: Optional[List[str]] = None,
         platform: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """转录音频文件
+        """转录音频文件"""
+        semaphore = self._transcribe_semaphore
+        if semaphore:
+            logger.info(
+                "等待转录并发许可 (limit=%s): %s",
+                self.transcribe_concurrency,
+                audio_file,
+            )
+            with semaphore:
+                return self._transcribe_audio_internal(
+                    audio_file, hotwords, video_info, tags, platform
+                )
+        return self._transcribe_audio_internal(
+            audio_file, hotwords, video_info, tags, platform
+        )
 
-        Args:
-            audio_file: 音频文件路径
-            hotwords: 用户指定的热词列表，提高识别准确率
-            video_info: 视频信息字典，包含标题、频道等
-            tags: 用户标签列表
-            platform: 视频平台名称
-
-        Returns:
-            dict: 转录结果，包含文本和时间戳信息
-        """
+    def _transcribe_audio_internal(
+        self,
+        audio_file: str,
+        hotwords: Optional[List[str]] = None,
+        video_info: Optional[Dict[str, Any]] = None,
+        tags: Optional[List[str]] = None,
+        platform: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """转录音频文件（内部实现）"""
         try:
             logger.info(f"开始转录音频文件: {audio_file}")
 

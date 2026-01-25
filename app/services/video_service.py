@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -29,6 +30,29 @@ class VideoService:
             os.getenv("BGUTIL_PROVIDER_URL", "http://bgutil-provider:4416")
         )
         self._setup_yt_dlp_options()
+        self.download_concurrency = self._parse_concurrency_env(
+            "DOWNLOAD_CONCURRENCY", 2, "下载"
+        )
+        self._download_semaphore = threading.BoundedSemaphore(self.download_concurrency)
+        self.download_retry_max = max(0, int(os.getenv("DOWNLOAD_MAX_RETRIES", "3")))
+        self.download_retry_base_delay = max(
+            0.1, float(os.getenv("DOWNLOAD_RETRY_BASE_DELAY", "2"))
+        )
+        self.download_retry_backoff = max(
+            1.0, float(os.getenv("DOWNLOAD_RETRY_BACKOFF", "2"))
+        )
+        self.download_retry_max_delay = max(
+            self.download_retry_base_delay,
+            float(os.getenv("DOWNLOAD_RETRY_MAX_DELAY", "30")),
+        )
+        logger.info("下载并发限制: %s", self.download_concurrency)
+        logger.info(
+            "下载403重试参数: max=%s, base=%.1fs, backoff=%.2f, max_delay=%.1fs",
+            self.download_retry_max,
+            self.download_retry_base_delay,
+            self.download_retry_backoff,
+            self.download_retry_max_delay,
+        )
         self._log_js_runtime_status()
 
     def _get_youtube_player_clients(self) -> List[str]:
@@ -51,6 +75,28 @@ class VideoService:
         if not parsed.scheme or not parsed.netloc:
             return default_url
         return parsed.geturl().rstrip("/") or default_url
+
+    @staticmethod
+    def _parse_concurrency_env(key: str, default: int, label: str) -> int:
+        """解析并发环境变量，0/1 均视为串行。"""
+        raw = os.getenv(key)
+        if raw is None or not str(raw).strip():
+            value = default
+        else:
+            try:
+                value = int(raw)
+            except ValueError:
+                logger.warning(
+                    "%s 并发设置 %s 无效，使用默认值 %s", label, raw, default
+                )
+                value = default
+
+        if value <= 1:
+            if value <= 0:
+                logger.info("%s 并发设置为 %s，按串行处理", label, value)
+            return 1
+
+        return value
 
     def _setup_yt_dlp_options(self):
         """设置yt-dlp默认选项"""
@@ -144,6 +190,21 @@ class VideoService:
             return name, version
 
         return None
+
+    def _is_http_403_error(self, error: Exception) -> bool:
+        """判断下载错误是否为403"""
+        message = str(error)
+        if "HTTP Error 403" in message:
+            return True
+        lowered = message.lower()
+        return "403" in lowered and "forbidden" in lowered
+
+    def _calculate_download_backoff(self, attempt: int) -> float:
+        """计算下载403重试的退避时间"""
+        delay = self.download_retry_base_delay * (
+            self.download_retry_backoff ** max(0, attempt - 1)
+        )
+        return min(delay, self.download_retry_max_delay)
 
     def _get_platform_headers(
         self, platform: Optional[str], url: Optional[str] = None
@@ -559,6 +620,12 @@ class VideoService:
         Returns:
             str: 下载的音频文件路径，失败返回None
         """
+        semaphore = self._download_semaphore
+        if semaphore:
+            logger.info(
+                "等待下载并发许可 (limit=%s): %s", self.download_concurrency, url
+            )
+            semaphore.acquire()
         try:
             # 创建临时目录
             temp_dir = output_folder or os.path.join(
@@ -672,29 +739,71 @@ class VideoService:
             ]
 
             downloaded_file = None
-            for attempt in format_attempts:
-                try:
-                    logger.info(f"尝试下载: {attempt['desc']}")
-                    # 添加率限制防止IP被封
-                    time.sleep(3)
-                    opts = base_opts.copy()
-                    opts["format"] = attempt["format"]
+            retry_limit = max(0, self.download_retry_max)
+            for format_attempt in format_attempts:
+                retry_count = 0
+                while True:
+                    try:
+                        logger.info(f"尝试下载: {format_attempt['desc']}")
+                        # 添加率限制防止IP被封
+                        time.sleep(3)
+                        opts = base_opts.copy()
+                        opts["format"] = format_attempt["format"]
 
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        ydl.download([url])
+                        with yt_dlp.YoutubeDL(opts) as ydl:
+                            ydl.download([url])
 
-                    # 改进的文件查找逻辑
-                    downloaded_file = self._find_downloaded_file(
-                        temp_dir, expected_video_id
-                    )
+                        # 改进的文件查找逻辑
+                        downloaded_file = self._find_downloaded_file(
+                            temp_dir, expected_video_id
+                        )
 
-                    if downloaded_file and os.path.exists(downloaded_file):
-                        logger.info(f"下载成功: {downloaded_file}")
+                        if downloaded_file and os.path.exists(downloaded_file):
+                            logger.info(f"下载成功: {downloaded_file}")
+                            break
+
+                        logger.warning(
+                            "下载完成但未找到文件: %s", format_attempt["desc"]
+                        )
                         break
 
-                except Exception as e:
-                    logger.warning(f"下载失败 ({attempt['desc']}): {str(e)}")
-                    continue
+                    except DownloadError as e:
+                        if self._is_http_403_error(e) and retry_count < retry_limit:
+                            retry_count += 1
+                            delay = self._calculate_download_backoff(retry_count)
+                            logger.warning(
+                                "下载遇到403，%ss后重试 (%s/%s): %s",
+                                delay,
+                                retry_count,
+                                retry_limit,
+                                format_attempt["desc"],
+                            )
+                            time.sleep(delay)
+                            continue
+                        logger.warning(
+                            "下载失败 (%s): %s", format_attempt["desc"], str(e)
+                        )
+                        break
+                    except Exception as e:
+                        if self._is_http_403_error(e) and retry_count < retry_limit:
+                            retry_count += 1
+                            delay = self._calculate_download_backoff(retry_count)
+                            logger.warning(
+                                "下载遇到403，%ss后重试 (%s/%s): %s",
+                                delay,
+                                retry_count,
+                                retry_limit,
+                                format_attempt["desc"],
+                            )
+                            time.sleep(delay)
+                            continue
+                        logger.warning(
+                            "下载失败 (%s): %s", format_attempt["desc"], str(e)
+                        )
+                        break
+
+                if downloaded_file and os.path.exists(downloaded_file):
+                    break
 
             if not downloaded_file:
                 logger.error("所有下载尝试都失败了")
@@ -716,6 +825,9 @@ class VideoService:
         except Exception as e:
             logger.error(f"下载视频时出错: {str(e)}")
             return None
+        finally:
+            if semaphore:
+                semaphore.release()
 
     def _find_downloaded_file(
         self, temp_dir: str, expected_video_id: Optional[str]
