@@ -45,6 +45,9 @@ class VideoService:
             self.download_retry_base_delay,
             float(os.getenv("DOWNLOAD_RETRY_MAX_DELAY", "30")),
         )
+        self.readwise_url_only_when_zh_subs = self._parse_bool_env(
+            "READWISE_URL_ONLY_WHEN_ZH_SUBS", False
+        )
         logger.info("下载并发限制: %s", self.download_concurrency)
         logger.info(
             "下载403重试参数: max=%s, base=%.1fs, backoff=%.2f, max_delay=%.1fs",
@@ -52,6 +55,9 @@ class VideoService:
             self.download_retry_base_delay,
             self.download_retry_backoff,
             self.download_retry_max_delay,
+        )
+        logger.info(
+            "Readwise URL剪藏开关(中文字幕): %s", self.readwise_url_only_when_zh_subs
         )
         self._log_js_runtime_status()
 
@@ -97,6 +103,68 @@ class VideoService:
             return 1
 
         return value
+
+    @staticmethod
+    def _parse_bool_env(key: str, default: bool = False) -> bool:
+        raw = os.getenv(key)
+        if raw is None:
+            return default
+        return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    @staticmethod
+    def _extract_languages(raw_value: Any) -> List[str]:
+        if isinstance(raw_value, dict):
+            return list(raw_value.keys())
+        if isinstance(raw_value, list):
+            return [str(item) for item in raw_value]
+        return []
+
+    @staticmethod
+    def _language_available(target: str, candidates: List[str]) -> bool:
+        if target in candidates:
+            return True
+        prefix = f"{target}-"
+        suffix = f"-{target}"
+        for candidate in candidates:
+            if candidate.startswith(prefix) or candidate.endswith(suffix):
+                return True
+        return False
+
+    @staticmethod
+    def _match_language_key(target: str, candidates: List[str]) -> Optional[str]:
+        if target in candidates:
+            return target
+        prefix = f"{target}-"
+        suffix = f"-{target}"
+        for candidate in candidates:
+            if candidate.startswith(prefix) or candidate.endswith(suffix):
+                return candidate
+        return None
+
+    @staticmethod
+    def _get_zh_language_priority() -> List[str]:
+        return ["zh-CN", "zh", "zh-TW", "zh-Hans", "zh-Hant"]
+
+    @staticmethod
+    def _get_en_language_priority() -> List[str]:
+        return ["en", "en-US", "en-GB"]
+
+    def _has_language_subtitles(
+        self, info: Dict[str, Any], lang_priority: List[str]
+    ) -> bool:
+        available_subtitles = self._extract_languages(info.get("subtitles", {}))
+        available_auto = self._extract_languages(info.get("automatic_captions", {}))
+        for lang in lang_priority:
+            if self._language_available(
+                lang, available_subtitles
+            ) or self._language_available(lang, available_auto):
+                return True
+        return False
+
+    def _should_clip_url_only(self, info: Dict[str, Any]) -> bool:
+        if not self.readwise_url_only_when_zh_subs:
+            return False
+        return self._has_language_subtitles(info, self._get_zh_language_priority())
 
     def _setup_yt_dlp_options(self):
         """设置yt-dlp默认选项"""
@@ -379,7 +447,7 @@ class VideoService:
                 "published_date": published_date,
                 "webpage_url": info.get("webpage_url", url),
                 "thumbnail": info.get("thumbnail"),
-                "language": info.get("language", "en"),
+                "language": info.get("language"),
                 "subtitles": list(info.get("subtitles", {}).keys())
                 if info.get("subtitles")
                 else [],
@@ -524,32 +592,40 @@ class VideoService:
             tuple: (是否应该下载字幕, 语言优先级列表)
         """
         try:
-            # 获取可用字幕语言，确保是字典类型
-            available_subtitles = info.get("subtitles", {})
-            available_auto = info.get("automatic_captions", {})
 
-            # 如果不是字典类型，设为空字典
-            if not isinstance(available_subtitles, dict):
-                available_subtitles = {}
-            if not isinstance(available_auto, dict):
-                available_auto = {}
+            def _summarize_languages(
+                languages: List[str], limit: int = 12
+            ) -> List[str]:
+                if len(languages) <= limit:
+                    return languages
+                return languages[:limit] + [f"...(+{len(languages) - limit})"]
 
-            logger.info(f"可用字幕: {list(available_subtitles.keys())}")
-            logger.info(f"可用自动字幕: {list(available_auto.keys())}")
+            available_subtitles = self._extract_languages(info.get("subtitles", {}))
+            available_auto = self._extract_languages(info.get("automatic_captions", {}))
+
+            logger.info(f"可用字幕: {_summarize_languages(available_subtitles)}")
+            logger.info(f"可用自动字幕: {_summarize_languages(available_auto)}")
 
             if language == "zh":
                 # 中文视频：优先中文字幕
-                lang_priority = ["zh-CN", "zh", "zh-TW", "zh-Hans", "zh-Hant"]
+                lang_priority = self._get_zh_language_priority()
             elif language == "en":
                 # 英文视频：优先英文字幕
-                lang_priority = ["en", "en-US", "en-GB"]
+                lang_priority = self._get_en_language_priority()
             else:
-                # 其他语言：暂不处理
+                if self._has_language_subtitles(info, self._get_zh_language_priority()):
+                    logger.info("检测到中文字幕，优先下载中文字幕")
+                    return True, self._get_zh_language_priority()
+                if self._has_language_subtitles(info, self._get_en_language_priority()):
+                    logger.info("检测到英文字幕，优先下载英文字幕")
+                    return True, self._get_en_language_priority()
                 return False, []
 
             # 检查是否有对应语言的字幕
             for lang in lang_priority:
-                if lang in available_subtitles or lang in available_auto:
+                if self._language_available(
+                    lang, available_subtitles
+                ) or self._language_available(lang, available_auto):
                     logger.info(f"找到{lang}字幕，将尝试下载")
                     return True, lang_priority
 
@@ -1319,18 +1395,26 @@ class VideoService:
 
                 available_subtitles = info.get("subtitles", {})
                 available_auto = info.get("automatic_captions", {})
+                subtitle_keys = list(available_subtitles.keys())
+                auto_keys = list(available_auto.keys())
 
                 # 按优先级查找字幕
                 for lang in lang_priority:
                     # 优先使用人工字幕
-                    if lang in available_subtitles:
-                        logger.info(f"找到{lang}人工字幕")
-                        return self._extract_subtitle_content(available_subtitles[lang])
+                    matched_lang = self._match_language_key(lang, subtitle_keys)
+                    if matched_lang:
+                        logger.info(f"找到{matched_lang}人工字幕")
+                        return self._extract_subtitle_content(
+                            available_subtitles[matched_lang]
+                        )
 
                     # 如果没有人工字幕，使用自动字幕
-                    if lang in available_auto:
-                        logger.info(f"找到{lang}自动字幕")
-                        return self._extract_subtitle_content(available_auto[lang])
+                    matched_lang = self._match_language_key(lang, auto_keys)
+                    if matched_lang:
+                        logger.info(f"找到{matched_lang}自动字幕")
+                        return self._extract_subtitle_content(
+                            available_auto[matched_lang]
+                        )
 
                 logger.warning("未找到匹配语言的字幕")
                 return None
@@ -1349,12 +1433,16 @@ class VideoService:
                 info = ydl.extract_info(url, download=False)
 
                 available_subtitles = info.get("subtitles", {})
+                subtitle_keys = list(available_subtitles.keys())
 
                 # Bilibili通常只有中文字幕
                 for lang in lang_priority:
-                    if lang in available_subtitles:
-                        logger.info(f"找到{lang}字幕")
-                        return self._extract_subtitle_content(available_subtitles[lang])
+                    matched_lang = self._match_language_key(lang, subtitle_keys)
+                    if matched_lang:
+                        logger.info(f"找到{matched_lang}字幕")
+                        return self._extract_subtitle_content(
+                            available_subtitles[matched_lang]
+                        )
 
                 # 如果没有指定语言，尝试任何可用的字幕
                 if available_subtitles:
@@ -1381,12 +1469,16 @@ class VideoService:
                 info = ydl.extract_info(url, download=False)
 
                 available_subtitles = info.get("subtitles", {})
+                subtitle_keys = list(available_subtitles.keys())
 
                 # AcFun通常只有中文字幕
                 for lang in lang_priority:
-                    if lang in available_subtitles:
-                        logger.info(f"找到{lang}字幕")
-                        return self._extract_subtitle_content(available_subtitles[lang])
+                    matched_lang = self._match_language_key(lang, subtitle_keys)
+                    if matched_lang:
+                        logger.info(f"找到{matched_lang}字幕")
+                        return self._extract_subtitle_content(
+                            available_subtitles[matched_lang]
+                        )
 
                 # 如果没有指定语言，尝试任何可用的字幕
                 if available_subtitles:
@@ -1456,6 +1548,17 @@ class VideoService:
             language, video_info
         )
 
+        if self._should_clip_url_only(video_info):
+            logger.info("检测到中文字幕且启用URL剪藏，跳过字幕下载与转录")
+            return {
+                "video_info": video_info,
+                "language": language,
+                "subtitle_content": None,
+                "audio_file": None,
+                "needs_transcription": False,
+                "readwise_url_only": True,
+            }
+
         # 3. 尝试下载字幕
         subtitle_content = None
         if should_download_subs:
@@ -1500,6 +1603,7 @@ class VideoService:
                     needs_fallback = primary_result is None or (
                         not primary_result.get("subtitle_content")
                         and not primary_result.get("audio_file")
+                        and not primary_result.get("readwise_url_only")
                     )
                     if needs_fallback:
                         logger.warning("标准URL处理失败，回退使用直播URL: %s", url)

@@ -109,13 +109,7 @@ class ReadwiseService:
             if tags:
                 article_data["tags"] = tags
 
-            summary_value = (
-                summary if summary is not None else article_data.get("summary")
-            )
-            if not summary_value or not str(summary_value).strip():
-                article_data["summary"] = "**********"
-            else:
-                article_data["summary"] = str(summary_value)
+            article_data["summary"] = self._normalize_summary(summary)
 
             # 发送创建请求到正确的端点
             response = self._make_request("POST", "/save/", data=article_data)
@@ -129,6 +123,52 @@ class ReadwiseService:
 
         except Exception as e:
             logger.error(f"创建Readwise文章失败: {str(e)}")
+            return None
+
+    def create_article_from_url(
+        self,
+        title: str,
+        url: str = None,
+        tags: List[str] = None,
+        author: str = None,
+        summary: str = None,
+    ) -> Optional[Dict[str, Any]]:
+        """仅通过URL创建Readwise文章"""
+        try:
+            if not self.enabled:
+                logger.warning("Readwise服务未启用")
+                return None
+
+            logger.info(f"创建Readwise URL剪藏: {title}")
+
+            article_data: Dict[str, Any] = {}
+            if url:
+                article_data["url"] = url
+            else:
+                article_data["url"] = "https://subtitle-processor.local/generated"
+
+            if title:
+                article_data["title"] = title
+
+            if author:
+                article_data["author"] = author
+
+            if tags:
+                article_data["tags"] = tags
+
+            article_data["summary"] = self._normalize_summary(summary)
+
+            response = self._make_request("POST", "/save/", data=article_data)
+
+            if response and response.get("id"):
+                logger.info(f"Readwise URL剪藏成功，ID: {response['id']}")
+                return response
+
+            logger.error("Readwise URL剪藏失败")
+            return None
+
+        except Exception as e:
+            logger.error(f"创建Readwise URL剪藏失败: {str(e)}")
             return None
 
     def create_article_from_subtitle(
@@ -151,6 +191,7 @@ class ReadwiseService:
             subtitle_content = subtitle_data.get("subtitle_content", "")
             failure_message = subtitle_data.get("failure_message")
             user_tags = subtitle_data.get("tags", [])
+            readwise_url_only = bool(subtitle_data.get("readwise_url_only"))
 
             # 添加详细的调试信息
             logger.info("=== 开始创建Readwise文章 ===")
@@ -204,6 +245,17 @@ class ReadwiseService:
                     summary=subtitle_data.get("summary"),
                 )
 
+            if readwise_url_only:
+                title = video_info.get("title", "未知视频标题")
+                logger.info("Readwise URL剪藏模式启用，跳过字幕内容")
+                return self.create_article_from_url(
+                    title=title,
+                    url=url,
+                    tags=user_tags,
+                    author=author,
+                    summary=subtitle_data.get("summary"),
+                )
+
             # 详细检查数据完整性
             if not video_info:
                 logger.error("❌ 数据验证失败：video_info为空或None")
@@ -248,6 +300,13 @@ class ReadwiseService:
         except Exception as e:
             logger.error(f"从字幕创建Readwise文章失败: {str(e)}")
             return None
+
+    @staticmethod
+    def _normalize_summary(summary: Optional[str]) -> str:
+        if summary is None:
+            return "**********"
+        summary_value = str(summary).strip()
+        return summary_value if summary_value else "**********"
 
     def _format_subtitle_content(
         self, video_info: Dict[str, Any], subtitle_content: str

@@ -379,6 +379,7 @@ def _process_video_task(task_info, auto_transcribe):
             task_info["subtitle_content"] = result.get("subtitle_content")
             task_info["audio_file"] = result.get("audio_file")
             task_info["needs_transcription"] = result.get("needs_transcription", False)
+            task_info["readwise_url_only"] = result.get("readwise_url_only", False)
             task_info["updated_time"] = datetime.now().isoformat()
             file_service.update_file_info(process_id, task_info)
 
@@ -390,7 +391,38 @@ def _process_video_task(task_info, auto_transcribe):
             )
             logger.info(f"视频处理结果 - audio_file: {result.get('audio_file')}")
 
-            if result.get("subtitle_content"):
+            if result.get("readwise_url_only"):
+                task_info["status"] = "completed"
+                task_info["progress"] = 100
+                logger.info(
+                    f"第2步完成：检测到中文字幕且启用URL剪藏，跳过字幕下载与转录: {process_id}"
+                )
+                logger.info(f"第3步：开始发送URL剪藏到Readwise Reader: {process_id}")
+
+                try:
+                    readwise_result = readwise_service.create_article_from_subtitle(
+                        task_info
+                    )
+                    logger.info(f"Readwise调用返回结果(URL剪藏): {readwise_result}")
+
+                    if readwise_result:
+                        task_info["readwise_article_id"] = readwise_result.get("id")
+                        task_info["readwise_url"] = readwise_result.get("url")
+                        logger.info(
+                            f"第3步完成：Readwise URL剪藏成功: {process_id} -> {readwise_result.get('id')}"
+                        )
+                    else:
+                        logger.warning(f"第3步失败：Readwise URL剪藏失败: {process_id}")
+                except Exception as e:
+                    logger.error(
+                        f"第3步错误：发送URL剪藏到Readwise失败: {process_id} - {str(e)}"
+                    )
+                    logger.error(f"异常堆栈(URL剪藏): {traceback.format_exc()}")
+
+                task_info["updated_time"] = datetime.now().isoformat()
+                logger.info(f"=== 视频处理流程完成 === {process_id}")
+
+            elif result.get("subtitle_content"):
                 task_info["status"] = "completed"
                 task_info["progress"] = 100
                 if not task_info.get("subtitle_path"):

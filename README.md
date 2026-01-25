@@ -10,6 +10,9 @@
 - Telegram 机器人增加标签/热词交互提示、`/skip` 快捷命令，并在后台轮询 `/process/status/<id>` 自动推送字幕文件。
 - `scripts/build-and-push.sh` 新增 `bgutil-provider` 镜像构建；默认 Dockerfile 仅保留必需依赖，X11/VNC 相关组件以注释形式保留，构建镜像更轻量。
 - 后端提供 `/process/status/<id>?include_content=1` 以及 `/process/status/<id>/subtitle`，方便外部查询任务进度与字幕原文。
+- YouTube live URLs are normalized to `watch?v=` with fallback to the live URL if needed.
+- Download concurrency + 403 backoff retries are configurable, and transcription concurrency can be capped.
+- Optional Readwise URL-only clipping when Chinese subtitles are available (`READWISE_URL_ONLY_WHEN_ZH_SUBS`).
 
 <a name="english"></a>
 ## 🌍 English
@@ -20,6 +23,8 @@ A comprehensive subtitle processing service that automatically downloads, transc
 ### 🚀 Features
 - **Multi-Platform Support**
   - YouTube video subtitle extraction
+  - YouTube live links (`/live/<id>`) normalized with fallback
+  - Member-only/age-restricted YouTube videos with your own cookies/profile
   - Bilibili video subtitle processing
   - Automatic fallback to audio transcription
   
@@ -47,6 +52,7 @@ A comprehensive subtitle processing service that automatically downloads, transc
   - Rich text formatting support
   - Seamless sync with Readwise Reader
   - Smart content segmentation for long videos
+  - Optional URL-only clipping when Chinese subtitles are available
 - **Hotword Management**
   - Runtime toggle API (`/process/settings/hotword`) with persisted JSON state
   - Telegram commands `/hotword_status`、`/hotword_toggle` 查看/切换自动热词
@@ -74,13 +80,24 @@ A comprehensive subtitle processing service that automatically downloads, transc
    # Edit config/hotword_settings.json to set defaults for auto_hotwords/post_process/mode/max_count
    # For advanced generation rules, copy config/hotwords-example/hotwords_config-example.yml to config/hotwords/hotwords_config.yml
    ```
-5. Configure Firefox cookies for YouTube access:
-   - Copy your Firefox profile directory (located at `C:\Users\<USER_NAME>\AppData\Roaming\Mozilla\Firefox\Profiles\`) to the `firefox_profile` directory in the project
-   - This enables downloading restricted YouTube videos using your Firefox login cookies
+5. Configure YouTube cookies (required for member-only/age-restricted videos):
+   - **Option A (Firefox profile)**: copy your Firefox profile directory into `firefox_profile/` or set `cookies` in `config/config.yml`.
+     - macOS: `~/Library/Application Support/Firefox/Profiles/<profile>`
+     - Windows: `C:\Users\<USER_NAME>\AppData\Roaming\Mozilla\Firefox\Profiles\`
+     - Linux: `~/.mozilla/firefox/<profile>`
+   - **Option B (cookie file)**: export cookies to Netscape format and set `YTDLP_COOKIE_FILE=/path/to/cookies.txt`.
+   - Ensure the profile contains `cookies.sqlite` and you are logged into YouTube.
 6. Start the services:
    ```bash
    docker-compose up --build
    ```
+
+### ⚙️ Optional Configuration
+- `READWISE_URL_ONLY_WHEN_ZH_SUBS=true` to clip the original URL to Readwise when Chinese subtitles exist (skips subtitle download/transcription).
+- `DOWNLOAD_CONCURRENCY` (0/1 means serial), plus `DOWNLOAD_MAX_RETRIES`, `DOWNLOAD_RETRY_BASE_DELAY`, `DOWNLOAD_RETRY_BACKOFF`, `DOWNLOAD_RETRY_MAX_DELAY` for 403 backoff.
+- `TRANSCRIBE_CONCURRENCY` to cap concurrent transcriptions (0/1 means serial, empty means unlimited).
+- `YTDLP_COOKIE_FILE` to provide a Netscape-format cookie file instead of a Firefox profile.
+All defaults are listed in `.env.example`.
 
 ### 🧩 Distribute Docker Images to Multiple Hosts
 1. Generate and push images from a build machine:
@@ -160,10 +177,15 @@ Special thanks to:
 - Telegram Webhook 立即返回，并将字幕处理放到后台执行，避免因为重试导致的重复回复。
 - Telegram 部署改为“单入口 + 多工作节点”模式，避免同一条消息被多个 bot 实例重复回复。
 - 文档补充镜像分发与 `.env` 覆盖指引，便于多机器快速上线。
+- 支持将 YouTube `live/<id>` 链接自动转换为 `watch?v=`，必要时回退直连直播 URL。
+- 下载并发 + 403 退避重试可配置，转录并发可选限制。
+- 可选：检测到中文字幕时直接剪藏 URL 到 Readwise（`READWISE_URL_ONLY_WHEN_ZH_SUBS`）。
 
 ### 🚀 功能特点
 - **多平台支持**
   - YouTube 视频字幕提取
+  - YouTube `live/<id>` 链接自动规范化并提供回退策略
+  - 支持会员/受限 YouTube 视频（需使用自己的 cookies/profile）
   - Bilibili 视频字幕处理
   - 自动音频转录备选方案
   
@@ -191,6 +213,7 @@ Special thanks to:
   - 支持富文本格式
   - 与 Readwise Reader 无缝同步
   - 智能分段处理长视频内容
+  - 可选：检测到中文字幕时直接剪藏原始 URL
 - **热词管理**
   - 运行期热词开关可通过 `/process/settings/hotword` 与 Telegram 指令在线调整
   - 标签/热词会话支持手动输入或 `/skip` 快捷跳过
@@ -217,13 +240,24 @@ Special thanks to:
    # 编辑热词开关/模式/最大数量等默认值
    # 如需自定义生成规则，可复制 config/hotwords-example/hotwords_config-example.yml 至 config/hotwords/hotwords_config.yml
    ```
-5. 配置 Firefox cookies 以访问 YouTube：
-   - 将 Firefox 配置文件目录（位于 `C:\Users\<USER_NAME>\AppData\Roaming\Mozilla\Firefox\Profiles\`）复制到项目中的 `firefox_profile` 目录
-   - 这使您可以使用 Firefox 登录 cookie 下载受限制的 YouTube 视频
+5. 配置 YouTube cookies（会员/受限视频下载需要自己的 cookies）：
+   - **方案 A（Firefox profile）**：将 Firefox 配置文件目录复制到 `firefox_profile/`，或在 `config/config.yml` 中配置 `cookies` 路径。
+     - macOS：`~/Library/Application Support/Firefox/Profiles/<profile>`
+     - Windows：`C:\Users\<USER_NAME>\AppData\Roaming\Mozilla\Firefox\Profiles\`
+     - Linux：`~/.mozilla/firefox/<profile>`
+   - **方案 B（cookie 文件）**：导出 Netscape 格式 cookies，并设置 `YTDLP_COOKIE_FILE=/path/to/cookies.txt`。
+   - 确保 profile 内含 `cookies.sqlite`，且已登录 YouTube。
 6. 启动服务：
    ```bash
    docker-compose up --build
    ```
+
+### ⚙️ 可选配置
+- `READWISE_URL_ONLY_WHEN_ZH_SUBS=true`：检测到中文字幕时直接剪藏原始 URL 到 Readwise（跳过字幕下载/转录）。
+- `DOWNLOAD_CONCURRENCY`（0/1 视为串行）以及 `DOWNLOAD_MAX_RETRIES`、`DOWNLOAD_RETRY_BASE_DELAY`、`DOWNLOAD_RETRY_BACKOFF`、`DOWNLOAD_RETRY_MAX_DELAY` 用于 403 退避重试。
+- `TRANSCRIBE_CONCURRENCY`：限制转录并发（0/1 串行，留空为不限）。
+- `YTDLP_COOKIE_FILE`：使用 Netscape 格式 cookies 文件替代 Firefox profile。
+默认值可参考 `.env.example`。
 
 ### 🤖 Telegram 单入口部署
 - 仅在一台机器（例如承载 Caddy 的 NAS）运行 `telegram-bot` 并启用 webhook，在该节点的配置文件或环境变量中填写 `telegram.webhook.public_url`，并使用带有 `telegram` profile 的启动方式：
