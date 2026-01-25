@@ -149,6 +149,8 @@ class ReadwiseService:
 
             video_info = subtitle_data.get("video_info", {})
             subtitle_content = subtitle_data.get("subtitle_content", "")
+            failure_message = subtitle_data.get("failure_message")
+            user_tags = subtitle_data.get("tags", [])
 
             # 添加详细的调试信息
             logger.info("=== 开始创建Readwise文章 ===")
@@ -158,44 +160,10 @@ class ReadwiseService:
             logger.info(f"字幕内容长度: {len(subtitle_content)} 字符")
             logger.info(f"字幕内容前200字符: {subtitle_content[:200]}...")
 
-            # 详细检查数据完整性
-            if not video_info:
-                logger.error("❌ 数据验证失败：video_info为空或None")
-                logger.error(f"subtitle_data.keys(): {list(subtitle_data.keys())}")
-                return None
-
-            if not subtitle_content:
-                logger.error("❌ 数据验证失败：subtitle_content为空或None")
-                logger.error(f"subtitle_content值: {repr(subtitle_content)}")
-                logger.error(f"subtitle_data.keys(): {list(subtitle_data.keys())}")
-                return None
-
-            logger.info("✅ 数据验证通过，继续处理")
-
-            # 构造文章标题
-            title = video_info.get("title", "未知视频标题")
-
-            # 获取作者信息
-            author = video_info.get("uploader") or video_info.get("channel")
-
-            # 构造文章内容
-            logger.info("开始格式化文章内容")
-            content = self._format_subtitle_content(video_info, subtitle_content)
-            logger.info(f"格式化完成，内容长度: {len(content)} 字符")
-            logger.info(f"格式化后内容前200字符: {content[:200]}...")
-
-            # 检查格式化后的内容是否还包含时间戳
-            if "-->" in content:
-                logger.warning("⚠️ 格式化后的内容仍包含时间戳！")
-            else:
-                logger.info("✅ 格式化后的内容不含时间戳")
-
             # 构造URL - 支持自定义域名替换
             original_url = video_info.get("webpage_url") or video_info.get("url")
 
             # 检查是否配置了自定义域名，如果是YouTube链接则进行转换
-            from ..config.config_manager import get_config_value
-
             video_domain = get_config_value("servers.video_domain")
 
             if video_domain and original_url and "youtube.com" in original_url:
@@ -214,8 +182,58 @@ class ReadwiseService:
             else:
                 url = original_url
 
+            # 获取作者信息
+            author = video_info.get("uploader") or video_info.get("channel")
+
+            if failure_message:
+                failure_text = str(failure_message).strip()
+                if not failure_text:
+                    failure_text = "转录失败，请稍后重试。"
+
+                title = video_info.get("title", "转录失败")
+                if not title.startswith("转录失败"):
+                    title = f"转录失败: {title}"
+
+                logger.warning("检测到转录失败标记，发送失败信息到Readwise")
+                return self.create_article(
+                    title=title,
+                    content=failure_text,
+                    url=url,
+                    tags=user_tags,
+                    author=author,
+                    summary=subtitle_data.get("summary"),
+                )
+
+            # 详细检查数据完整性
+            if not video_info:
+                logger.error("❌ 数据验证失败：video_info为空或None")
+                logger.error(f"subtitle_data.keys(): {list(subtitle_data.keys())}")
+                return None
+
+            if not subtitle_content:
+                logger.error("❌ 数据验证失败：subtitle_content为空或None")
+                logger.error(f"subtitle_content值: {repr(subtitle_content)}")
+                logger.error(f"subtitle_data.keys(): {list(subtitle_data.keys())}")
+                return None
+
+            logger.info("✅ 数据验证通过，继续处理")
+
+            # 构造文章标题
+            title = video_info.get("title", "未知视频标题")
+
+            # 构造文章内容
+            logger.info("开始格式化文章内容")
+            content = self._format_subtitle_content(video_info, subtitle_content)
+            logger.info(f"格式化完成，内容长度: {len(content)} 字符")
+            logger.info(f"格式化后内容前200字符: {content[:200]}...")
+
+            # 检查格式化后的内容是否还包含时间戳
+            if "-->" in content:
+                logger.warning("⚠️ 格式化后的内容仍包含时间戳！")
+            else:
+                logger.info("✅ 格式化后的内容不含时间戳")
+
             # 获取用户指定的标签（从subtitle_data中获取，比如Telegram传递的）
-            user_tags = subtitle_data.get("tags", [])
             logger.info(f"用户标签: {user_tags}")
 
             return self.create_article(

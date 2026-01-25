@@ -522,6 +522,27 @@ class VideoService:
             logger.error(f"转换YouTube URL时出错: {str(e)}")
             return url
 
+    def _normalize_youtube_live_url(self, url: str) -> Optional[str]:
+        """将YouTube live URL转换为标准 watch URL。"""
+        try:
+            parsed = urlparse(url)
+            host = (parsed.netloc or "").lower()
+            if "youtube.com" not in host and "youtu.be" not in host:
+                return None
+
+            path_parts = [part for part in (parsed.path or "").split("/") if part]
+            if len(path_parts) < 2 or path_parts[0] != "live":
+                return None
+
+            video_id = path_parts[1].strip()
+            if not video_id:
+                return None
+
+            return f"https://www.youtube.com/watch?v={video_id}"
+        except Exception as e:
+            logger.warning(f"解析YouTube live URL失败: {str(e)}")
+            return None
+
     def download_video(
         self,
         url: str,
@@ -1305,6 +1326,43 @@ class VideoService:
             logger.error(f"提取字幕内容失败: {str(e)}")
             return None
 
+    def _process_video_for_transcription_with_url(
+        self, url: str, platform: str
+    ) -> Optional[Dict[str, Any]]:
+        """使用指定URL完成转录前置处理。"""
+        logger.info(f"处理{platform}视频用于转录: {url}")
+
+        # 1. 获取视频信息
+        video_info = self.get_video_info(url, platform)
+        if not video_info:
+            logger.error("获取视频信息失败")
+            return None
+
+        # 2. 检测语言和字幕策略
+        language = self.get_video_language(video_info)
+        should_download_subs, lang_priority = self.get_subtitle_strategy(
+            language, video_info
+        )
+
+        # 3. 尝试下载字幕
+        subtitle_content = None
+        if should_download_subs:
+            subtitle_content = self.download_subtitles(url, platform, lang_priority)
+
+        # 4. 如果没有字幕，下载音频用于转录
+        audio_file = None
+        if not subtitle_content:
+            logger.info("未找到字幕，开始下载音频用于转录")
+            audio_file = self.download_video(url, platform=platform)
+
+        return {
+            "video_info": video_info,
+            "language": language,
+            "subtitle_content": subtitle_content,
+            "audio_file": audio_file,
+            "needs_transcription": subtitle_content is None,
+        }
+
     def process_video_for_transcription(
         self, url: str, platform: str
     ) -> Optional[Dict[str, Any]]:
@@ -1318,38 +1376,31 @@ class VideoService:
             dict: 处理结果，包含视频信息和音频文件路径
         """
         try:
-            logger.info(f"处理{platform}视频用于转录: {url}")
+            if platform == "youtube":
+                normalized_url = self._normalize_youtube_live_url(url)
+                if normalized_url and normalized_url != url:
+                    logger.info(
+                        "检测到YouTube直播链接，先尝试标准URL: %s", normalized_url
+                    )
+                    primary_result = self._process_video_for_transcription_with_url(
+                        normalized_url, platform
+                    )
+                    needs_fallback = primary_result is None or (
+                        not primary_result.get("subtitle_content")
+                        and not primary_result.get("audio_file")
+                    )
+                    if needs_fallback:
+                        logger.warning("标准URL处理失败，回退使用直播URL: %s", url)
+                        fallback_result = (
+                            self._process_video_for_transcription_with_url(
+                                url, platform
+                            )
+                        )
+                        if fallback_result is not None:
+                            return fallback_result
+                    return primary_result
 
-            # 1. 获取视频信息
-            video_info = self.get_video_info(url, platform)
-            if not video_info:
-                logger.error("获取视频信息失败")
-                return None
-
-            # 2. 检测语言和字幕策略
-            language = self.get_video_language(video_info)
-            should_download_subs, lang_priority = self.get_subtitle_strategy(
-                language, video_info
-            )
-
-            # 3. 尝试下载字幕
-            subtitle_content = None
-            if should_download_subs:
-                subtitle_content = self.download_subtitles(url, platform, lang_priority)
-
-            # 4. 如果没有字幕，下载音频用于转录
-            audio_file = None
-            if not subtitle_content:
-                logger.info("未找到字幕，开始下载音频用于转录")
-                audio_file = self.download_video(url, platform=platform)
-
-            return {
-                "video_info": video_info,
-                "language": language,
-                "subtitle_content": subtitle_content,
-                "audio_file": audio_file,
-                "needs_transcription": subtitle_content is None,
-            }
+            return self._process_video_for_transcription_with_url(url, platform)
 
         except Exception as e:
             logger.error(f"处理视频用于转录失败: {str(e)}")

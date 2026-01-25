@@ -45,6 +45,19 @@ class TranscriptionService:
         self.default_hotwords = self.hotword_service.get_default_hotwords()
         self.hotword_settings = HotwordSettingsManager.get_instance()
         self.hotword_post_processor = HotwordPostProcessor(self.hotword_settings)
+        self.transcribe_max_retries = max(
+            1, int(os.getenv("TRANSCRIBE_MAX_RETRIES", "5"))
+        )
+        self.transcribe_timeout_min = max(
+            1, int(os.getenv("TRANSCRIBE_TIMEOUT_MIN", "300"))
+        )
+        self.transcribe_timeout_max = max(
+            self.transcribe_timeout_min,
+            int(os.getenv("TRANSCRIBE_TIMEOUT_MAX", "1800")),
+        )
+        self.transcribe_timeout_factor = max(
+            0.1, float(os.getenv("TRANSCRIBE_TIMEOUT_FACTOR", "1.5"))
+        )
 
     def _load_transcribe_servers(self) -> List[Dict[str, Any]]:
         """加载转录服务器列表"""
@@ -76,34 +89,51 @@ class TranscriptionService:
             logger.error(f"加载转录服务器列表失败: {str(e)}")
             return [{"url": self.funasr_server, "status": "unknown"}]
 
-    def _get_available_transcribe_server(self) -> Optional[str]:
+    def _get_available_transcribe_servers(self) -> List[Dict[str, Any]]:
+        """获取可用的转录服务器列表"""
+        available_servers = []
+        for server in self.funasr_servers:
+            url = server["url"]
+            try:
+                health_url = f"{url.rstrip('/')}/health"
+                response = requests.get(health_url, timeout=5)
+                if response.status_code == 200:
+                    server["status"] = "healthy"
+                    available_servers.append(server)
+                    logger.debug(f"转录服务器可用: {url}")
+                else:
+                    server["status"] = "unhealthy"
+                    logger.warning(f"转录服务器不可用: {url}")
+            except Exception as e:
+                server["status"] = "error"
+                logger.debug(f"转录服务器检查失败 {url}: {str(e)}")
+
+        if not available_servers:
+            logger.error("没有可用的转录服务器")
+        return available_servers
+
+    def _get_available_transcribe_server(
+        self, exclude_urls: Optional[List[str]] = None
+    ) -> Optional[str]:
         """获取可用的转录服务器"""
         try:
-            # 检查所有服务器状态
-            available_servers = []
-
-            for server in self.funasr_servers:
-                url = server["url"]
-                try:
-                    health_url = f"{url.rstrip('/')}/health"
-                    response = requests.get(health_url, timeout=5)
-                    if response.status_code == 200:
-                        server["status"] = "healthy"
-                        available_servers.append(server)
-                        logger.debug(f"转录服务器可用: {url}")
-                    else:
-                        server["status"] = "unhealthy"
-                        logger.warning(f"转录服务器不可用: {url}")
-                except Exception as e:
-                    server["status"] = "error"
-                    logger.debug(f"转录服务器检查失败 {url}: {str(e)}")
-
+            available_servers = self._get_available_transcribe_servers()
             if not available_servers:
-                logger.error("没有可用的转录服务器")
                 return None
 
-            selected_server = self._select_transcribe_server(available_servers)
+            exclude_urls = [url for url in (exclude_urls or []) if url]
+            if exclude_urls:
+                filtered_servers = [
+                    server
+                    for server in available_servers
+                    if server.get("url") not in exclude_urls
+                ]
+                if filtered_servers:
+                    available_servers = filtered_servers
+                else:
+                    logger.warning("所有可用转录服务器都已尝试过，将允许重复使用。")
 
+            selected_server = self._select_transcribe_server(available_servers)
             logger.info(f"选择转录服务器: {selected_server['url']}")
             return selected_server["url"]
 
@@ -245,33 +275,27 @@ class TranscriptionService:
     ) -> Optional[Dict[str, Any]]:
         """使用FunASR转录音频"""
         try:
-            # 获取可用的转录服务器
-            server_url = self._get_available_transcribe_server()
-            if not server_url:
-                logger.warning("没有可用的FunASR服务器")
-                return None
-
             # 检查音频文件是否需要分割
             audio_segments = self.split_audio(audio_file)
 
             if len(audio_segments) == 1:
                 # 单个文件直接转录
-                return self._transcribe_single_file(
-                    audio_segments[0], hotwords, server_url
-                )
+                return self._transcribe_with_retry(audio_segments[0], hotwords)
             else:
                 # 多个片段分别转录并合并结果
                 logger.info(f"音频已分割为 {len(audio_segments)} 个片段，开始逐个转录")
-                return self._transcribe_multiple_segments(
-                    audio_segments, hotwords, server_url
-                )
+                return self._transcribe_multiple_segments(audio_segments, hotwords)
 
         except Exception as e:
             logger.error(f"FunASR转录出错: {str(e)}")
             return None
 
     def _transcribe_single_file(
-        self, audio_file: str, hotwords: List[str], server_url: str
+        self,
+        audio_file: str,
+        hotwords: List[str],
+        server_url: str,
+        timeout: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """转录单个音频文件"""
         try:
@@ -295,7 +319,11 @@ class TranscriptionService:
                 # 发送转录请求
                 url = f"{server_url.rstrip('/')}/recognize"
                 logger.warning(f"🔥 发送FunASR请求到: {url}")
-                response = requests.post(url, files=files, data=data, timeout=300)
+                request_timeout = max(1, int(timeout or self.transcribe_timeout_min))
+                logger.info(f"FunASR请求超时设置: {request_timeout}s")
+                response = requests.post(
+                    url, files=files, data=data, timeout=request_timeout
+                )
 
             if response.status_code == 200:
                 result = response.json()
@@ -314,7 +342,7 @@ class TranscriptionService:
             return None
 
     def _transcribe_multiple_segments(
-        self, audio_segments: List[str], hotwords: List[str], server_url: str
+        self, audio_segments: List[str], hotwords: List[str]
     ) -> Optional[Dict[str, Any]]:
         """转录多个音频片段并合并结果"""
         try:
@@ -324,19 +352,19 @@ class TranscriptionService:
             for i, segment_path in enumerate(audio_segments, 1):
                 logger.info(f"转录音频片段 {i}/{len(audio_segments)}: {segment_path}")
 
-                result = self._transcribe_single_file(
-                    segment_path, hotwords, server_url
-                )
-                if result:
-                    all_results.append(result)
-                    # 累计时长
-                    if (
-                        "audio_info" in result
-                        and "duration_seconds" in result["audio_info"]
-                    ):
-                        total_duration += result["audio_info"]["duration_seconds"]
-                else:
-                    logger.warning(f"音频片段转录失败: {segment_path}")
+                result = self._transcribe_with_retry(segment_path, hotwords)
+                if not result:
+                    logger.error(f"音频片段转录失败，终止后续处理: {segment_path}")
+                    self._cleanup_audio_segments(audio_segments)
+                    return None
+
+                all_results.append(result)
+                # 累计时长
+                if (
+                    "audio_info" in result
+                    and "duration_seconds" in result["audio_info"]
+                ):
+                    total_duration += result["audio_info"]["duration_seconds"]
 
             if not all_results:
                 logger.error("所有音频片段转录都失败了")
@@ -420,15 +448,8 @@ class TranscriptionService:
                 "source": "funasr_segments",
             }
 
-            # 清理临时音频片段（除了原始文件）
-            original_file = audio_segments[0] if len(audio_segments) == 1 else None
-            for segment_path in audio_segments:
-                if segment_path != original_file and os.path.exists(segment_path):
-                    try:
-                        os.remove(segment_path)
-                        logger.debug(f"清理临时音频片段: {segment_path}")
-                    except Exception as e:
-                        logger.warning(f"清理临时文件失败 {segment_path}: {str(e)}")
+            # 清理临时音频片段
+            self._cleanup_audio_segments(audio_segments)
 
             logger.info(f"音频片段转录完成，合并了 {len(all_results)} 个结果")
             return merged_result
@@ -436,6 +457,69 @@ class TranscriptionService:
         except Exception as e:
             logger.error(f"多片段转录失败: {str(e)}")
             return None
+
+    def _cleanup_audio_segments(self, audio_segments: List[str]) -> None:
+        """清理分割产生的音频片段"""
+        for segment_path in audio_segments:
+            if os.path.exists(segment_path):
+                try:
+                    os.remove(segment_path)
+                    logger.debug(f"清理临时音频片段: {segment_path}")
+                except Exception as e:
+                    logger.warning(f"清理临时文件失败 {segment_path}: {str(e)}")
+
+    def _calculate_transcribe_timeout(self, audio_file: str) -> int:
+        """根据音频时长计算转录超时时间"""
+        audio_info = self._get_audio_info(audio_file)
+        duration = audio_info.get("duration_seconds")
+        if not duration:
+            return self.transcribe_timeout_min
+
+        timeout = int(
+            max(self.transcribe_timeout_min, duration * self.transcribe_timeout_factor)
+        )
+        return min(timeout, self.transcribe_timeout_max)
+
+    def _transcribe_with_retry(
+        self, audio_file: str, hotwords: List[str]
+    ) -> Optional[Dict[str, Any]]:
+        """带重试的单文件转录，失败时切换服务器"""
+        timeout = self._calculate_transcribe_timeout(audio_file)
+        used_servers: List[str] = []
+        max_retries = max(1, self.transcribe_max_retries)
+
+        for attempt in range(1, max_retries + 1):
+            server_url = self._get_available_transcribe_server(
+                exclude_urls=used_servers
+            )
+            if not server_url:
+                if used_servers:
+                    server_url = self._get_available_transcribe_server()
+                if not server_url:
+                    logger.error("没有可用的FunASR服务器")
+                    return None
+
+            if server_url not in used_servers:
+                used_servers.append(server_url)
+            else:
+                logger.warning("所有可用服务器已尝试过，将复用服务器: %s", server_url)
+
+            logger.info(
+                "转录重试 %s/%s: 使用服务器 %s (超时=%ss)",
+                attempt,
+                max_retries,
+                server_url,
+                timeout,
+            )
+            result = self._transcribe_single_file(
+                audio_file, hotwords, server_url, timeout=timeout
+            )
+            if result:
+                return result
+            logger.warning("转录重试 %s/%s 失败: %s", attempt, max_retries, server_url)
+
+        logger.error("音频转录失败：已重试 %s 次仍未成功", max_retries)
+        return None
 
     def _transcribe_with_openai(self, audio_file: str) -> Optional[Dict[str, Any]]:
         """使用OpenAI Whisper转录音频"""
