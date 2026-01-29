@@ -354,6 +354,23 @@ def _shorten_text(text: str, max_length: int = 80) -> str:
     return f"{clean[: max_length - 3]}..."
 
 
+def _format_task_display(task: Dict[str, Any]) -> str:
+    """格式化队列任务的显示文本."""
+    title = (task.get("title") or "").strip()
+    uploader = (task.get("uploader") or task.get("author") or "").strip()
+    url_display = _shorten_url(task.get("url") or "")
+    if not title and not uploader:
+        return url_display
+    if not title:
+        uploader_display = _shorten_text(uploader, 32)
+        return f"{uploader_display} - {url_display}"
+    title_display = _shorten_text(title, 48)
+    if uploader:
+        uploader_display = _shorten_text(uploader, 24)
+        return f"{title_display} ({uploader_display}) - {url_display}"
+    return f"{title_display} - {url_display}"
+
+
 def _queue_total(state: Dict[str, Any]) -> int:
     """计算当前队列总数."""
     index = int(state.get("queue_index", 1))
@@ -444,6 +461,8 @@ def _register_active_task(
     location: Optional[str] = None,
     tags: Optional[List[str]] = None,
     hotwords: Optional[List[str]] = None,
+    title: Optional[str] = None,
+    uploader: Optional[str] = None,
     message_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     """登记一个正在处理的任务."""
@@ -455,6 +474,8 @@ def _register_active_task(
         "location": location,
         "tags": list(tags or []),
         "hotwords": list(hotwords or []),
+        "title": title,
+        "uploader": uploader,
         "message_id": message_id,
         "created_at": time.time(),
         "updated_at": time.time(),
@@ -479,6 +500,33 @@ def _update_active_task_status(
     tasks[process_id]["updated_at"] = time.time()
     if error:
         tasks[process_id]["error"] = error
+
+
+def _update_active_task_metadata(
+    user_id: int,
+    chat_id: int,
+    process_id: str,
+    **updates: Any,
+) -> None:
+    """更新任务的补充信息（例如标题）."""
+    key = _request_key(user_id, chat_id)
+    tasks = active_tasks.get(key)
+    if not tasks or process_id not in tasks:
+        return
+    entry = tasks[process_id]
+    changed = False
+    for field, value in updates.items():
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                continue
+        if entry.get(field) != value:
+            entry[field] = value
+            changed = True
+    if changed:
+        entry["updated_at"] = time.time()
 
 
 def _remove_active_task(user_id: int, chat_id: int, process_id: str) -> None:
@@ -842,7 +890,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2. 使用命令 /process URL\n"
         "3. 一次发送多条URL（换行/空格/逗号分隔），将自动跳过标签/热词并并行处理\n"
         "4. 使用 /queue 查看当前任务列表，/queue_clear 清理失败任务\n"
-        "5. 使用 /retry_failed 批量重试失败任务"
+        "5. 使用 /retry_failed 批量重试失败任务\n"
+        "6. 使用 /prompt_toggle on|off 开关标签/热词输入（仅对当前bot进程生效）"
     )
 
 
@@ -1773,21 +1822,21 @@ async def queue_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if active_tasks_list:
         lines.append(f"正在处理 {len(active_tasks_list)} 个任务：")
         for idx, task in enumerate(active_tasks_list, start=1):
-            url_display = _shorten_url(task.get("url") or "")
+            item_display = _format_task_display(task)
             status_label = _status_label(task.get("status", "processing"))
-            lines.append(f"{idx}. {url_display} ({status_label})")
+            lines.append(f"{idx}. {item_display} ({status_label})")
 
     if failed_tasks:
         if lines:
             lines.append("")
         lines.append(f"失败 {len(failed_tasks)} 个任务：")
         for idx, task in enumerate(failed_tasks, start=1):
-            url_display = _shorten_url(task.get("url") or "")
+            item_display = _format_task_display(task)
             error = _shorten_text(task.get("error") or "")
             if error:
-                lines.append(f"{idx}. {url_display} (失败: {error})")
+                lines.append(f"{idx}. {item_display} (失败: {error})")
             else:
-                lines.append(f"{idx}. {url_display} (失败)")
+                lines.append(f"{idx}. {item_display} (失败)")
         lines.append("可使用 /retry_failed 批量重试，或 /queue_clear 清理失败任务。")
 
     await update.message.reply_text("\n".join(lines))
@@ -1939,6 +1988,79 @@ async def hotword_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _resolve_prompt_toggle_arg(
+    arg: Optional[str],
+    current_tags: bool,
+    current_hotwords: bool,
+) -> Tuple[bool, bool, bool]:
+    """解析开关参数，返回新状态与是否需要更新."""
+    if not arg:
+        desired = not (current_tags or current_hotwords)
+        return desired, desired, True
+
+    normalized = arg.strip().lower()
+    enable_values = {"on", "true", "enable", "1", "开启", "开", "open"}
+    disable_values = {"off", "false", "disable", "0", "关闭", "关", "close"}
+    status_values = {"status", "状态", "query", "查看"}
+
+    if normalized in enable_values:
+        return True, True, True
+    if normalized in disable_values:
+        return False, False, True
+    if normalized in status_values:
+        return current_tags, current_hotwords, False
+
+    raise ValueError("invalid_prompt_toggle_arg")
+
+
+def _prompt_toggle_status_text(require_tags: bool, require_hotwords: bool) -> str:
+    """格式化标签/热词输入开关状态."""
+    tags_state = "开启" if require_tags else "关闭"
+    hotwords_state = "开启" if require_hotwords else "关闭"
+    return f"标签输入：{tags_state}\n热词输入：{hotwords_state}"
+
+
+async def prompt_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """切换标签/热词输入开关"""
+    record_update(update)
+    log_update_metadata("/prompt_toggle", update)
+    user_id = update.effective_user.id
+
+    if not is_admin_user(user_id):
+        await update.message.reply_text("❌ 仅管理员可以执行该操作。")
+        return
+
+    text = (update.message.text or "").strip() if update.message else ""
+    parts = text.split(maxsplit=1)
+    arg = parts[1] if len(parts) > 1 else None
+
+    global REQUIRE_TAG_INPUT, REQUIRE_HOTWORD_INPUT
+    try:
+        new_tags, new_hotwords, should_update = _resolve_prompt_toggle_arg(
+            arg, REQUIRE_TAG_INPUT, REQUIRE_HOTWORD_INPUT
+        )
+    except ValueError:
+        await update.message.reply_text(
+            "❌ 参数无效，请使用 /prompt_toggle [on|off|status]"
+        )
+        return
+
+    if should_update:
+        REQUIRE_TAG_INPUT = new_tags
+        REQUIRE_HOTWORD_INPUT = new_hotwords
+        logger.info(
+            "prompt_toggle: user=%s require_tags=%s require_hotwords=%s",
+            user_id,
+            REQUIRE_TAG_INPUT,
+            REQUIRE_HOTWORD_INPUT,
+        )
+
+    status_text = _prompt_toggle_status_text(REQUIRE_TAG_INPUT, REQUIRE_HOTWORD_INPUT)
+    await update.message.reply_text(
+        f"{status_text}\n💡 已在等待输入的请求可用 /skip 跳过。"
+    )
+
+
 async def monitor_process_completion(
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,
@@ -2023,6 +2145,23 @@ async def monitor_process_completion(
             continue
 
         status = (payload.get("status") or "").lower()
+        video_info = payload.get("video_info") or {}
+        if isinstance(video_info, dict):
+            title = (video_info.get("title") or "").strip()
+            uploader = (
+                video_info.get("uploader")
+                or video_info.get("author")
+                or video_info.get("channel")
+            )
+            uploader = (uploader or "").strip()
+            if title or uploader:
+                _update_active_task_metadata(
+                    user_id,
+                    chat_id,
+                    process_id,
+                    title=title or None,
+                    uploader=uploader or None,
+                )
         logger.debug(
             "任务状态(%s) attempt=%s status=%s progress=%s",
             process_id,
@@ -2609,6 +2748,7 @@ def main():
     application.add_handler(CommandHandler("retry_failed", retry_failed))
     application.add_handler(CommandHandler("hotword_status", hotword_status))
     application.add_handler(CommandHandler("hotword_toggle", hotword_toggle))
+    application.add_handler(CommandHandler("prompt_toggle", prompt_toggle))
     # 处理普通消息
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)

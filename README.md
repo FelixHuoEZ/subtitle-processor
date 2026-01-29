@@ -56,6 +56,7 @@ A comprehensive subtitle processing service that automatically downloads, transc
 - **Hotword Management**
   - Runtime toggle API (`/process/settings/hotword`) with persisted JSON state
   - Telegram commands `/hotword_status`、`/hotword_toggle` 查看/切换自动热词
+  - `/prompt_toggle on|off|status` only affects the current bot process (not persisted or shared)
   - Conversation flow supports manual hotword input或 `/skip` 跳过
   - `config/hotwords-example/` 与 `config/hotword_settings.json.example` 提供可定制模板
 
@@ -216,6 +217,7 @@ Special thanks to:
   - 可选：检测到中文字幕时直接剪藏原始 URL
 - **热词管理**
   - 运行期热词开关可通过 `/process/settings/hotword` 与 Telegram 指令在线调整
+  - `/prompt_toggle on|off|status` 仅对当前 bot 进程生效，不会持久化或跨节点同步
   - 标签/热词会话支持手动输入或 `/skip` 快捷跳过
   - `config/hotword_settings.json.example`、`config/hotwords-example/` 提供自定义模板，轻松扩展自动热词策略
 
