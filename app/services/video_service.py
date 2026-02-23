@@ -1501,7 +1501,7 @@ class VideoService:
         """从字幕格式列表中提取内容"""
         try:
             # 按优先级尝试不同格式
-            format_priority = ["json3", "srv3", "srv2", "srv1", "ttml", "vtt", "srt"]
+            format_priority = ["srt", "vtt", "ttml", "json3", "srv3", "srv2", "srv1"]
 
             for format_name in format_priority:
                 for subtitle_format in subtitle_formats:

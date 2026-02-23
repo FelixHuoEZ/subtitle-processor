@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from ..config.config_manager import get_config_value
+from .subtitle_service import SubtitleService
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # 确保DEBUG级别日志可以输出
@@ -21,6 +22,7 @@ class ReadwiseService:
         self.api_token = get_config_value("tokens.readwise.api_token", "")
         self.base_url = "https://readwise.io/api/v3"
         self.enabled = bool(self.api_token)
+        self.subtitle_service = SubtitleService()
 
         if not self.enabled:
             logger.info("Readwise API token未配置，服务将不可用")
@@ -406,6 +408,29 @@ class ReadwiseService:
         """
         try:
             import re
+
+            if subtitle_content is None:
+                return ""
+            if not isinstance(subtitle_content, str):
+                subtitle_content = str(subtitle_content)
+
+            detected_format = self.subtitle_service.detect_subtitle_format(
+                subtitle_content
+            )
+            if detected_format in {"json3", "json", "vtt", "srv", "ttml", "xml"}:
+                converted_content = (
+                    self.subtitle_service.normalize_external_subtitle_content(
+                        subtitle_content
+                    )
+                )
+                if converted_content:
+                    logger.info(
+                        "Readwise清理前先做字幕规范化: format=%s, before=%s, after=%s",
+                        detected_format,
+                        len(subtitle_content),
+                        len(converted_content),
+                    )
+                    subtitle_content = converted_content
 
             logger.info("开始清理字幕内容用于Readwise")
             logger.info(f"原始内容长度: {len(subtitle_content)} 字符")

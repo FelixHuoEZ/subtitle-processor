@@ -1,8 +1,10 @@
 """Subtitle processing service for handling SRT files and transcription results."""
 
+import html
 import json
 import re
 import logging
+import xml.etree.ElementTree as ET
 from typing import List, Dict, Any, Optional
 from ..utils.time_utils import format_time, parse_time, generate_srt_timestamps
 from ..utils.file_utils import split_into_sentences
@@ -330,15 +332,103 @@ class SubtitleService:
             str: SRT格式字幕内容
         """
         try:
-            if format_type == 'json3':
-                # 处理JSON3格式（YouTube等平台）
-                return self._convert_json3_to_srt(content)
+            format_type = (format_type or "json3").lower()
+
+            if format_type == "auto":
+                return self.normalize_external_subtitle_content(content)
+
+            if format_type == "json3":
+                converted = self._convert_json3_to_srt(content)
+            elif format_type == "vtt":
+                converted = self._convert_vtt_to_srt(content if isinstance(content, str) else str(content))
+            elif format_type in {"srv1", "srv2", "srv3", "srv", "ttml", "xml"}:
+                converted = self._convert_xml_to_srt(content if isinstance(content, str) else str(content))
             else:
                 logger.warning(f"不支持的格式类型: {format_type}")
                 return None
+
+            if converted:
+                return converted
+
+            # 向后兼容：转换失败时保留原文
+            if isinstance(content, str):
+                return self._normalize_newlines(content)
+            return None
         except Exception as e:
             logger.error(f"转换字幕格式时出错: {str(e)}")
             return None
+
+    def detect_subtitle_format(self, content: Any) -> str:
+        """检测字幕内容格式。"""
+        if content is None:
+            return "unknown"
+
+        if isinstance(content, dict):
+            return "json3" if "events" in content else "json"
+
+        if not isinstance(content, str):
+            return "plain"
+
+        text = content.strip()
+        if not text:
+            return "unknown"
+
+        json_candidate = text.lstrip()
+        if json_candidate.startswith("{") or json_candidate.startswith("["):
+            try:
+                data = json.loads(json_candidate)
+                if isinstance(data, dict) and "events" in data:
+                    return "json3"
+                return "json"
+            except json.JSONDecodeError:
+                pass
+
+        if self._looks_like_vtt(text):
+            return "vtt"
+        if self._looks_like_srt(text):
+            return "srt"
+
+        lowered = text[:2000].lower()
+        if text.startswith("<"):
+            if "<tt" in lowered or "ttml" in lowered:
+                return "ttml"
+            if "<timedtext" in lowered or "<transcript" in lowered:
+                return "srv"
+            if "<text" in lowered or "<p " in lowered:
+                return "xml"
+
+        return "plain"
+
+    def normalize_external_subtitle_content(self, content: Any) -> Optional[str]:
+        """将外部字幕规范化为SRT或纯文本，避免JSON结构直接透传。"""
+        if content is None:
+            return None
+
+        format_type = self.detect_subtitle_format(content)
+        logger.info("字幕格式检测结果: %s", format_type)
+
+        converted = None
+        if format_type == "json3":
+            converted = self._convert_json3_to_srt(content)
+        elif format_type == "vtt":
+            converted = self._convert_vtt_to_srt(str(content))
+        elif format_type in {"srv", "ttml", "xml"}:
+            converted = self._convert_xml_to_srt(str(content))
+        elif format_type == "srt":
+            return self._normalize_newlines(str(content)).strip()
+        elif format_type == "json":
+            converted = self._convert_json3_to_srt(content)
+
+        if converted:
+            return converted
+
+        if isinstance(content, str):
+            return self._normalize_newlines(content).strip()
+
+        try:
+            return json.dumps(content, ensure_ascii=False)
+        except TypeError:
+            return str(content)
     
     def _convert_json3_to_srt(self, content):
         """将JSON3格式转换为SRT格式"""
@@ -347,8 +437,7 @@ class SubtitleService:
                 try:
                     data = json.loads(content)
                 except json.JSONDecodeError:
-                    # 如果不是JSON，当作纯文本处理
-                    return self.parse_srt(content)
+                    return None
             else:
                 data = content
             
@@ -384,15 +473,248 @@ class SubtitleService:
                     ])
                     subtitle_index += 1
             
-            if srt_lines:
-                return "\\n".join(srt_lines)
-            else:
+            if not srt_lines:
                 logger.warning("JSON3转换后没有有效内容")
                 return None
+
+            return "\n".join(srt_lines)
                 
         except Exception as e:
             logger.error(f"转换JSON3格式时出错: {str(e)}")
             return None
+
+    def _convert_vtt_to_srt(self, content: str) -> Optional[str]:
+        """将VTT格式转换为SRT格式。"""
+        try:
+            if not content:
+                return None
+
+            normalized = self._normalize_newlines(content)
+            lines = normalized.split("\n")
+            srt_lines = []
+            subtitle_index = 1
+            i = 0
+
+            while i < len(lines):
+                line = lines[i].strip().lstrip("\ufeff")
+                if not line:
+                    i += 1
+                    continue
+
+                upper_line = line.upper()
+                if upper_line.startswith("WEBVTT") or upper_line.startswith("NOTE"):
+                    i += 1
+                    while i < len(lines) and lines[i].strip():
+                        i += 1
+                    continue
+                if upper_line.startswith("STYLE") or upper_line.startswith("REGION"):
+                    i += 1
+                    while i < len(lines) and lines[i].strip():
+                        i += 1
+                    continue
+
+                time_line = line
+                if "-->" not in time_line and i + 1 < len(lines) and "-->" in lines[i + 1]:
+                    i += 1
+                    time_line = lines[i].strip()
+
+                if "-->" not in time_line:
+                    i += 1
+                    continue
+
+                start_raw, end_raw = [part.strip() for part in time_line.split("-->", 1)]
+                start_token = self._extract_timestamp_token(start_raw)
+                end_token = self._extract_timestamp_token(end_raw)
+                start_time = self._parse_timestamp_value(start_token)
+                end_time = self._parse_timestamp_value(end_token)
+                if start_time is None or end_time is None:
+                    i += 1
+                    continue
+                if end_time <= start_time:
+                    end_time = start_time + 0.5
+
+                i += 1
+                cue_lines = []
+                while i < len(lines) and lines[i].strip():
+                    cue_text = re.sub(r"<[^>]+>", "", lines[i]).strip()
+                    if cue_text:
+                        cue_lines.append(html.unescape(cue_text))
+                    i += 1
+
+                if not cue_lines:
+                    continue
+
+                srt_lines.extend([
+                    str(subtitle_index),
+                    f"{format_time(start_time)} --> {format_time(end_time)}",
+                    " ".join(cue_lines),
+                    "",
+                ])
+                subtitle_index += 1
+
+            if not srt_lines:
+                logger.warning("VTT转换后没有有效内容")
+                return None
+
+            return "\n".join(srt_lines)
+        except Exception as e:
+            logger.error(f"转换VTT格式时出错: {str(e)}")
+            return None
+
+    def _convert_xml_to_srt(self, content: str) -> Optional[str]:
+        """将YouTube srv/TTML/XML字幕转换为SRT格式。"""
+        try:
+            if not content:
+                return None
+
+            root = ET.fromstring(content)
+            entries = []
+
+            for node in root.iter():
+                tag = self._local_tag_name(node.tag)
+                if tag not in {"text", "p"}:
+                    continue
+
+                attrs = {self._local_tag_name(k): v for k, v in node.attrib.items()}
+                start = self._parse_timestamp_value(
+                    attrs.get("t"), assume_ms=True
+                ) if "t" in attrs else None
+                if start is None and "start" in attrs:
+                    start = self._parse_timestamp_value(attrs.get("start"))
+                if start is None and "begin" in attrs:
+                    start = self._parse_timestamp_value(attrs.get("begin"))
+                if start is None:
+                    continue
+
+                end = self._parse_timestamp_value(attrs.get("end")) if "end" in attrs else None
+                duration = self._parse_timestamp_value(
+                    attrs.get("d"), assume_ms=True
+                ) if "d" in attrs else None
+                if duration is None and "dur" in attrs:
+                    duration = self._parse_timestamp_value(attrs.get("dur"))
+
+                if end is None and duration is not None:
+                    end = start + duration
+                if end is None or end <= start:
+                    end = start + 0.5
+
+                text = " ".join("".join(node.itertext()).split())
+                text = html.unescape(text).strip()
+                if not text:
+                    continue
+
+                entries.append((start, end, text))
+
+            if not entries:
+                logger.warning("XML转换后没有有效内容")
+                return None
+
+            entries.sort(key=lambda item: item[0])
+            srt_lines = []
+            for index, (start, end, text) in enumerate(entries, start=1):
+                srt_lines.extend([
+                    str(index),
+                    f"{format_time(start)} --> {format_time(end)}",
+                    text,
+                    "",
+                ])
+
+            return "\n".join(srt_lines)
+        except ET.ParseError:
+            logger.warning("XML解析失败，无法转换为SRT")
+            return None
+        except Exception as e:
+            logger.error(f"转换XML字幕时出错: {str(e)}")
+            return None
+
+    @staticmethod
+    def _local_tag_name(tag_name: str) -> str:
+        if not tag_name:
+            return ""
+        return tag_name.split("}", 1)[-1].lower()
+
+    @staticmethod
+    def _normalize_newlines(content: str) -> str:
+        return str(content).replace("\r\n", "\n").replace("\r", "\n")
+
+    @staticmethod
+    def _looks_like_srt(content: str) -> bool:
+        if "-->" not in content:
+            return False
+        return bool(
+            re.search(
+                r"\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}",
+                content,
+            )
+        )
+
+    @staticmethod
+    def _looks_like_vtt(content: str) -> bool:
+        if "WEBVTT" in content[:100].upper():
+            return True
+        return bool(
+            re.search(
+                r"\d{1,2}:\d{2}(?::\d{2})?[,\.]\d{3}\s*-->\s*\d{1,2}:\d{2}(?::\d{2})?[,\.]\d{3}",
+                content,
+            )
+        )
+
+    @staticmethod
+    def _extract_timestamp_token(value: str) -> Optional[str]:
+        if not value:
+            return None
+        match = re.search(r"\d{1,2}:\d{2}(?::\d{2})?[,\.]\d{3}", value)
+        return match.group(0) if match else None
+
+    @staticmethod
+    def _parse_timestamp_value(value: Any, assume_ms: bool = False) -> Optional[float]:
+        if value is None:
+            return None
+
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+            return numeric / 1000.0 if assume_ms else numeric
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        normalized = text.replace(",", ".")
+        if normalized.endswith("ms"):
+            try:
+                return float(normalized[:-2]) / 1000.0
+            except ValueError:
+                return None
+        if normalized.endswith("s"):
+            try:
+                return float(normalized[:-1])
+            except ValueError:
+                return None
+
+        if ":" in normalized:
+            parts = normalized.split(":")
+            try:
+                float_parts = [float(part) for part in parts]
+            except ValueError:
+                return None
+
+            if len(float_parts) == 3:
+                hours, minutes, seconds = float_parts
+            elif len(float_parts) == 2:
+                hours = 0.0
+                minutes, seconds = float_parts
+            else:
+                return None
+            return hours * 3600 + minutes * 60 + seconds
+
+        try:
+            numeric = float(normalized)
+        except ValueError:
+            return None
+
+        if assume_ms or numeric > 1000:
+            return numeric / 1000.0
+        return numeric
     
     def clean_subtitle_content(self, content, is_funasr=False):
         """清理字幕内容"""
