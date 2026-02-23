@@ -423,6 +423,42 @@ def _process_video_task(task_info, auto_transcribe):
                 logger.info(f"=== 视频处理流程完成 === {process_id}")
 
             elif result.get("subtitle_content"):
+                raw_subtitle_content = result.get("subtitle_content")
+                source_subtitle_format = subtitle_service.detect_subtitle_format(
+                    raw_subtitle_content
+                )
+                normalized_subtitle_content = (
+                    subtitle_service.normalize_external_subtitle_content(
+                        raw_subtitle_content
+                    )
+                )
+
+                if normalized_subtitle_content:
+                    task_info["subtitle_content"] = normalized_subtitle_content
+                else:
+                    task_info["subtitle_content"] = raw_subtitle_content
+
+                if isinstance(raw_subtitle_content, str):
+                    converted_subtitle = (
+                        task_info["subtitle_content"] != raw_subtitle_content
+                    )
+                    raw_length = len(raw_subtitle_content)
+                else:
+                    converted_subtitle = True
+                    raw_length = 0
+                normalized_length = (
+                    len(task_info["subtitle_content"])
+                    if isinstance(task_info["subtitle_content"], str)
+                    else 0
+                )
+                logger.info(
+                    "字幕规范化结果: source_format=%s, converted=%s, raw_len=%s, normalized_len=%s",
+                    source_subtitle_format,
+                    converted_subtitle,
+                    raw_length,
+                    normalized_length,
+                )
+
                 task_info["status"] = "completed"
                 task_info["progress"] = 100
                 if not task_info.get("subtitle_path"):
@@ -434,7 +470,7 @@ def _process_video_task(task_info, auto_transcribe):
                     )
                     subtitle_filename = f"{safe_title}.srt"
                     subtitle_path = file_service.save_file(
-                        result["subtitle_content"], subtitle_filename
+                        task_info.get("subtitle_content", ""), subtitle_filename
                     )
                     task_info["subtitle_path"] = subtitle_path
                 logger.info(f"第2步完成：视频已有字幕，无需转录: {process_id}")
