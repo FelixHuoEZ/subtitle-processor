@@ -54,7 +54,7 @@ services:
       - CONFIG_PATH=/app/config/config.yml
       - BGUTIL_PROVIDER_URL=${BGUTIL_PROVIDER_URL:-http://bgutil-provider:4416}
       - YT_DLP_EXTRACTOR_ARGS=youtubepot-bgutilhttp:base_url=http://bgutil-provider:4416
-      - YTDLP_PLAYER_CLIENTS=tv,web_safari,web
+      - YTDLP_PLAYER_CLIENTS=web_safari,web,tv
       - TRANSCRIBE_MAX_RETRIES=${TRANSCRIBE_MAX_RETRIES:-5}
       - TRANSCRIBE_TIMEOUT_MIN=${TRANSCRIBE_TIMEOUT_MIN:-300}
       - TRANSCRIBE_TIMEOUT_MAX=${TRANSCRIBE_TIMEOUT_MAX:-1800}
