@@ -823,6 +823,7 @@ class VideoService:
                         logger.info(f"尝试下载: {format_attempt['desc']}")
                         # 添加率限制防止IP被封
                         time.sleep(3)
+                        before_files = set(os.listdir(temp_dir))
                         opts = base_opts.copy()
                         opts["format"] = format_attempt["format"]
 
@@ -831,8 +832,12 @@ class VideoService:
 
                         # 改进的文件查找逻辑
                         downloaded_file = self._find_downloaded_file(
-                            temp_dir, expected_video_id
+                            temp_dir, expected_video_id, baseline_files=before_files
                         )
+                        if not downloaded_file:
+                            downloaded_file = self._find_downloaded_file(
+                                temp_dir, expected_video_id
+                            )
 
                         if downloaded_file and os.path.exists(downloaded_file):
                             logger.info(f"下载成功: {downloaded_file}")
@@ -881,15 +886,28 @@ class VideoService:
                 if downloaded_file and os.path.exists(downloaded_file):
                     break
 
+            if not downloaded_file and expected_video_id:
+                fallback_file = self._find_downloaded_file(temp_dir, expected_video_id)
+                if fallback_file and os.path.exists(fallback_file):
+                    logger.warning(
+                        "下载阶段未产出新文件，回退复用已有文件: %s", fallback_file
+                    )
+                    downloaded_file = fallback_file
+
             if not downloaded_file:
                 logger.error("所有下载尝试都失败了")
                 # 列出临时目录中的文件用于调试
                 try:
                     files = os.listdir(temp_dir)
-                    logger.error(f"临时目录中的文件: {files}")
+                    logger.error(
+                        "临时目录文件数量: %s, 示例: %s",
+                        len(files),
+                        files[:30],
+                    )
                     if files:
                         logger.error(
-                            "文件存在但未被正确识别，这可能是文件查找逻辑的问题"
+                            "目录中存在文件，但未匹配到当前任务可用文件 (expected_video_id=%s)",
+                            expected_video_id,
                         )
                 except Exception as e:
                     logger.error(f"无法列出临时目录文件: {str(e)}")
@@ -906,7 +924,10 @@ class VideoService:
                 semaphore.release()
 
     def _find_downloaded_file(
-        self, temp_dir: str, expected_video_id: Optional[str]
+        self,
+        temp_dir: str,
+        expected_video_id: Optional[str],
+        baseline_files: Optional[set] = None,
     ) -> Optional[str]:
         """改进的下载文件查找逻辑"""
         try:
@@ -915,53 +936,83 @@ class VideoService:
                 return None
 
             files = os.listdir(temp_dir)
-            logger.info(f"临时目录中的文件: {files}")
+            logger.info("临时目录文件数量: %s", len(files))
 
             if not files:
                 logger.warning("临时目录中没有文件")
                 return None
 
+            candidate_files = self._get_stable_download_candidates(temp_dir, files)
+            if baseline_files:
+                new_files = [
+                    candidate
+                    for candidate in candidate_files
+                    if os.path.basename(candidate[0]) not in baseline_files
+                ]
+                if new_files:
+                    candidate_files = new_files
+
+            if not candidate_files:
+                logger.warning("未找到可用的下载文件（仅检测到临时/不完整文件）")
+                return None
+
             # 策略1: 如果有预期的视频ID，优先匹配
             if expected_video_id:
                 # 先查找精确匹配（不带_part_的文件）
-                for file in files:
+                for file_path, file, _ in candidate_files:
                     base_name, _ = os.path.splitext(file)
                     if base_name == expected_video_id:
-                        file_path = os.path.join(temp_dir, file)
                         logger.info(f"通过精确匹配到文件: {file_path}")
                         return file_path
 
-                for file in files:
+                for file_path, file, _ in candidate_files:
                     if file.startswith(expected_video_id):
-                        file_path = os.path.join(temp_dir, file)
                         logger.info(f"通过视频ID匹配到文件: {file_path}")
                         return file_path
 
             # 策略2: 查找最新创建的文件
-            files_with_time = []
-            for file in files:
-                file_path = os.path.join(temp_dir, file)
-                try:
-                    mtime = os.path.getmtime(file_path)
-                    files_with_time.append((file_path, mtime))
-                except OSError:
-                    continue
-
-            if files_with_time:
+            if candidate_files:
                 # 按修改时间排序，选择最新的文件
-                files_with_time.sort(key=lambda x: x[1], reverse=True)
-                newest_file = files_with_time[0][0]
+                candidate_files.sort(key=lambda item: item[2], reverse=True)
+                newest_file = candidate_files[0][0]
                 logger.info(f"选择最新的文件: {newest_file}")
                 return newest_file
-
-            # 策略3: 如果都失败了，返回第一个文件
-            first_file = os.path.join(temp_dir, files[0])
-            logger.info(f"回退到第一个文件: {first_file}")
-            return first_file
 
         except Exception as e:
             logger.error(f"查找下载文件时发生错误: {str(e)}")
             return None
+
+    @staticmethod
+    def _is_incomplete_download_file(filename: str) -> bool:
+        """判断是否为下载中间文件。"""
+        lower_name = filename.lower()
+        if lower_name.endswith((".part", ".ytdl", ".tmp", ".temp")):
+            return True
+        return ".part-" in lower_name
+
+    def _get_stable_download_candidates(
+        self, temp_dir: str, files: List[str]
+    ) -> List[Tuple[str, str, float]]:
+        """返回可用于后续转换的稳定文件列表。"""
+        candidates = []
+        for file in files:
+            if self._is_incomplete_download_file(file):
+                continue
+
+            file_path = os.path.join(temp_dir, file)
+            if not os.path.isfile(file_path):
+                continue
+
+            try:
+                if os.path.getsize(file_path) <= 0:
+                    continue
+                mtime = os.path.getmtime(file_path)
+            except OSError:
+                continue
+
+            candidates.append((file_path, file, mtime))
+
+        return candidates
 
     def _convert_to_audio(self, video_file: str, output_dir: str) -> Optional[str]:
         """将视频转换为音频格式"""
