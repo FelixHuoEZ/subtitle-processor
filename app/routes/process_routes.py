@@ -1,10 +1,12 @@
 """Processing routes for video transcription, translation, and subtitle generation."""
 
-import os
 import json
 import logging
+import os
 from datetime import datetime
+
 from flask import Blueprint, request, jsonify, render_template, redirect, url_for, flash, Response
+
 from ..services.file_service import FileService
 from ..services.video_service import VideoService
 from ..services.transcription_service import TranscriptionService
@@ -12,6 +14,7 @@ from ..services.subtitle_service import SubtitleService
 from ..services.translation_service import TranslationService
 from ..services.readwise_service import ReadwiseService
 from ..config.config_manager import get_config_value
+from ..utils.file_utils import build_task_filename
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +74,7 @@ def process_video(process_id):
 @process_bp.route('/video/<process_id>/start', methods=['POST'])
 def start_video_processing(process_id):
     """开始视频处理"""
+    task_temp_dir = None
     try:
         task_info = file_service.get_file_info(process_id)
         if not task_info:
@@ -91,6 +95,8 @@ def start_video_processing(process_id):
         
         # 开始处理视频
         result = video_service.process_video_for_transcription(url, platform)
+        if result:
+            task_temp_dir = result.get('temp_dir')
         
         if not result:
             file_service.update_file_info(process_id, {
@@ -121,11 +127,12 @@ def start_video_processing(process_id):
             
             # 保存字幕文件
             video_title = result['video_info'].get('title', 'subtitle')
-            subtitle_filename = f"{video_title}.srt"
+            subtitle_filename = build_task_filename(video_title, process_id)
             subtitle_path = file_service.save_file(subtitle_content, subtitle_filename)
             
             file_service.update_file_info(process_id, {
                 'status': 'completed',
+                'filename': subtitle_filename,
                 'subtitle_content': subtitle_content,
                 'subtitle_path': subtitle_path,
                 'progress': 100,
@@ -161,15 +168,12 @@ def start_video_processing(process_id):
             
             # 保存字幕文件
             video_title = result['video_info'].get('title', 'subtitle')
-            subtitle_filename = f"{video_title}.srt"
+            subtitle_filename = build_task_filename(video_title, process_id)
             subtitle_path = file_service.save_file(srt_content, subtitle_filename)
-            
-            # 清理音频文件
-            if os.path.exists(result['audio_file']):
-                os.remove(result['audio_file'])
             
             file_service.update_file_info(process_id, {
                 'status': 'completed',
+                'filename': subtitle_filename,
                 'subtitle_content': srt_content,
                 'subtitle_path': subtitle_path,
                 'transcription_result': transcription_result,
@@ -195,6 +199,9 @@ def start_video_processing(process_id):
             'updated_time': datetime.now().isoformat()
         })
         return jsonify({'error': str(e)}), 500
+    finally:
+        if task_temp_dir:
+            video_service.cleanup_task_artifacts(task_temp_dir)
 
 
 @process_bp.route('/audio/<file_id>')
@@ -263,12 +270,15 @@ def start_audio_transcription(file_id):
         
         # 保存字幕文件
         original_name = file_info.get('original_filename', 'audio')
-        subtitle_filename = f"{os.path.splitext(original_name)[0]}.srt"
+        subtitle_filename = build_task_filename(
+            os.path.splitext(original_name)[0], file_id
+        )
         subtitle_path = file_service.save_file(srt_content, subtitle_filename)
         
         # 更新文件信息
         file_service.update_file_info(file_id, {
             'status': 'completed',
+            'filename': subtitle_filename,
             'subtitle_content': srt_content,
             'subtitle_path': subtitle_path,
             'transcription_result': transcription_result,
@@ -348,7 +358,9 @@ def translate_subtitle(file_id):
         # 保存翻译后的字幕
         original_name = file_info.get('original_filename', 'subtitle')
         base_name = os.path.splitext(original_name)[0]
-        translated_filename = f"{base_name}_{target_lang}.srt"
+        translated_filename = build_task_filename(
+            f"{base_name}_{target_lang}", file_id
+        )
         translated_path = file_service.save_file(translated_content, translated_filename)
         
         return jsonify({
@@ -510,12 +522,15 @@ def batch_transcribe():
                 
                 # 保存文件
                 original_name = file_info.get('original_filename', 'audio')
-                subtitle_filename = f"{os.path.splitext(original_name)[0]}.srt"
+                subtitle_filename = build_task_filename(
+                    os.path.splitext(original_name)[0], file_id
+                )
                 subtitle_path = file_service.save_file(srt_content, subtitle_filename)
                 
                 # 更新文件信息
                 file_service.update_file_info(file_id, {
                     'status': 'completed',
+                    'filename': subtitle_filename,
                     'subtitle_content': srt_content,
                     'subtitle_path': subtitle_path,
                     'updated_time': datetime.now().isoformat()

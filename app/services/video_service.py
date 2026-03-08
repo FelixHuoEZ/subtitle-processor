@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 import threading
 import time
 from datetime import datetime
@@ -902,12 +904,55 @@ class VideoService:
             logger.warning(f"解析YouTube live URL失败: {str(e)}")
             return None
 
+    def _prepare_task_temp_dir(self, output_folder: Optional[str] = None) -> str:
+        """为单次下载任务创建独立临时目录，避免任务之间互相污染。"""
+        temp_root = output_folder or os.path.join(
+            get_config_value("app.upload_folder", "/app/uploads"), "temp"
+        )
+        os.makedirs(temp_root, exist_ok=True)
+        task_temp_dir = tempfile.mkdtemp(prefix="download_", dir=temp_root)
+        logger.info("创建任务临时目录: %s", task_temp_dir)
+        return task_temp_dir
+
+    @staticmethod
+    def _cleanup_task_temp_dir(temp_dir: Optional[str]) -> None:
+        """清理单次下载任务的临时目录。"""
+        if not temp_dir:
+            return
+        try:
+            shutil.rmtree(temp_dir)
+            logger.info("已清理任务临时目录: %s", temp_dir)
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            logger.warning("清理任务临时目录失败 %s: %s", temp_dir, e)
+
+    def cleanup_task_artifacts(self, temp_dir: Optional[str]) -> None:
+        """公开的任务清理入口，供路由层在处理完成后回收下载产物。"""
+        if not temp_dir:
+            return
+
+        temp_root = os.path.realpath(
+            os.path.join(get_config_value("app.upload_folder", "/app/uploads"), "temp")
+        )
+        target_dir = os.path.realpath(temp_dir)
+
+        if os.path.basename(target_dir).startswith("download_") is False:
+            logger.warning("跳过清理非任务临时目录: %s", temp_dir)
+            return
+
+        if os.path.commonpath([temp_root, target_dir]) != temp_root:
+            logger.warning("跳过清理目录，路径不在临时目录根下: %s", temp_dir)
+            return
+
+        self._cleanup_task_temp_dir(temp_dir)
+
     def download_video(
         self,
         url: str,
         output_folder: Optional[str] = None,
         platform: Optional[str] = None,
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, str]]:
         """下载视频并提取音频
 
         Args:
@@ -916,7 +961,7 @@ class VideoService:
             platform: 平台名称，用于设置正确的请求头
 
         Returns:
-            str: 下载的音频文件路径，失败返回None
+            dict: 成功时返回音频文件路径和临时目录，失败返回None
         """
         semaphore = self._download_semaphore
         if semaphore:
@@ -924,12 +969,10 @@ class VideoService:
                 "等待下载并发许可 (limit=%s): %s", self.download_concurrency, url
             )
             semaphore.acquire()
+        temp_dir = None
+        should_cleanup_temp_dir = True
         try:
-            # 创建临时目录
-            temp_dir = output_folder or os.path.join(
-                get_config_value("app.upload_folder", "/app/uploads"), "temp"
-            )
-            os.makedirs(temp_dir, exist_ok=True)
+            temp_dir = self._prepare_task_temp_dir(output_folder)
             logger.info(f"开始下载视频: {url}")
 
             # 先尝试检查视频信息
@@ -1108,14 +1151,6 @@ class VideoService:
                 if downloaded_file and os.path.exists(downloaded_file):
                     break
 
-            if not downloaded_file and expected_video_id:
-                fallback_file = self._find_downloaded_file(temp_dir, expected_video_id)
-                if fallback_file and os.path.exists(fallback_file):
-                    logger.warning(
-                        "下载阶段未产出新文件，回退复用已有文件: %s", fallback_file
-                    )
-                    downloaded_file = fallback_file
-
             if not downloaded_file:
                 logger.error("所有下载尝试都失败了")
                 # 列出临时目录中的文件用于调试
@@ -1130,18 +1165,28 @@ class VideoService:
                         logger.error(
                             "目录中存在文件，但未匹配到当前任务可用文件 (expected_video_id=%s)",
                             expected_video_id,
-                        )
+                    )
                 except Exception as e:
                     logger.error(f"无法列出临时目录文件: {str(e)}")
                 return None
 
             # 转换为音频格式
-            return self._convert_to_audio(downloaded_file, temp_dir)
+            audio_file = self._convert_to_audio(downloaded_file, temp_dir)
+            if not audio_file:
+                return None
+
+            should_cleanup_temp_dir = False
+            return {
+                "audio_file": audio_file,
+                "temp_dir": temp_dir,
+            }
 
         except Exception as e:
             logger.error(f"下载视频时出错: {str(e)}")
             return None
         finally:
+            if should_cleanup_temp_dir:
+                self._cleanup_task_temp_dir(temp_dir)
             if semaphore:
                 semaphore.release()
 
@@ -1165,14 +1210,15 @@ class VideoService:
                 return None
 
             candidate_files = self._get_stable_download_candidates(temp_dir, files)
-            if baseline_files:
-                new_files = [
+            if baseline_files is not None:
+                candidate_files = [
                     candidate
                     for candidate in candidate_files
                     if os.path.basename(candidate[0]) not in baseline_files
                 ]
-                if new_files:
-                    candidate_files = new_files
+                if not candidate_files:
+                    logger.warning("本次下载未产出新的稳定文件")
+                    return None
 
             if not candidate_files:
                 logger.warning("未找到可用的下载文件（仅检测到临时/不完整文件）")
@@ -1192,13 +1238,18 @@ class VideoService:
                         logger.info(f"通过视频ID匹配到文件: {file_path}")
                         return file_path
 
-            # 策略2: 查找最新创建的文件
-            if candidate_files:
-                # 按修改时间排序，选择最新的文件
-                candidate_files.sort(key=lambda item: item[2], reverse=True)
-                newest_file = candidate_files[0][0]
-                logger.info(f"选择最新的文件: {newest_file}")
-                return newest_file
+                logger.warning(
+                    "候选文件未匹配预期视频ID: expected_video_id=%s, candidates=%s",
+                    expected_video_id,
+                    [candidate[1] for candidate in candidate_files],
+                )
+                return None
+
+            # 当无法确定视频ID时，只能在当前任务独立目录内回退到最新文件。
+            candidate_files.sort(key=lambda item: item[2], reverse=True)
+            newest_file = candidate_files[0][0]
+            logger.info(f"在当前任务目录中选择最新文件: {newest_file}")
+            return newest_file
 
         except Exception as e:
             logger.error(f"查找下载文件时发生错误: {str(e)}")
@@ -1873,6 +1924,7 @@ class VideoService:
                 "subtitle_content": None,
                 "subtitle_metadata": None,
                 "audio_file": None,
+                "temp_dir": None,
                 "needs_transcription": False,
                 "readwise_url_only": True,
             }
@@ -1897,9 +1949,17 @@ class VideoService:
 
         # 4. 如果没有字幕，下载音频用于转录
         audio_file = None
+        temp_dir = None
         if not subtitle_content:
             logger.info("未找到字幕，开始下载音频用于转录")
-            audio_file = self.download_video(url, platform=platform)
+            download_result = self.download_video(url, platform=platform)
+            if isinstance(download_result, dict):
+                audio_file = download_result.get("audio_file")
+                temp_dir = download_result.get("temp_dir")
+            else:
+                audio_file = download_result
+                temp_dir = os.path.dirname(audio_file) if audio_file else None
+
             if audio_file:
                 audio_probe = self._probe_audio_language(audio_file)
                 if audio_probe:
@@ -1921,6 +1981,7 @@ class VideoService:
             "subtitle_content": subtitle_content,
             "subtitle_metadata": subtitle_metadata,
             "audio_file": audio_file,
+            "temp_dir": temp_dir,
             "needs_transcription": subtitle_content is None,
         }
 
