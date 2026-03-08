@@ -19,6 +19,7 @@ from ..services.subtitle_service import SubtitleService
 from ..services.transcription_service import TranscriptionService
 from ..services.translation_service import TranslationService
 from ..services.video_service import VideoService
+from ..utils.file_utils import build_task_filename
 
 logger = logging.getLogger(__name__)
 
@@ -349,6 +350,7 @@ def _process_video_task(task_info, auto_transcribe):
     url = task_info["url"]
     platform = task_info["platform"]
     tags = task_info.get("tags", []) or []
+    task_temp_dir = None
 
     print(f"=== 开始自动视频处理流程 ===")
     print(f"处理ID: {process_id}")
@@ -378,6 +380,7 @@ def _process_video_task(task_info, auto_transcribe):
             task_info["language"] = result.get("language")
             task_info["subtitle_content"] = result.get("subtitle_content")
             task_info["audio_file"] = result.get("audio_file")
+            task_temp_dir = result.get("temp_dir")
             task_info["needs_transcription"] = result.get("needs_transcription", False)
             task_info["readwise_url_only"] = result.get("readwise_url_only", False)
             task_info["updated_time"] = datetime.now().isoformat()
@@ -462,17 +465,13 @@ def _process_video_task(task_info, auto_transcribe):
                 task_info["status"] = "completed"
                 task_info["progress"] = 100
                 if not task_info.get("subtitle_path"):
-                    safe_title = (
-                        task_info.get("video_info", {}).get("title") or process_id
-                    )
-                    safe_title = (
-                        re.sub(r'[\\/:*?"<>|]', "_", safe_title).strip() or process_id
-                    )
-                    subtitle_filename = f"{safe_title}.srt"
+                    safe_title = task_info.get("video_info", {}).get("title") or process_id
+                    subtitle_filename = build_task_filename(safe_title, process_id)
                     subtitle_path = file_service.save_file(
                         task_info.get("subtitle_content", ""), subtitle_filename
                     )
                     task_info["subtitle_path"] = subtitle_path
+                    task_info["filename"] = subtitle_filename
                 logger.info(f"第2步完成：视频已有字幕，无需转录: {process_id}")
                 logger.info(f"第3步：开始发送内容到Readwise Reader: {process_id}")
 
@@ -615,19 +614,15 @@ def _process_video_task(task_info, auto_transcribe):
                             task_info["subtitle_content"] = srt_content
                             task_info["transcription_result"] = transcription_result
                             task_info["progress"] = 100
-                            safe_title = (
-                                task_info.get("video_info", {}).get("title")
-                                or process_id
+                            safe_title = task_info.get("video_info", {}).get("title") or process_id
+                            subtitle_filename = build_task_filename(
+                                safe_title, process_id
                             )
-                            safe_title = (
-                                re.sub(r'[\\/:*?"<>|]', "_", safe_title).strip()
-                                or process_id
-                            )
-                            subtitle_filename = f"{safe_title}.srt"
                             subtitle_path = file_service.save_file(
                                 srt_content, subtitle_filename
                             )
                             task_info["subtitle_path"] = subtitle_path
+                            task_info["filename"] = subtitle_filename
                             logger.info(
                                 f"第2步完成：音频转录和SRT转换成功: {process_id}"
                             )
@@ -717,13 +712,15 @@ def _process_video_task(task_info, auto_transcribe):
             task_info["updated_time"] = datetime.now().isoformat()
             logger.error(f"第1步失败：视频处理失败: {process_id}")
 
-        file_service.update_file_info(process_id, task_info)
-
     except Exception as e:
         logger.error(f"=== 视频处理流程出错 === {process_id} - {str(e)}")
         task_info["status"] = "failed"
         task_info["error"] = str(e)
         task_info["updated_time"] = datetime.now().isoformat()
+    finally:
+        if task_temp_dir:
+            video_service.cleanup_task_artifacts(task_temp_dir)
+            task_info["audio_file"] = None
         file_service.update_file_info(process_id, task_info)
 
 
