@@ -161,7 +161,7 @@ if ($env:QUICKER_SELECTED_FILES) {
 $processed = $false
 
 # 1. 检查是否是YouTube URL
-if ($clipboardText -match "youtube\.com/watch\?v=|youtu\.be/") {
+if ($clipboardText -match "(youtube\.com/(watch\?v=|shorts/|live/|embed/|v/)|youtu\.be/)") {
     Write-Host "`n检测到YouTube URL，开始处理..."
     Process-YouTubeUrl -url $clipboardText
     $processed = $true

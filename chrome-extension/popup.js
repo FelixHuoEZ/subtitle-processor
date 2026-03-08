@@ -108,17 +108,31 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 function extractVideoId(url) {
-  // 匹配常规YouTube URL
-  let match = url.match(/[?&]v=([^&]+)/);
-  if (match) {
-    return match[1];
+  try {
+    const normalizedUrl = url.includes('://') ? url : `https://${url}`;
+    const parsed = new URL(normalizedUrl);
+    const host = parsed.hostname.toLowerCase();
+    const pathParts = parsed.pathname.split('/').filter(Boolean);
+
+    if (host === 'youtu.be') {
+      return pathParts[0] || null;
+    }
+
+    if (!(host === 'youtube.com' || host.endsWith('.youtube.com'))) {
+      return null;
+    }
+
+    const watchVideoId = parsed.searchParams.get('v');
+    if (watchVideoId) {
+      return watchVideoId;
+    }
+
+    if (pathParts.length >= 2 && ['shorts', 'live', 'embed', 'v'].includes(pathParts[0])) {
+      return pathParts[1];
+    }
+  } catch (error) {
+    return null;
   }
-  
-  // 匹配短链接格式
-  match = url.match(/youtu\.be\/([^?]+)/);
-  if (match) {
-    return match[1];
-  }
-  
+
   return null;
 }

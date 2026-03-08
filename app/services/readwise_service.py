@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from ..config.config_manager import get_config_value
+from ..utils.video_utils import extract_youtube_video_id
 from .subtitle_service import SubtitleService
 
 logger = logging.getLogger(__name__)
@@ -209,14 +210,8 @@ class ReadwiseService:
             # 检查是否配置了自定义域名，如果是YouTube链接则进行转换
             video_domain = get_config_value("servers.video_domain")
 
-            if video_domain and original_url and "youtube.com" in original_url:
-                # 从URL提取视频ID
-                video_id = None
-                if "watch?v=" in original_url:
-                    video_id = original_url.split("v=")[1].split("&")[0]
-                elif "youtu.be/" in original_url:
-                    video_id = original_url.split("youtu.be/")[1].split("?")[0]
-
+            if video_domain and original_url:
+                video_id = extract_youtube_video_id(original_url)
                 if video_id:
                     url = f"{video_domain}/view/{video_id}"
                     logger.info(f"URL转换: {original_url} -> {url}")
