@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import threading
 import time
+from copy import deepcopy
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -528,6 +529,141 @@ class VideoService:
             opts["http_headers"] = headers
         return opts
 
+    def _build_download_base_opts(
+        self, temp_dir: str, platform: Optional[str], url: str
+    ) -> Dict[str, Any]:
+        """构建媒体下载选项，确保复用统一的yt-dlp/cookie配置。"""
+        resolved_platform = platform or "youtube"
+        opts = deepcopy(self._get_yt_dlp_opts_for_platform(resolved_platform, url))
+        opts["outtmpl"] = os.path.join(temp_dir, "%(id)s.%(ext)s")
+        opts["quiet"] = True
+        opts["no_warnings"] = True
+        opts["geo_bypass"] = True
+        opts["no_check_certificate"] = True
+
+        headers = dict(opts.get("http_headers", {}))
+        headers.update(
+            {
+                "Accept": "*/*",
+                "Accept-Language": "en-US,en;q=0.5",
+            }
+        )
+        platform_headers = self._get_platform_headers(platform, url)
+        if not platform_headers:
+            platform_headers = self._get_platform_headers("youtube", url)
+        headers.update(platform_headers)
+        opts["http_headers"] = headers
+
+        if "cookiefile" in opts or "cookiesfrombrowser" in opts:
+            logger.info("音频下载将复用统一cookie配置")
+            return opts
+
+        firefox_profile = self._get_firefox_profile_path()
+        if firefox_profile:
+            logger.info("音频下载补充Firefox配置文件: %s", firefox_profile)
+            opts["cookiesfrombrowser"] = ("firefox", firefox_profile)
+        else:
+            logger.warning(
+                "音频下载阶段未找到可用 cookie，可能触发 YouTube 验证。"
+                "请确认已挂载 firefox_profile 或设置 YTDLP_COOKIE_FILE。",
+            )
+
+        return opts
+
+    def _build_public_youtube_download_opts(self, temp_dir: str) -> Dict[str, Any]:
+        """为公开视频构建接近裸 yt-dlp 的下载参数，避免额外配置改变可用格式。"""
+        opts: Dict[str, Any] = {
+            "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
+            "geo_bypass": True,
+            "no_check_certificate": True,
+        }
+        for key in (
+            "logger",
+            "quiet",
+            "no_warnings",
+            "cachedir",
+            "noplaylist",
+            "skip_unavailable_fragments",
+        ):
+            if key in self.yt_dlp_opts:
+                opts[key] = self.yt_dlp_opts[key]
+        return opts
+
+    def _build_download_option_profiles(
+        self, temp_dir: str, platform: Optional[str], url: str
+    ) -> List[Dict[str, Any]]:
+        """构建媒体下载参数组合，优先使用更接近裸 yt-dlp 的路径。"""
+        resolved_platform = platform or "youtube"
+        if resolved_platform != "youtube":
+            return [
+                {
+                    "desc": "平台下载参数",
+                    "opts": self._build_download_base_opts(
+                        temp_dir, resolved_platform, url
+                    ),
+                }
+            ]
+
+        profiles = [
+            {
+                "desc": "默认公开视频参数",
+                "opts": self._build_public_youtube_download_opts(temp_dir),
+            }
+        ]
+
+        authenticated_opts = self._build_download_base_opts(
+            temp_dir, resolved_platform, url
+        )
+        profiles.append(
+            {
+                "desc": "登录态/兼容参数",
+                "opts": authenticated_opts,
+            }
+        )
+        return profiles
+
+    @staticmethod
+    def _normalize_download_error_text(message: Any) -> Optional[str]:
+        if message is None:
+            return None
+        normalized = " ".join(str(message).split()).strip()
+        return normalized or None
+
+    def _summarize_download_errors(self, errors: List[str]) -> str:
+        normalized_errors = []
+        for error in errors:
+            normalized = self._normalize_download_error_text(error)
+            if normalized:
+                normalized_errors.append(normalized)
+
+        if not normalized_errors:
+            return "音频下载失败"
+
+        combined = " ".join(normalized_errors).lower()
+        if "po token" in combined or "bgutil" in combined:
+            return (
+                "YouTube 音频下载失败：PO Token 获取失败，请检查 bgutil provider "
+                "是否可用，并确认 cookies 仍有效"
+            )
+        if "n challenge" in combined:
+            return (
+                "YouTube 音频下载失败：JS challenge 解析失败，请确认 Deno / "
+                "yt-dlp-ejs 可用，并检查 cookies 配置"
+            )
+        if (
+            "http error 403" in combined
+            or "forbidden" in combined
+            or "fragment 1 not found" in combined
+        ):
+            return (
+                "YouTube 音频下载失败：媒体流返回 HTTP 403，请检查 cookies 是否有效，"
+                "或确认 bgutil provider / JS challenge solver 是否正常"
+            )
+        if "requested format is not available" in combined:
+            return "YouTube 音频下载失败：当前没有可用的下载格式，请稍后重试或更新 yt-dlp"
+
+        return normalized_errors[-1][:240]
+
     def _configure_cookie_support(self, base_opts: Dict[str, Any]) -> None:
         """为yt-dlp配置cookie，优先使用显式配置"""
         cookie_file_env = os.getenv("YTDLP_COOKIE_FILE")
@@ -956,39 +1092,41 @@ class VideoService:
         try:
             temp_dir = self._prepare_task_temp_dir(output_folder)
             logger.info(f"开始下载视频: {url}")
+            download_profiles = self._build_download_option_profiles(
+                temp_dir, platform, url
+            )
 
             # 先尝试检查视频信息
             info = None
-            try:
-                player_clients = self._get_youtube_player_clients()
-                # 添加率限制防止IP被封
-                time.sleep(2)
-                temp_opts = {
-                    "quiet": True,
-                    "extractor_args": {
-                        "youtube": {
-                            "player_client": player_clients,
-                            "fetch_pot": ["auto"],
-                        },
-                        "youtubepot-bgutilhttp": {
-                            "base_url": [self.bgutil_provider_url],
-                        },
-                    },
-                }
-                with yt_dlp.YoutubeDL(temp_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    logger.info(f"视频标题: {info.get('title')}")
-                    if info.get("age_limit", 0) > 0:
-                        logger.info(f"视频有年龄限制: {info.get('age_limit')}+")
-                    if info.get("is_live", False):
-                        logger.info("这是一个直播视频")
-                    if info.get("availability", "") != "public":
+            for profile in download_profiles:
+                try:
+                    time.sleep(2)
+                    info_opts = deepcopy(profile["opts"])
+                    info_opts.pop("outtmpl", None)
+                    info_opts.pop("format", None)
+                    with yt_dlp.YoutubeDL(info_opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
                         logger.info(
-                            f"视频可用性: {info.get('availability', 'unknown')}"
+                            "使用%s获取视频信息成功: %s",
+                            profile["desc"],
+                            info.get("title"),
                         )
-            except Exception as e:
-                logger.info(f"无法获取视频信息，可能需要登录: {str(e)}")
-                info = None
+                        if info.get("age_limit", 0) > 0:
+                            logger.info(f"视频有年龄限制: {info.get('age_limit')}+")
+                        if info.get("is_live", False):
+                            logger.info("这是一个直播视频")
+                        if info.get("availability", "") != "public":
+                            logger.info(
+                                f"视频可用性: {info.get('availability', 'unknown')}"
+                            )
+                        break
+                except Exception as e:
+                    logger.info(
+                        "使用%s获取视频信息失败，尝试下一组参数: %s",
+                        profile["desc"],
+                        str(e),
+                    )
+                    info = None
 
             # 记录预期的视频ID（用于后续文件查找）
             expected_video_id = None
@@ -998,45 +1136,6 @@ class VideoService:
                 expected_video_id = extract_youtube_video_id(url)
 
             logger.info(f"预期视频ID: {expected_video_id}")
-
-            # 基础下载选项
-            player_clients = self._get_youtube_player_clients()
-            base_opts = {
-                "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
-                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "quiet": True,
-                "no_warnings": True,
-                "geo_bypass": True,
-                "no_check_certificate": True,
-                "extractor_args": {
-                    "youtube": {
-                        "player_client": player_clients,
-                        "fetch_pot": ["auto"],
-                    },
-                    "youtubepot-bgutilhttp": {
-                        "base_url": [self.bgutil_provider_url],
-                    },
-                },
-            }
-            base_headers = {
-                "Accept": "*/*",
-                "Accept-Language": "en-US,en;q=0.5",
-            }
-            platform_headers = self._get_platform_headers(platform, url)
-            if not platform_headers:
-                platform_headers = self._get_platform_headers("youtube", url)
-            base_opts["http_headers"] = {**base_headers, **platform_headers}
-
-            # 尝试获取Firefox配置文件路径
-            firefox_profile = self._get_firefox_profile_path()
-            if firefox_profile:
-                logger.info(f"使用Firefox配置文件: {firefox_profile}")
-                base_opts["cookiesfrombrowser"] = ("firefox", firefox_profile)
-            else:
-                logger.warning(
-                    "未在 /root/.mozilla/firefox 中找到可用 profile，将临时跳过 cookie 下载。"
-                    "请确认已挂载 firefox_profile 或在 config.yml 中配置 cookies 字段。",
-                )
 
             # 按优先级尝试不同的格式
             format_attempts = [
@@ -1055,79 +1154,110 @@ class VideoService:
             ]
 
             downloaded_file = None
+            download_errors = []
             retry_limit = max(0, self.download_retry_max)
-            for format_attempt in format_attempts:
-                retry_count = 0
-                while True:
-                    try:
-                        logger.info(f"尝试下载: {format_attempt['desc']}")
-                        # 添加率限制防止IP被封
-                        time.sleep(3)
-                        before_files = set(os.listdir(temp_dir))
-                        opts = base_opts.copy()
-                        opts["format"] = format_attempt["format"]
-
-                        with yt_dlp.YoutubeDL(opts) as ydl:
-                            ydl.download([url])
-
-                        # 改进的文件查找逻辑
-                        downloaded_file = self._find_downloaded_file(
-                            temp_dir, expected_video_id, baseline_files=before_files
-                        )
-                        if not downloaded_file:
-                            downloaded_file = self._find_downloaded_file(
-                                temp_dir, expected_video_id
+            for profile in download_profiles:
+                profile_desc = profile["desc"]
+                base_opts = profile["opts"]
+                for format_attempt in format_attempts:
+                    retry_count = 0
+                    while True:
+                        try:
+                            logger.info(
+                                "尝试下载: %s / %s",
+                                profile_desc,
+                                format_attempt["desc"],
                             )
+                            # 添加率限制防止IP被封
+                            time.sleep(3)
+                            before_files = set(os.listdir(temp_dir))
+                            opts = deepcopy(base_opts)
+                            opts["format"] = format_attempt["format"]
 
-                        if downloaded_file and os.path.exists(downloaded_file):
-                            logger.info(f"下载成功: {downloaded_file}")
+                            with yt_dlp.YoutubeDL(opts) as ydl:
+                                ydl.download([url])
+
+                            # 改进的文件查找逻辑
+                            downloaded_file = self._find_downloaded_file(
+                                temp_dir, expected_video_id, baseline_files=before_files
+                            )
+                            if not downloaded_file:
+                                downloaded_file = self._find_downloaded_file(
+                                    temp_dir, expected_video_id
+                                )
+
+                            if downloaded_file and os.path.exists(downloaded_file):
+                                logger.info(f"下载成功: {downloaded_file}")
+                                break
+
+                            logger.warning(
+                                "下载完成但未找到文件: %s / %s",
+                                profile_desc,
+                                format_attempt["desc"],
+                            )
+                            download_errors.append(
+                                f"{profile_desc} / {format_attempt['desc']}: 下载完成但未找到输出文件"
+                            )
                             break
 
-                        logger.warning(
-                            "下载完成但未找到文件: %s", format_attempt["desc"]
-                        )
-                        break
+                        except DownloadError as e:
+                            download_errors.append(
+                                f"{profile_desc} / {format_attempt['desc']}: {str(e)}"
+                            )
+                            if self._is_http_403_error(e) and retry_count < retry_limit:
+                                retry_count += 1
+                                delay = self._calculate_download_backoff(retry_count)
+                                logger.warning(
+                                    "下载遇到403，%ss后重试 (%s/%s): %s / %s",
+                                    delay,
+                                    retry_count,
+                                    retry_limit,
+                                    profile_desc,
+                                    format_attempt["desc"],
+                                )
+                                time.sleep(delay)
+                                continue
+                            logger.warning(
+                                "下载失败 (%s / %s): %s",
+                                profile_desc,
+                                format_attempt["desc"],
+                                str(e),
+                            )
+                            break
+                        except Exception as e:
+                            download_errors.append(
+                                f"{profile_desc} / {format_attempt['desc']}: {str(e)}"
+                            )
+                            if self._is_http_403_error(e) and retry_count < retry_limit:
+                                retry_count += 1
+                                delay = self._calculate_download_backoff(retry_count)
+                                logger.warning(
+                                    "下载遇到403，%ss后重试 (%s/%s): %s / %s",
+                                    delay,
+                                    retry_count,
+                                    retry_limit,
+                                    profile_desc,
+                                    format_attempt["desc"],
+                                )
+                                time.sleep(delay)
+                                continue
+                            logger.warning(
+                                "下载失败 (%s / %s): %s",
+                                profile_desc,
+                                format_attempt["desc"],
+                                str(e),
+                            )
+                            break
 
-                    except DownloadError as e:
-                        if self._is_http_403_error(e) and retry_count < retry_limit:
-                            retry_count += 1
-                            delay = self._calculate_download_backoff(retry_count)
-                            logger.warning(
-                                "下载遇到403，%ss后重试 (%s/%s): %s",
-                                delay,
-                                retry_count,
-                                retry_limit,
-                                format_attempt["desc"],
-                            )
-                            time.sleep(delay)
-                            continue
-                        logger.warning(
-                            "下载失败 (%s): %s", format_attempt["desc"], str(e)
-                        )
-                        break
-                    except Exception as e:
-                        if self._is_http_403_error(e) and retry_count < retry_limit:
-                            retry_count += 1
-                            delay = self._calculate_download_backoff(retry_count)
-                            logger.warning(
-                                "下载遇到403，%ss后重试 (%s/%s): %s",
-                                delay,
-                                retry_count,
-                                retry_limit,
-                                format_attempt["desc"],
-                            )
-                            time.sleep(delay)
-                            continue
-                        logger.warning(
-                            "下载失败 (%s): %s", format_attempt["desc"], str(e)
-                        )
+                    if downloaded_file and os.path.exists(downloaded_file):
                         break
 
                 if downloaded_file and os.path.exists(downloaded_file):
                     break
 
             if not downloaded_file:
-                logger.error("所有下载尝试都失败了")
+                summarized_error = self._summarize_download_errors(download_errors)
+                logger.error("所有下载尝试都失败了: %s", summarized_error)
                 # 列出临时目录中的文件用于调试
                 try:
                     files = os.listdir(temp_dir)
@@ -1140,20 +1270,29 @@ class VideoService:
                         logger.error(
                             "目录中存在文件，但未匹配到当前任务可用文件 (expected_video_id=%s)",
                             expected_video_id,
-                    )
+                        )
                 except Exception as e:
                     logger.error(f"无法列出临时目录文件: {str(e)}")
-                return None
+                return {
+                    "audio_file": None,
+                    "temp_dir": None,
+                    "error": summarized_error,
+                }
 
             # 转换为音频格式
             audio_file = self._convert_to_audio(downloaded_file, temp_dir)
             if not audio_file:
-                return None
+                return {
+                    "audio_file": None,
+                    "temp_dir": None,
+                    "error": "音频格式转换失败，无法生成可转录的 WAV 文件",
+                }
 
             should_cleanup_temp_dir = False
             return {
                 "audio_file": audio_file,
                 "temp_dir": temp_dir,
+                "error": None,
             }
 
         except Exception as e:
@@ -1925,12 +2064,14 @@ class VideoService:
         # 4. 如果没有字幕，下载音频用于转录
         audio_file = None
         temp_dir = None
+        download_error = None
         if not subtitle_content:
             logger.info("未找到字幕，开始下载音频用于转录")
             download_result = self.download_video(url, platform=platform)
             if isinstance(download_result, dict):
                 audio_file = download_result.get("audio_file")
                 temp_dir = download_result.get("temp_dir")
+                download_error = download_result.get("error")
             else:
                 audio_file = download_result
                 temp_dir = os.path.dirname(audio_file) if audio_file else None
@@ -1957,6 +2098,7 @@ class VideoService:
             "subtitle_metadata": subtitle_metadata,
             "audio_file": audio_file,
             "temp_dir": temp_dir,
+            "download_error": download_error,
             "needs_transcription": subtitle_content is None,
         }
 

@@ -700,7 +700,12 @@ def _process_video_task(task_info, auto_transcribe):
                     f"第2步失败：未获取到可用音频文件，终止后续流程: {process_id}"
                 )
                 task_info["status"] = "failed"
-                task_info["error"] = "音频下载失败，已终止后续流程"
+                download_error = None
+                if isinstance(result, dict):
+                    download_error = result.get("download_error")
+                task_info["error"] = (
+                    download_error or "音频下载失败，已终止后续流程"
+                )
                 task_info["progress"] = task_info.get("progress", 0)
                 task_info["subtitle_content"] = None
                 task_info["subtitle_path"] = None
