@@ -113,6 +113,23 @@ def sanitize_filename(filename):
     return clean_name
 
 
+def build_task_filename(base_name: str, task_id: str, extension: str = ".srt") -> str:
+    """构造带任务标识的安全文件名，避免同标题结果相互覆盖。"""
+    normalized_extension = extension or ""
+    if normalized_extension and not normalized_extension.startswith("."):
+        normalized_extension = f".{normalized_extension}"
+
+    safe_base_name = (base_name or "subtitle").strip() or "subtitle"
+    safe_task_id = re.sub(r"[^A-Za-z0-9_-]", "", str(task_id or ""))[:12]
+
+    if safe_task_id:
+        filename = f"{safe_base_name}_{safe_task_id}{normalized_extension}"
+    else:
+        filename = f"{safe_base_name}{normalized_extension}"
+
+    return sanitize_filename(filename)
+
+
 def split_into_sentences(text):
     """将文本分割成句子"""
     try:
