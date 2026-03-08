@@ -5,12 +5,20 @@ import logging
 import math
 import os
 import subprocess
+import tempfile
 import threading
 from typing import Any, Dict, List, Optional
 
 import requests
 
 from ..config.config_manager import get_config_value
+from ..utils.language_detection import (
+    add_language_score,
+    blank_language_scores,
+    decide_primary_language,
+    detect_text_primary_language,
+    normalize_primary_language,
+)
 from .hotword_post_processor import HotwordPostProcessor
 from .hotword_service import HotwordService
 from .hotword_settings import HotwordSettingsManager
@@ -602,6 +610,145 @@ class TranscriptionService:
 
         except Exception as e:
             logger.error(f"OpenAI Whisper转录失败: {str(e)}")
+            return None
+
+    def _get_audio_probe_offsets(
+        self, duration_seconds: float, segment_seconds: float
+    ) -> List[float]:
+        """Choose a few evenly distributed offsets for language probing."""
+        duration = max(0.0, float(duration_seconds or 0.0))
+        if duration <= 0:
+            return [0.0]
+        if duration <= segment_seconds + 2:
+            return [0.0]
+
+        anchors = [0.1, 0.5, 0.85]
+        max_start = max(0.0, duration - segment_seconds)
+        offsets = []
+        for anchor in anchors:
+            start = max(
+                0.0,
+                min(max_start, duration * anchor - (segment_seconds / 2.0)),
+            )
+            rounded = round(start, 2)
+            if rounded not in offsets:
+                offsets.append(rounded)
+        return offsets or [0.0]
+
+    def _extract_audio_probe_segment(
+        self, audio_file: str, start_seconds: float, duration_seconds: float
+    ) -> Optional[str]:
+        """Extract a short mono WAV clip for language probing."""
+        probe_file = tempfile.NamedTemporaryFile(
+            prefix="language-probe-", suffix=".wav", delete=False
+        )
+        probe_path = probe_file.name
+        probe_file.close()
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            str(max(0.0, start_seconds)),
+            "-t",
+            str(max(1.0, duration_seconds)),
+            "-i",
+            audio_file,
+            "-vn",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            probe_path,
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.warning("提取音频探测片段失败: %s", result.stderr.strip())
+            try:
+                if os.path.exists(probe_path):
+                    os.remove(probe_path)
+            except OSError:
+                pass
+            return None
+
+        return probe_path
+
+    def detect_audio_language(self, audio_file: str) -> Optional[Dict[str, Any]]:
+        """Detect whether an audio file is mainly Chinese or English."""
+        try:
+            if not audio_file or not os.path.exists(audio_file):
+                return None
+            if not self.openai_api_key:
+                logger.info("未配置OpenAI，跳过音频语言探测")
+                return None
+
+            audio_info = self._get_audio_info(audio_file) or {}
+            duration_seconds = float(audio_info.get("duration_seconds") or 0.0)
+            segment_seconds = min(20.0, max(8.0, duration_seconds / 4.0 or 15.0))
+            offsets = self._get_audio_probe_offsets(duration_seconds, segment_seconds)
+
+            scores = blank_language_scores()
+            samples = []
+            temp_files: List[str] = []
+
+            try:
+                for offset in offsets:
+                    probe_path = self._extract_audio_probe_segment(
+                        audio_file, offset, segment_seconds
+                    )
+                    if not probe_path:
+                        continue
+                    temp_files.append(probe_path)
+
+                    transcript = self._transcribe_with_openai(probe_path)
+                    if not transcript or not transcript.get("text"):
+                        continue
+
+                    detection = detect_text_primary_language(transcript["text"])
+                    language = normalize_primary_language(detection.get("language"))
+                    confidence = float(detection.get("confidence", 0.0))
+                    if language not in {"zh", "en"} or confidence <= 0:
+                        continue
+
+                    weight = max(0.2, round(confidence, 4))
+                    add_language_score(scores, language, weight)
+                    samples.append(
+                        {
+                            "offset_seconds": offset,
+                            "language": language,
+                            "confidence": round(confidence, 4),
+                            "text_preview": transcript["text"][:80],
+                        }
+                    )
+            finally:
+                for temp_file in temp_files:
+                    try:
+                        if os.path.exists(temp_file):
+                            os.remove(temp_file)
+                    except OSError:
+                        logger.debug("清理音频探测临时文件失败: %s", temp_file)
+
+            decision = decide_primary_language(
+                scores, min_total=0.2, min_margin=0.12, min_confidence=0.58
+            )
+            language = normalize_primary_language(decision.get("language"))
+            if language not in {"zh", "en"}:
+                return None
+
+            result = {
+                "language": language,
+                "confidence": float(decision.get("confidence", 0.0)),
+                "scores": decision.get("scores", {}),
+                "samples": samples,
+            }
+            logger.info("音频语言探测结果: %s", result)
+            return result
+
+        except Exception as e:
+            logger.warning(f"音频语言探测失败: {str(e)}")
             return None
 
     def _check_funasr_service(self) -> bool:

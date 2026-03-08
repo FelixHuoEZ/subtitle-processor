@@ -104,6 +104,8 @@ def start_video_processing(process_id):
         file_service.update_file_info(process_id, {
             'video_info': result['video_info'],
             'language': result['language'],
+            'language_details': result.get('language_details'),
+            'subtitle_metadata': result.get('subtitle_metadata'),
             'needs_transcription': result['needs_transcription'],
             'progress': 50,
             'updated_time': datetime.now().isoformat()

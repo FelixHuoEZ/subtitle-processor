@@ -15,7 +15,15 @@ import yt_dlp
 from yt_dlp.utils import DownloadError
 
 from ..config.config_manager import get_config_value
+from ..utils.language_detection import (
+    add_language_score,
+    blank_language_scores,
+    decide_primary_language,
+    detect_text_primary_language,
+    normalize_primary_language,
+)
 from ..utils.file_utils import sanitize_filename
+from .subtitle_service import SubtitleService
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +34,7 @@ class VideoService:
     def __init__(self):
         """初始化视频服务"""
         self.supported_platforms = ["youtube", "bilibili", "acfun"]
+        self.subtitle_service = SubtitleService()
         self.bgutil_provider_url = self._normalize_bgutil_url(
             os.getenv("BGUTIL_PROVIDER_URL", "http://bgutil-provider:4416")
         )
@@ -140,6 +149,215 @@ class VideoService:
             if candidate.startswith(prefix) or candidate.endswith(suffix):
                 return candidate
         return None
+
+    @staticmethod
+    def _normalize_language_code(language: Optional[str]) -> Optional[str]:
+        return normalize_primary_language(language)
+
+    def _collect_primary_languages(self, candidates: List[str]) -> List[str]:
+        detected = []
+        for language, priorities in (
+            ("zh", self._get_zh_language_priority()),
+            ("en", self._get_en_language_priority()),
+        ):
+            for candidate in priorities:
+                if self._language_available(candidate, candidates):
+                    detected.append(language)
+                    break
+        return detected
+
+    def _get_exclusive_language_hint(self, candidates: List[str]) -> Optional[str]:
+        detected = self._collect_primary_languages(candidates)
+        if len(detected) == 1:
+            return detected[0]
+        return None
+
+    def _build_language_details(
+        self,
+        language: Optional[str],
+        confidence: float,
+        scores: Dict[str, float],
+        signals: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        normalized = self._normalize_language_code(language) or language
+        return {
+            "language": normalized,
+            "confidence": round(float(confidence), 4),
+            "scores": {
+                key: round(float(value), 4)
+                for key, value in (scores or {}).items()
+                if key in {"zh", "en"}
+            },
+            "signals": signals,
+        }
+
+    def _infer_language_from_text(
+        self, text: str, source: str, max_weight: float
+    ) -> Optional[Dict[str, Any]]:
+        detection = detect_text_primary_language(text)
+        language = detection.get("language")
+        confidence = float(detection.get("confidence", 0.0))
+        if language not in {"zh", "en"}:
+            return None
+        weight = round(max_weight * confidence, 4)
+        if weight <= 0:
+            return None
+        return {
+            "language": language,
+            "weight": weight,
+            "source": source,
+            "confidence": confidence,
+            "stats": detection.get("stats", {}),
+        }
+
+    def get_video_language_details(
+        self,
+        info: Dict[str, Any],
+        subtitle_result: Optional[Dict[str, Any]] = None,
+        audio_result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Return the detected primary language with confidence and signals."""
+        try:
+            if not info:
+                return self._build_language_details(None, 0.0, {}, [])
+
+            scores = blank_language_scores()
+            signals: List[Dict[str, Any]] = []
+
+            raw_language = info.get("language")
+            normalized_language = self._normalize_language_code(raw_language)
+            if normalized_language in {"zh", "en"}:
+                add_language_score(scores, normalized_language, 0.55)
+                signals.append(
+                    {
+                        "source": "metadata.language",
+                        "language": normalized_language,
+                        "weight": 0.55,
+                        "value": raw_language,
+                    }
+                )
+            elif normalized_language and normalized_language not in {"mixed", "unknown"}:
+                return self._build_language_details(
+                    normalized_language,
+                    0.9,
+                    {"zh": 0.0, "en": 0.0},
+                    [
+                        {
+                            "source": "metadata.language",
+                            "language": normalized_language,
+                            "weight": 0.9,
+                            "value": raw_language,
+                        }
+                    ],
+                )
+
+            title = info.get("title", "") or ""
+            description = info.get("description", "") or ""
+            title_text = "\n".join([title, description[:600]]).strip()
+            title_hint = self._infer_language_from_text(
+                title_text, "metadata.text", max_weight=0.22
+            )
+            if title_hint:
+                add_language_score(
+                    scores, title_hint["language"], title_hint["weight"]
+                )
+                signals.append(title_hint)
+
+            auto_hint = self._get_exclusive_language_hint(
+                self._extract_languages(info.get("automatic_captions", {}))
+            )
+            if auto_hint in {"zh", "en"}:
+                add_language_score(scores, auto_hint, 0.3)
+                signals.append(
+                    {
+                        "source": "tracks.automatic_captions",
+                        "language": auto_hint,
+                        "weight": 0.3,
+                    }
+                )
+
+            subtitle_hint = self._get_exclusive_language_hint(
+                self._extract_languages(info.get("subtitles", {}))
+            )
+            if subtitle_hint in {"zh", "en"}:
+                add_language_score(scores, subtitle_hint, 0.1)
+                signals.append(
+                    {
+                        "source": "tracks.subtitles",
+                        "language": subtitle_hint,
+                        "weight": 0.1,
+                    }
+                )
+
+            if subtitle_result:
+                claimed_language = self._normalize_language_code(
+                    subtitle_result.get("matched_lang")
+                )
+                source_type = subtitle_result.get("source_type") or "subtitle"
+                if claimed_language in {"zh", "en"}:
+                    claimed_weight = 0.14 if source_type == "automatic_caption" else 0.06
+                    add_language_score(scores, claimed_language, claimed_weight)
+                    signals.append(
+                        {
+                            "source": f"subtitle.{source_type}.track",
+                            "language": claimed_language,
+                            "weight": claimed_weight,
+                            "value": subtitle_result.get("matched_lang"),
+                        }
+                    )
+
+                subtitle_text = subtitle_result.get("content") or ""
+                normalized_subtitle = (
+                    self.subtitle_service.normalize_external_subtitle_content(
+                        subtitle_text
+                    )
+                    or subtitle_text
+                )
+                subtitle_text_hint = self._infer_language_from_text(
+                    normalized_subtitle,
+                    f"subtitle.{source_type}.text",
+                    max_weight=0.45 if source_type == "automatic_caption" else 0.16,
+                )
+                if subtitle_text_hint:
+                    add_language_score(
+                        scores,
+                        subtitle_text_hint["language"],
+                        subtitle_text_hint["weight"],
+                    )
+                    signals.append(subtitle_text_hint)
+
+            if audio_result:
+                audio_language = self._normalize_language_code(
+                    audio_result.get("language")
+                )
+                audio_confidence = float(audio_result.get("confidence", 0.0))
+                if audio_language in {"zh", "en"} and audio_confidence > 0:
+                    audio_weight = round(min(0.85, 0.55 + audio_confidence * 0.3), 4)
+                    add_language_score(scores, audio_language, audio_weight)
+                    signals.append(
+                        {
+                            "source": "audio_probe",
+                            "language": audio_language,
+                            "weight": audio_weight,
+                            "confidence": audio_confidence,
+                        }
+                    )
+
+            decision = decide_primary_language(scores)
+            language = decision.get("language")
+            if language is None and normalized_language:
+                language = normalized_language
+
+            return self._build_language_details(
+                language,
+                decision.get("confidence", 0.0),
+                decision.get("scores", scores),
+                signals,
+            )
+
+        except Exception as e:
+            logger.error(f"检测视频语言详情时出错: {str(e)}")
+            return self._build_language_details(None, 0.0, {}, [])
 
     @staticmethod
     def _get_zh_language_priority() -> List[str]:
@@ -527,6 +745,22 @@ class VideoService:
             logger.error(f"获取AcFun视频信息失败: {str(e)}")
             return None
 
+    def _probe_audio_language(
+        self, audio_file: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        """Use the transcription service's lightweight probe when available."""
+        if not audio_file:
+            return None
+
+        try:
+            from .transcription_service import TranscriptionService
+
+            probe_service = TranscriptionService()
+            return probe_service.detect_audio_language(audio_file)
+        except Exception as e:
+            logger.warning(f"音频语言探测失败: {str(e)}")
+            return None
+
     def get_video_language(self, info: Dict[str, Any]) -> Optional[str]:
         """检测视频语言
 
@@ -537,56 +771,25 @@ class VideoService:
             str: 语言代码 ('zh', 'en', etc.) 或 None
         """
         try:
-            if not info:
-                return None
-
-            # 1. 优先使用视频信息中的语言字段
-            if "language" in info and info["language"]:
-                lang = info["language"].lower()
-                if lang.startswith("zh"):
-                    return "zh"
-                elif lang.startswith("en"):
-                    return "en"
-                else:
-                    return lang[:2]
-
-            # 2. 根据标题和描述中的字符特征判断
-            title = info.get("title", "")
-            description = info.get("description", "")
-            text_sample = (title + " " + description)[:500]  # 取前500字符作为样本
-
-            if not text_sample:
-                return None
-
-            # 统计中文字符数量
-            chinese_chars = len(re.findall(r"[\\u4e00-\\u9fff]", text_sample))
-            total_chars = len([c for c in text_sample if c.isalnum()])
-
-            if total_chars == 0:
-                return None
-
-            chinese_ratio = chinese_chars / total_chars
-
-            # 如果中文字符占比超过30%，认为是中文视频
-            if chinese_ratio > 0.3:
-                return "zh"
-            elif chinese_ratio < 0.1:
-                return "en"
-            else:
-                return "mixed"  # 混合语言
+            details = self.get_video_language_details(info)
+            return details.get("language")
 
         except Exception as e:
             logger.error(f"检测视频语言时出错: {str(e)}")
             return None
 
     def get_subtitle_strategy(
-        self, language: Optional[str], info: Dict[str, Any]
+        self,
+        language: Optional[str],
+        info: Dict[str, Any],
+        language_confidence: float = 0.0,
     ) -> Tuple[bool, List[str]]:
         """确定字幕获取策略
 
         Args:
             language: 检测到的视频语言
             info: 视频信息
+            language_confidence: 语言置信度
 
         Returns:
             tuple: (是否应该下载字幕, 语言优先级列表)
@@ -606,12 +809,31 @@ class VideoService:
             logger.info(f"可用字幕: {_summarize_languages(available_subtitles)}")
             logger.info(f"可用自动字幕: {_summarize_languages(available_auto)}")
 
-            if language == "zh":
+            auto_hint = self._get_exclusive_language_hint(available_auto)
+            subtitle_hint = self._get_exclusive_language_hint(available_subtitles)
+
+            if language == "zh" and language_confidence >= 0.6:
                 # 中文视频：优先中文字幕
                 lang_priority = self._get_zh_language_priority()
-            elif language == "en":
+            elif language == "en" and language_confidence >= 0.6:
                 # 英文视频：优先英文字幕
                 lang_priority = self._get_en_language_priority()
+            elif auto_hint == "zh":
+                logger.info("自动字幕轨道更偏向中文，优先下载中文字幕")
+                return True, self._get_zh_language_priority()
+            elif auto_hint == "en":
+                logger.info("自动字幕轨道更偏向英文，优先下载英文字幕")
+                return True, self._get_en_language_priority()
+            elif language == "zh":
+                lang_priority = self._get_zh_language_priority()
+            elif language == "en":
+                lang_priority = self._get_en_language_priority()
+            elif subtitle_hint == "zh":
+                logger.info("人工字幕轨道更偏向中文，优先下载中文字幕")
+                return True, self._get_zh_language_priority()
+            elif subtitle_hint == "en":
+                logger.info("人工字幕轨道更偏向英文，优先下载英文字幕")
+                return True, self._get_en_language_priority()
             else:
                 if self._has_language_subtitles(info, self._get_zh_language_priority()):
                     logger.info("检测到中文字幕，优先下载中文字幕")
@@ -1406,7 +1628,7 @@ class VideoService:
 
     def download_subtitles(
         self, url: str, platform: str, lang_priority: List[str]
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, Any]]:
         """下载字幕文件
 
         Args:
@@ -1415,7 +1637,7 @@ class VideoService:
             lang_priority: 语言优先级列表
 
         Returns:
-            str: 字幕内容，失败返回None
+            dict: 字幕内容及其元数据，失败返回None
         """
         try:
             logger.info(f"开始下载{platform}字幕: {url}")
@@ -1436,7 +1658,7 @@ class VideoService:
 
     def download_youtube_subtitles(
         self, url: str, lang_priority: List[str]
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, Any]]:
         """下载YouTube字幕"""
         try:
             # 添加率限制防止IP被封
@@ -1455,16 +1677,22 @@ class VideoService:
                     matched_lang = self._match_language_key(lang, subtitle_keys)
                     if matched_lang:
                         logger.info(f"找到{matched_lang}人工字幕")
-                        return self._extract_subtitle_content(
+                        subtitle_result = self._extract_subtitle_content(
                             available_subtitles[matched_lang]
+                        )
+                        return self._build_subtitle_result(
+                            subtitle_result, matched_lang, "subtitle"
                         )
 
                     # 如果没有人工字幕，使用自动字幕
                     matched_lang = self._match_language_key(lang, auto_keys)
                     if matched_lang:
                         logger.info(f"找到{matched_lang}自动字幕")
-                        return self._extract_subtitle_content(
+                        subtitle_result = self._extract_subtitle_content(
                             available_auto[matched_lang]
+                        )
+                        return self._build_subtitle_result(
+                            subtitle_result, matched_lang, "automatic_caption"
                         )
 
                 logger.warning("未找到匹配语言的字幕")
@@ -1476,7 +1704,7 @@ class VideoService:
 
     def download_bilibili_subtitles(
         self, url: str, lang_priority: List[str]
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, Any]]:
         """下载Bilibili字幕"""
         try:
             opts = self._get_yt_dlp_opts_for_platform("bilibili", url)
@@ -1491,16 +1719,22 @@ class VideoService:
                     matched_lang = self._match_language_key(lang, subtitle_keys)
                     if matched_lang:
                         logger.info(f"找到{matched_lang}字幕")
-                        return self._extract_subtitle_content(
+                        subtitle_result = self._extract_subtitle_content(
                             available_subtitles[matched_lang]
+                        )
+                        return self._build_subtitle_result(
+                            subtitle_result, matched_lang, "subtitle"
                         )
 
                 # 如果没有指定语言，尝试任何可用的字幕
                 if available_subtitles:
                     first_lang = list(available_subtitles.keys())[0]
                     logger.info(f"使用第一个可用字幕: {first_lang}")
-                    return self._extract_subtitle_content(
+                    subtitle_result = self._extract_subtitle_content(
                         available_subtitles[first_lang]
+                    )
+                    return self._build_subtitle_result(
+                        subtitle_result, first_lang, "subtitle"
                     )
 
                 logger.warning("未找到Bilibili字幕")
@@ -1512,7 +1746,7 @@ class VideoService:
 
     def download_acfun_subtitles(
         self, url: str, lang_priority: List[str]
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, Any]]:
         """下载AcFun字幕"""
         try:
             opts = self._get_yt_dlp_opts_for_platform("acfun", url)
@@ -1527,16 +1761,22 @@ class VideoService:
                     matched_lang = self._match_language_key(lang, subtitle_keys)
                     if matched_lang:
                         logger.info(f"找到{matched_lang}字幕")
-                        return self._extract_subtitle_content(
+                        subtitle_result = self._extract_subtitle_content(
                             available_subtitles[matched_lang]
+                        )
+                        return self._build_subtitle_result(
+                            subtitle_result, matched_lang, "subtitle"
                         )
 
                 # 如果没有指定语言，尝试任何可用的字幕
                 if available_subtitles:
                     first_lang = list(available_subtitles.keys())[0]
                     logger.info(f"使用第一个可用字幕: {first_lang}")
-                    return self._extract_subtitle_content(
+                    subtitle_result = self._extract_subtitle_content(
                         available_subtitles[first_lang]
+                    )
+                    return self._build_subtitle_result(
+                        subtitle_result, first_lang, "subtitle"
                     )
 
                 logger.warning("未找到AcFun字幕")
@@ -1548,7 +1788,7 @@ class VideoService:
 
     def _extract_subtitle_content(
         self, subtitle_formats: List[Dict[str, Any]]
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, Any]]:
         """从字幕格式列表中提取内容"""
         try:
             # 按优先级尝试不同格式
@@ -1562,7 +1802,11 @@ class VideoService:
                             logger.info(f"下载{format_name}格式字幕: {subtitle_url}")
                             response = requests.get(subtitle_url, timeout=30)
                             if response.status_code == 200:
-                                return response.text
+                                return {
+                                    "content": response.text,
+                                    "format": format_name,
+                                    "url": subtitle_url,
+                                }
 
             # 如果没有找到优先格式，使用第一个可用的
             if subtitle_formats:
@@ -1572,7 +1816,11 @@ class VideoService:
                     logger.info(f"使用第一个可用格式: {first_format.get('ext')}")
                     response = requests.get(subtitle_url, timeout=30)
                     if response.status_code == 200:
-                        return response.text
+                        return {
+                            "content": response.text,
+                            "format": first_format.get("ext"),
+                            "url": subtitle_url,
+                        }
 
             logger.warning("无法提取字幕内容")
             return None
@@ -1580,6 +1828,22 @@ class VideoService:
         except Exception as e:
             logger.error(f"提取字幕内容失败: {str(e)}")
             return None
+
+    @staticmethod
+    def _build_subtitle_result(
+        subtitle_payload: Optional[Dict[str, Any]],
+        matched_lang: Optional[str],
+        source_type: str,
+    ) -> Optional[Dict[str, Any]]:
+        if not subtitle_payload or not subtitle_payload.get("content"):
+            return None
+        return {
+            "content": subtitle_payload.get("content"),
+            "format": subtitle_payload.get("format"),
+            "url": subtitle_payload.get("url"),
+            "matched_lang": matched_lang,
+            "source_type": source_type,
+        }
 
     def _process_video_for_transcription_with_url(
         self, url: str, platform: str
@@ -1594,9 +1858,10 @@ class VideoService:
             return None
 
         # 2. 检测语言和字幕策略
-        language = self.get_video_language(video_info)
+        language_details = self.get_video_language_details(video_info)
+        language = language_details.get("language")
         should_download_subs, lang_priority = self.get_subtitle_strategy(
-            language, video_info
+            language, video_info, language_details.get("confidence", 0.0)
         )
 
         if self._should_clip_url_only(video_info):
@@ -1604,7 +1869,9 @@ class VideoService:
             return {
                 "video_info": video_info,
                 "language": language,
+                "language_details": language_details,
                 "subtitle_content": None,
+                "subtitle_metadata": None,
                 "audio_file": None,
                 "needs_transcription": False,
                 "readwise_url_only": True,
@@ -1612,19 +1879,47 @@ class VideoService:
 
         # 3. 尝试下载字幕
         subtitle_content = None
+        subtitle_metadata = None
         if should_download_subs:
-            subtitle_content = self.download_subtitles(url, platform, lang_priority)
+            subtitle_metadata = self.download_subtitles(url, platform, lang_priority)
+            if subtitle_metadata:
+                subtitle_content = subtitle_metadata.get("content")
+                refined_details = self.get_video_language_details(
+                    video_info, subtitle_result=subtitle_metadata
+                )
+                if (
+                    refined_details.get("confidence", 0.0)
+                    >= language_details.get("confidence", 0.0)
+                    or language in {None, "mixed"}
+                ):
+                    language_details = refined_details
+                    language = language_details.get("language")
 
         # 4. 如果没有字幕，下载音频用于转录
         audio_file = None
         if not subtitle_content:
             logger.info("未找到字幕，开始下载音频用于转录")
             audio_file = self.download_video(url, platform=platform)
+            if audio_file:
+                audio_probe = self._probe_audio_language(audio_file)
+                if audio_probe:
+                    refined_details = self.get_video_language_details(
+                        video_info, audio_result=audio_probe
+                    )
+                    if (
+                        refined_details.get("confidence", 0.0)
+                        >= language_details.get("confidence", 0.0)
+                        or language in {None, "mixed"}
+                    ):
+                        language_details = refined_details
+                        language = language_details.get("language")
 
         return {
             "video_info": video_info,
             "language": language,
+            "language_details": language_details,
             "subtitle_content": subtitle_content,
+            "subtitle_metadata": subtitle_metadata,
             "audio_file": audio_file,
             "needs_transcription": subtitle_content is None,
         }

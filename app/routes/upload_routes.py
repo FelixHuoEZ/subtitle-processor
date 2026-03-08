@@ -376,7 +376,9 @@ def _process_video_task(task_info, auto_transcribe):
         if result:
             task_info["video_info"] = result.get("video_info", {})
             task_info["language"] = result.get("language")
+            task_info["language_details"] = result.get("language_details")
             task_info["subtitle_content"] = result.get("subtitle_content")
+            task_info["subtitle_metadata"] = result.get("subtitle_metadata")
             task_info["audio_file"] = result.get("audio_file")
             task_info["needs_transcription"] = result.get("needs_transcription", False)
             task_info["readwise_url_only"] = result.get("readwise_url_only", False)
