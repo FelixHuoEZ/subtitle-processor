@@ -261,17 +261,33 @@
 
     function extractVideoId(url) {
         // YouTube
-        var match = url.match(/[?&]v=([^&]+)/);
-        if (match) {
-            return { platform: "youtube", id: match[1] };
-        }
-        match = url.match(/youtu\.be\/([^?]+)/);
-        if (match) {
-            return { platform: "youtube", id: match[1] };
+        try {
+            var normalizedUrl = url.includes("://") ? url : "https://" + url;
+            var parsed = new URL(normalizedUrl);
+            var host = parsed.hostname.toLowerCase();
+            var pathParts = parsed.pathname.split("/").filter(Boolean);
+            var videoId = null;
+
+            if (host === "youtu.be") {
+                videoId = pathParts[0] || null;
+            } else if (host === "youtube.com" || host.endsWith(".youtube.com")) {
+                videoId = parsed.searchParams.get("v");
+                if (!videoId && pathParts.length >= 2) {
+                    if (["shorts", "live", "embed", "v"].includes(pathParts[0])) {
+                        videoId = pathParts[1];
+                    }
+                }
+            }
+
+            if (videoId) {
+                return { platform: "youtube", id: videoId };
+            }
+        } catch (error) {
+            // ignore malformed URLs and continue with other platforms
         }
 
         // Bilibili
-        match = url.match(/bilibili\.com\/video\/(BV[\w]+)/);
+        var match = url.match(/bilibili\.com\/video\/(BV[\w]+)/);
         if (match) {
             return { platform: "bilibili", id: match[1] };
         }

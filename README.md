@@ -10,7 +10,7 @@
 - Telegram 机器人增加标签/热词交互提示、`/skip` 快捷命令，并在后台轮询 `/process/status/<id>` 自动推送字幕文件。
 - `scripts/build-and-push.sh` 新增 `bgutil-provider` 镜像构建；默认 Dockerfile 仅保留必需依赖，X11/VNC 相关组件以注释形式保留，构建镜像更轻量。
 - 后端提供 `/process/status/<id>?include_content=1` 以及 `/process/status/<id>/subtitle`，方便外部查询任务进度与字幕原文。
-- YouTube live URLs are normalized to `watch?v=` with fallback to the live URL if needed.
+- YouTube alternate URLs (`/shorts/<id>`, `/live/<id>`, `youtu.be/<id>`, `/embed/<id>`, `/v/<id>`) are normalized to `watch?v=` with fallback to the original URL if needed.
 - Download concurrency + 403 backoff retries are configurable, and transcription concurrency can be capped.
 - Optional Readwise URL-only clipping when Chinese subtitles are available (`READWISE_URL_ONLY_WHEN_ZH_SUBS`).
 
@@ -23,7 +23,7 @@ A comprehensive subtitle processing service that automatically downloads, transc
 ### 🚀 Features
 - **Multi-Platform Support**
   - YouTube video subtitle extraction
-  - YouTube live links (`/live/<id>`) normalized with fallback
+  - YouTube alternate links (`/shorts/<id>`, `/live/<id>`, `youtu.be/<id>`, `/embed/<id>`, `/v/<id>`) normalized with fallback
   - Member-only/age-restricted YouTube videos with your own cookies/profile
   - Bilibili video subtitle processing
   - Automatic fallback to audio transcription
@@ -178,14 +178,14 @@ Special thanks to:
 - Telegram Webhook 立即返回，并将字幕处理放到后台执行，避免因为重试导致的重复回复。
 - Telegram 部署改为“单入口 + 多工作节点”模式，避免同一条消息被多个 bot 实例重复回复。
 - 文档补充镜像分发与 `.env` 覆盖指引，便于多机器快速上线。
-- 支持将 YouTube `live/<id>` 链接自动转换为 `watch?v=`，必要时回退直连直播 URL。
+- 支持将 YouTube `shorts/<id>`、`live/<id>`、`youtu.be/<id>`、`embed/<id>`、`v/<id>` 等链接自动转换为 `watch?v=`，必要时回退原始 URL。
 - 下载并发 + 403 退避重试可配置，转录并发可选限制。
 - 可选：检测到中文字幕时直接剪藏 URL 到 Readwise（`READWISE_URL_ONLY_WHEN_ZH_SUBS`）。
 
 ### 🚀 功能特点
 - **多平台支持**
   - YouTube 视频字幕提取
-  - YouTube `live/<id>` 链接自动规范化并提供回退策略
+  - YouTube `shorts/<id>`、`live/<id>`、`youtu.be/<id>`、`embed/<id>`、`v/<id>` 链接自动规范化并提供回退策略
   - 支持会员/受限 YouTube 视频（需使用自己的 cookies/profile）
   - Bilibili 视频字幕处理
   - 自动音频转录备选方案
