@@ -16,6 +16,7 @@ from yt_dlp.utils import DownloadError
 
 from ..config.config_manager import get_config_value
 from ..utils.file_utils import sanitize_filename
+from ..utils.video_utils import extract_youtube_video_id, normalize_youtube_watch_url
 
 logger = logging.getLogger(__name__)
 
@@ -639,14 +640,8 @@ class VideoService:
     def convert_youtube_url(self, url: str) -> str:
         """将YouTube URL转换为自定义domain"""
         try:
-            # 处理不同格式的YouTube URL
-            if "youtu.be/" in url:
-                # 短链接格式
-                video_id = url.split("youtu.be/")[-1].split("?")[0]
-            elif "youtube.com/watch?v=" in url:
-                # 标准格式
-                video_id = url.split("v=")[1].split("&")[0]
-            else:
+            video_id = extract_youtube_video_id(url)
+            if not video_id:
                 return url  # 如果不是YouTube URL，直接返回
 
             # 获取自定义域名配置
@@ -659,25 +654,12 @@ class VideoService:
             logger.error(f"转换YouTube URL时出错: {str(e)}")
             return url
 
-    def _normalize_youtube_live_url(self, url: str) -> Optional[str]:
-        """将YouTube live URL转换为标准 watch URL。"""
+    def _normalize_youtube_watch_url(self, url: str) -> Optional[str]:
+        """将YouTube短链或特殊页面URL转换为标准 watch URL。"""
         try:
-            parsed = urlparse(url)
-            host = (parsed.netloc or "").lower()
-            if "youtube.com" not in host and "youtu.be" not in host:
-                return None
-
-            path_parts = [part for part in (parsed.path or "").split("/") if part]
-            if len(path_parts) < 2 or path_parts[0] != "live":
-                return None
-
-            video_id = path_parts[1].strip()
-            if not video_id:
-                return None
-
-            return f"https://www.youtube.com/watch?v={video_id}"
+            return normalize_youtube_watch_url(url)
         except Exception as e:
-            logger.warning(f"解析YouTube live URL失败: {str(e)}")
+            logger.warning(f"解析YouTube URL失败: {str(e)}")
             return None
 
     def download_video(
@@ -748,14 +730,7 @@ class VideoService:
             if info:
                 expected_video_id = info.get("id")
             else:
-                # 尝试从URL中提取视频ID
-                try:
-                    if "youtu.be/" in url:
-                        expected_video_id = url.split("youtu.be/")[-1].split("?")[0]
-                    elif "youtube.com/watch?v=" in url:
-                        expected_video_id = url.split("v=")[1].split("&")[0]
-                except:
-                    pass
+                expected_video_id = extract_youtube_video_id(url)
 
             logger.info(f"预期视频ID: {expected_video_id}")
 
@@ -1643,10 +1618,10 @@ class VideoService:
         """
         try:
             if platform == "youtube":
-                normalized_url = self._normalize_youtube_live_url(url)
+                normalized_url = self._normalize_youtube_watch_url(url)
                 if normalized_url and normalized_url != url:
                     logger.info(
-                        "检测到YouTube直播链接，先尝试标准URL: %s", normalized_url
+                        "检测到YouTube非标准链接，先尝试标准URL: %s", normalized_url
                     )
                     primary_result = self._process_video_for_transcription_with_url(
                         normalized_url, platform
@@ -1657,7 +1632,7 @@ class VideoService:
                         and not primary_result.get("readwise_url_only")
                     )
                     if needs_fallback:
-                        logger.warning("标准URL处理失败，回退使用直播URL: %s", url)
+                        logger.warning("标准URL处理失败，回退使用原始URL: %s", url)
                         fallback_result = (
                             self._process_video_for_transcription_with_url(
                                 url, platform
