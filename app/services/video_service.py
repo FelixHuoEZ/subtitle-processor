@@ -1065,6 +1065,130 @@ class VideoService:
 
         self._cleanup_task_temp_dir(temp_dir)
 
+    @staticmethod
+    def _safe_float(value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _build_dynamic_format_attempts(
+        self, info: Optional[Dict[str, Any]]
+    ) -> List[Dict[str, Optional[str]]]:
+        """基于 extract_info 返回的格式列表生成更贴近实际可用流的尝试顺序。"""
+        if not isinstance(info, dict):
+            return []
+
+        formats = info.get("formats") or []
+        if not isinstance(formats, list):
+            return []
+
+        audio_candidates = []
+        muxed_candidates = []
+        for fmt in formats:
+            if not isinstance(fmt, dict):
+                continue
+            format_id = str(fmt.get("format_id") or "").strip()
+            if not format_id:
+                continue
+            acodec = fmt.get("acodec")
+            if not acodec or acodec == "none":
+                continue
+
+            ext = str(fmt.get("ext") or "").lower()
+            bitrate = max(
+                self._safe_float(fmt.get("abr")),
+                self._safe_float(fmt.get("tbr")),
+            )
+            vcodec = fmt.get("vcodec")
+            if vcodec == "none":
+                ext_score = {
+                    "m4a": 5,
+                    "mp3": 4,
+                    "aac": 3,
+                    "webm": 2,
+                    "opus": 1,
+                }.get(ext, 0)
+                audio_candidates.append(
+                    (
+                        ext_score,
+                        bitrate,
+                        format_id,
+                        f"音频 format_id={format_id} ({ext or 'unknown'})",
+                    )
+                )
+                continue
+
+            height = self._safe_float(fmt.get("height"))
+            within_target = 1 if height and height <= 720 else 0
+            muxed_candidates.append(
+                (
+                    within_target,
+                    -abs(height - 720) if height else -9999,
+                    bitrate,
+                    format_id,
+                    f"视频 format_id={format_id} ({ext or 'unknown'})",
+                )
+            )
+
+        attempts: List[Dict[str, Optional[str]]] = []
+        seen = set()
+        for _, _, format_id, desc in sorted(audio_candidates, reverse=True)[:3]:
+            if format_id in seen:
+                continue
+            attempts.append({"format": format_id, "desc": desc})
+            seen.add(format_id)
+
+        for _, _, _, format_id, desc in sorted(muxed_candidates, reverse=True)[:2]:
+            if format_id in seen:
+                continue
+            attempts.append({"format": format_id, "desc": desc})
+            seen.add(format_id)
+
+        return attempts
+
+    def _build_download_format_attempts(
+        self, info: Optional[Dict[str, Any]]
+    ) -> List[Dict[str, Optional[str]]]:
+        """构建格式尝试顺序，优先保留 yt-dlp 默认行为，再回退到显式 selector。"""
+        attempts: List[Dict[str, Optional[str]]] = [
+            {
+                "format": None,
+                "desc": "保留 profile 默认格式选择",
+            },
+            {
+                "format": "bestaudio/best",
+                "desc": "通用最佳音频/视频回退",
+            },
+        ]
+        attempts.extend(self._build_dynamic_format_attempts(info))
+        attempts.extend(
+            [
+                {
+                    "format": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio",
+                    "desc": "最佳音频格式",
+                },
+                {
+                    "format": "worst[height<=480]/worst",
+                    "desc": "低质量视频（提取音频）",
+                },
+                {
+                    "format": "best[height<=720]/best",
+                    "desc": "中等质量视频（提取音频）",
+                },
+            ]
+        )
+
+        deduped_attempts = []
+        seen_formats = set()
+        for attempt in attempts:
+            format_value = attempt.get("format")
+            if format_value in seen_formats:
+                continue
+            deduped_attempts.append(attempt)
+            seen_formats.add(format_value)
+        return deduped_attempts
+
     def download_video(
         self,
         url: str,
@@ -1137,21 +1261,7 @@ class VideoService:
 
             logger.info(f"预期视频ID: {expected_video_id}")
 
-            # 按优先级尝试不同的格式
-            format_attempts = [
-                {
-                    "format": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio",
-                    "desc": "最佳音频格式",
-                },
-                {
-                    "format": "worst[height<=480]/worst",
-                    "desc": "低质量视频（提取音频）",
-                },
-                {
-                    "format": "best[height<=720]/best",
-                    "desc": "中等质量视频（提取音频）",
-                },
-            ]
+            format_attempts = self._build_download_format_attempts(info)
 
             downloaded_file = None
             download_errors = []
@@ -1172,7 +1282,9 @@ class VideoService:
                             time.sleep(3)
                             before_files = set(os.listdir(temp_dir))
                             opts = deepcopy(base_opts)
-                            opts["format"] = format_attempt["format"]
+                            selected_format = format_attempt.get("format")
+                            if selected_format is not None:
+                                opts["format"] = selected_format
 
                             with yt_dlp.YoutubeDL(opts) as ydl:
                                 ydl.download([url])
