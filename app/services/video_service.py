@@ -58,6 +58,9 @@ class VideoService:
             self.download_retry_base_delay,
             float(os.getenv("DOWNLOAD_RETRY_MAX_DELAY", "30")),
         )
+        self.youtube_download_probe_enabled = self._parse_bool_env(
+            "YOUTUBE_DOWNLOAD_PROBE", False
+        )
         self.readwise_url_only_when_zh_subs = self._parse_bool_env(
             "READWISE_URL_ONLY_WHEN_ZH_SUBS", False
         )
@@ -68,6 +71,9 @@ class VideoService:
             self.download_retry_base_delay,
             self.download_retry_backoff,
             self.download_retry_max_delay,
+        )
+        logger.info(
+            "YouTube 下载前额外信息探测: %s", self.youtube_download_probe_enabled
         )
         logger.info(
             "Readwise URL剪藏开关(中文字幕): %s", self.readwise_url_only_when_zh_subs
@@ -622,6 +628,12 @@ class VideoService:
         )
         return profiles
 
+    def _should_probe_download_info(self, platform: Optional[str]) -> bool:
+        resolved_platform = platform or "youtube"
+        if resolved_platform != "youtube":
+            return True
+        return bool(getattr(self, "youtube_download_probe_enabled", False))
+
     @staticmethod
     def _normalize_download_error_text(message: Any) -> Optional[str]:
         if message is None:
@@ -645,10 +657,19 @@ class VideoService:
                 "YouTube 音频下载失败：PO Token 获取失败，请检查 bgutil provider "
                 "是否可用，并确认 cookies 仍有效"
             )
+        if (
+            "sign in to confirm" in combined
+            or "not a bot" in combined
+            or "cookies-from-browser or --cookies" in combined
+        ):
+            return (
+                "YouTube 音频下载失败：YouTube 要求登录验证或 bot 校验，"
+                "请检查 cookies 是否仍有效，并升级 yt-dlp / yt-dlp-ejs"
+            )
         if "n challenge" in combined:
             return (
                 "YouTube 音频下载失败：JS challenge 解析失败，请确认 Deno / "
-                "yt-dlp-ejs 可用，并检查 cookies 配置"
+                "yt-dlp-ejs 可用，并建议升级 yt-dlp / yt-dlp-ejs"
             )
         if (
             "http error 403" in combined
@@ -659,8 +680,16 @@ class VideoService:
                 "YouTube 音频下载失败：媒体流返回 HTTP 403，请检查 cookies 是否有效，"
                 "或确认 bgutil provider / JS challenge solver 是否正常"
             )
+        if "only images are available" in combined:
+            return (
+                "YouTube 音频下载失败：未获取到可下载媒体流，可能被 bot / "
+                "JS challenge 拦截，请检查 cookies，并升级 yt-dlp / yt-dlp-ejs"
+            )
         if "requested format is not available" in combined:
-            return "YouTube 音频下载失败：当前没有可用的下载格式，请稍后重试或更新 yt-dlp"
+            return (
+                "YouTube 音频下载失败：当前未解析到可下载格式，"
+                "请检查 cookies，并升级 yt-dlp / yt-dlp-ejs"
+            )
 
         return normalized_errors[-1][:240]
 
@@ -1148,7 +1177,7 @@ class VideoService:
         return attempts
 
     def _build_download_format_attempts(
-        self, info: Optional[Dict[str, Any]]
+        self, info: Optional[Dict[str, Any]], platform: Optional[str] = None
     ) -> List[Dict[str, Optional[str]]]:
         """构建格式尝试顺序，优先保留 yt-dlp 默认行为，再回退到显式 selector。"""
         attempts: List[Dict[str, Optional[str]]] = [
@@ -1162,6 +1191,31 @@ class VideoService:
             },
         ]
         attempts.extend(self._build_dynamic_format_attempts(info))
+        if (platform or "youtube") == "youtube":
+            attempts.extend(
+                [
+                    {
+                        "format": "140",
+                        "desc": "常见 m4a 音频格式",
+                    },
+                    {
+                        "format": "251",
+                        "desc": "常见 opus 音频格式",
+                    },
+                    {
+                        "format": "250",
+                        "desc": "常见低码率 opus 音频格式",
+                    },
+                    {
+                        "format": "249",
+                        "desc": "常见低码率 webm 音频格式",
+                    },
+                    {
+                        "format": "18",
+                        "desc": "常见 360p 混流格式（提取音频）",
+                    },
+                ]
+            )
         attempts.extend(
             [
                 {
@@ -1216,41 +1270,48 @@ class VideoService:
         try:
             temp_dir = self._prepare_task_temp_dir(output_folder)
             logger.info(f"开始下载视频: {url}")
+            resolved_platform = platform or "youtube"
             download_profiles = self._build_download_option_profiles(
-                temp_dir, platform, url
+                temp_dir, resolved_platform, url
             )
 
-            # 先尝试检查视频信息
             info = None
-            for profile in download_profiles:
-                try:
-                    time.sleep(2)
-                    info_opts = deepcopy(profile["opts"])
-                    info_opts.pop("outtmpl", None)
-                    info_opts.pop("format", None)
-                    with yt_dlp.YoutubeDL(info_opts) as ydl:
-                        info = ydl.extract_info(url, download=False)
-                        logger.info(
-                            "使用%s获取视频信息成功: %s",
-                            profile["desc"],
-                            info.get("title"),
-                        )
-                        if info.get("age_limit", 0) > 0:
-                            logger.info(f"视频有年龄限制: {info.get('age_limit')}+")
-                        if info.get("is_live", False):
-                            logger.info("这是一个直播视频")
-                        if info.get("availability", "") != "public":
+            if self._should_probe_download_info(resolved_platform):
+                # 对非 YouTube 平台保留下载前探测；YouTube 默认跳过，避免额外请求触发风控。
+                for profile in download_profiles:
+                    try:
+                        time.sleep(2)
+                        info_opts = deepcopy(profile["opts"])
+                        info_opts.pop("outtmpl", None)
+                        info_opts.pop("format", None)
+                        with yt_dlp.YoutubeDL(info_opts) as ydl:
+                            info = ydl.extract_info(url, download=False)
                             logger.info(
-                                f"视频可用性: {info.get('availability', 'unknown')}"
+                                "使用%s获取视频信息成功: %s",
+                                profile["desc"],
+                                info.get("title"),
                             )
-                        break
-                except Exception as e:
-                    logger.info(
-                        "使用%s获取视频信息失败，尝试下一组参数: %s",
-                        profile["desc"],
-                        str(e),
-                    )
-                    info = None
+                            if info.get("age_limit", 0) > 0:
+                                logger.info(f"视频有年龄限制: {info.get('age_limit')}+")
+                            if info.get("is_live", False):
+                                logger.info("这是一个直播视频")
+                            if info.get("availability", "") != "public":
+                                logger.info(
+                                    f"视频可用性: {info.get('availability', 'unknown')}"
+                                )
+                            break
+                    except Exception as e:
+                        logger.info(
+                            "使用%s获取视频信息失败，尝试下一组参数: %s",
+                            profile["desc"],
+                            str(e),
+                        )
+                        info = None
+            else:
+                logger.info(
+                    "跳过 YouTube 下载前的额外信息探测，直接进入下载回退流程: %s",
+                    url,
+                )
 
             # 记录预期的视频ID（用于后续文件查找）
             expected_video_id = None
@@ -1261,7 +1322,9 @@ class VideoService:
 
             logger.info(f"预期视频ID: {expected_video_id}")
 
-            format_attempts = self._build_download_format_attempts(info)
+            format_attempts = self._build_download_format_attempts(
+                info, resolved_platform
+            )
 
             downloaded_file = None
             download_errors = []
