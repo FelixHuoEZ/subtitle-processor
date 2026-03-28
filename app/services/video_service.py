@@ -32,6 +32,27 @@ from .subtitle_service import SubtitleService
 logger = logging.getLogger(__name__)
 
 
+class _YtDlpLogger:
+    """Bridge yt-dlp messages into app logging and optional in-memory capture."""
+
+    def __init__(self, warning_sink: Optional[List[str]] = None):
+        self.warning_sink = warning_sink
+
+    def debug(self, msg):
+        # Ignore yt-dlp debug spam in normal app logs.
+        pass
+
+    def warning(self, msg):
+        logger.warning(msg)
+        if self.warning_sink is not None:
+            self.warning_sink.append(str(msg))
+
+    def error(self, msg):
+        logger.error(msg)
+        if self.warning_sink is not None:
+            self.warning_sink.append(str(msg))
+
+
 class VideoService:
     """视频处理服务 - 支持YouTube、Bilibili、AcFun等平台"""
 
@@ -398,20 +419,8 @@ class VideoService:
         """设置yt-dlp默认选项"""
         player_clients = self._get_youtube_player_clients()
 
-        # 自定义日志处理器
-        class QuietLogger:
-            def debug(self, msg):
-                # 忽略调试信息
-                pass
-
-            def warning(self, msg):
-                logger.warning(msg)
-
-            def error(self, msg):
-                logger.error(msg)
-
         base_opts = {
-            "logger": QuietLogger(),
+            "logger": _YtDlpLogger(),
             "quiet": True,
             "no_warnings": True,
             "cachedir": False,
@@ -641,7 +650,39 @@ class VideoService:
         normalized = " ".join(str(message).split()).strip()
         return normalized or None
 
-    def _summarize_download_errors(self, errors: List[str]) -> str:
+    @staticmethod
+    def _collect_relevant_ytdlp_messages(messages: List[str]) -> List[str]:
+        relevant_signals = (
+            "only images are available",
+            "requested format is not available",
+            "n challenge",
+            "js challenge",
+            "sign in to confirm",
+            "not a bot",
+            "po token",
+            "bgutil",
+            "members-only",
+            "available to this channel's members",
+            "join this channel to get access",
+            "missing a url",
+            "sabr",
+        )
+        captured = []
+        seen = set()
+        for message in messages:
+            normalized = VideoService._normalize_download_error_text(message)
+            if not normalized:
+                continue
+            lowered = normalized.lower()
+            if any(signal in lowered for signal in relevant_signals):
+                if normalized not in seen:
+                    seen.add(normalized)
+                    captured.append(normalized)
+        return captured
+
+    def _summarize_download_errors(
+        self, errors: List[str], used_cookie_auth: bool = False
+    ) -> str:
         normalized_errors = []
         for error in errors:
             normalized = self._normalize_download_error_text(error)
@@ -652,10 +693,29 @@ class VideoService:
             return "音频下载失败"
 
         combined = " ".join(normalized_errors).lower()
+        if used_cookie_auth and (
+            ("only images are available" in combined or "requested format is not available" in combined)
+            and ("n challenge" in combined or "js challenge" in combined or "sabr" in combined)
+        ):
+            return (
+                "YouTube 音频下载失败：已使用登录态 cookies，但当前视频的媒体流仍被 "
+                "YouTube 的 SABR / JS challenge 限制，未返回可下载音频格式；"
+                "请升级 yt-dlp / yt-dlp-ejs，并考虑重新导出 cookies"
+            )
         if "po token" in combined or "bgutil" in combined:
             return (
                 "YouTube 音频下载失败：PO Token 获取失败，请检查 bgutil provider "
                 "是否可用，并确认 cookies 仍有效"
+            )
+        if (
+            "available to this channel's members" in combined
+            or "members-only content" in combined
+            or "members on level" in combined
+            or "join this channel to get access" in combined
+        ):
+            return (
+                "YouTube 音频下载失败：该视频为频道会员专属内容，"
+                "当前 cookies 没有可用的会员访问权限"
             )
         if (
             "sign in to confirm" in combined
@@ -692,6 +752,25 @@ class VideoService:
             )
 
         return normalized_errors[-1][:240]
+
+    @staticmethod
+    def _is_terminal_youtube_download_error(message: Optional[str]) -> bool:
+        normalized = " ".join(str(message or "").split()).lower()
+        if not normalized:
+            return False
+
+        terminal_signals = (
+            "频道会员专属",
+            "available to this channel's members",
+            "members-only content",
+            "members on level",
+            "join this channel to get access",
+            "private video",
+            "this video is private",
+            "video unavailable",
+            "age-restricted",
+        )
+        return any(signal in normalized for signal in terminal_signals)
 
     def _configure_cookie_support(self, base_opts: Dict[str, Any]) -> None:
         """为yt-dlp配置cookie，优先使用显式配置"""
@@ -1328,6 +1407,10 @@ class VideoService:
 
             downloaded_file = None
             download_errors = []
+            used_cookie_auth = any(
+                "cookiefile" in profile["opts"] or "cookiesfrombrowser" in profile["opts"]
+                for profile in download_profiles
+            )
             retry_limit = max(0, self.download_retry_max)
             for profile in download_profiles:
                 profile_desc = profile["desc"]
@@ -1345,6 +1428,8 @@ class VideoService:
                             time.sleep(3)
                             before_files = set(os.listdir(temp_dir))
                             opts = deepcopy(base_opts)
+                            attempt_messages: List[str] = []
+                            opts["logger"] = _YtDlpLogger(attempt_messages)
                             selected_format = format_attempt.get("format")
                             if selected_format is not None:
                                 opts["format"] = selected_format
@@ -1376,6 +1461,12 @@ class VideoService:
                             break
 
                         except DownloadError as e:
+                            for message in self._collect_relevant_ytdlp_messages(
+                                attempt_messages
+                            ):
+                                download_errors.append(
+                                    f"{profile_desc} / {format_attempt['desc']}: {message}"
+                                )
                             download_errors.append(
                                 f"{profile_desc} / {format_attempt['desc']}: {str(e)}"
                             )
@@ -1400,6 +1491,12 @@ class VideoService:
                             )
                             break
                         except Exception as e:
+                            for message in self._collect_relevant_ytdlp_messages(
+                                attempt_messages
+                            ):
+                                download_errors.append(
+                                    f"{profile_desc} / {format_attempt['desc']}: {message}"
+                                )
                             download_errors.append(
                                 f"{profile_desc} / {format_attempt['desc']}: {str(e)}"
                             )
@@ -1431,7 +1528,9 @@ class VideoService:
                     break
 
             if not downloaded_file:
-                summarized_error = self._summarize_download_errors(download_errors)
+                summarized_error = self._summarize_download_errors(
+                    download_errors, used_cookie_auth=used_cookie_auth
+                )
                 logger.error("所有下载尝试都失败了: %s", summarized_error)
                 # 列出临时目录中的文件用于调试
                 try:
@@ -2299,10 +2398,16 @@ class VideoService:
                     primary_result = self._process_video_for_transcription_with_url(
                         normalized_url, platform
                     )
+                    primary_error = (
+                        primary_result.get("download_error")
+                        if isinstance(primary_result, dict)
+                        else None
+                    )
                     needs_fallback = primary_result is None or (
                         not primary_result.get("subtitle_content")
                         and not primary_result.get("audio_file")
                         and not primary_result.get("readwise_url_only")
+                        and not self._is_terminal_youtube_download_error(primary_error)
                     )
                     if needs_fallback:
                         logger.warning("标准URL处理失败，回退使用原始URL: %s", url)
@@ -2313,6 +2418,11 @@ class VideoService:
                         )
                         if fallback_result is not None:
                             return fallback_result
+                    elif primary_error:
+                        logger.info(
+                            "标准URL已返回明确的终止错误，不再回退原始URL: %s",
+                            primary_error,
+                        )
                     return primary_result
 
             return self._process_video_for_transcription_with_url(url, platform)
