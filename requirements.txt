@@ -1,7 +1,7 @@
 flask
 requests
-yt-dlp @ https://github.com/yt-dlp/yt-dlp/releases/download/2026.03.13/yt-dlp.tar.gz
-yt-dlp-ejs @ https://github.com/yt-dlp/ejs/releases/download/0.7.0/yt_dlp_ejs-0.7.0-py3-none-any.whl
+yt-dlp @ https://github.com/yt-dlp/yt-dlp/releases/download/2026.03.17/yt-dlp.tar.gz
+yt-dlp-ejs @ https://github.com/yt-dlp/ejs/releases/download/0.8.0/yt_dlp_ejs-0.8.0-py3-none-any.whl
 bgutil-ytdlp-pot-provider==1.2.2
 chardet
 flask-cors
