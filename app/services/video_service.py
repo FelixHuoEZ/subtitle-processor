@@ -203,6 +203,20 @@ class VideoService:
             return detected[0]
         return None
 
+    def _detect_metadata_text_language(
+        self, info: Dict[str, Any], min_confidence: float = 0.8
+    ) -> Optional[str]:
+        """Use title/description text as a fallback primary-language hint."""
+        title = info.get("title", "") or ""
+        description = info.get("description", "") or ""
+        text = "\n".join([title, description[:600]]).strip()
+        detection = detect_text_primary_language(text)
+        language = detection.get("language")
+        confidence = float(detection.get("confidence", 0.0))
+        if language in {"zh", "en"} and confidence >= min_confidence:
+            return language
+        return None
+
     def _build_language_details(
         self,
         language: Optional[str],
@@ -1056,38 +1070,22 @@ class VideoService:
             logger.info(f"可用字幕: {_summarize_languages(available_subtitles)}")
             logger.info(f"可用自动字幕: {_summarize_languages(available_auto)}")
 
-            auto_hint = self._get_exclusive_language_hint(available_auto)
-            subtitle_hint = self._get_exclusive_language_hint(available_subtitles)
+            primary_language = self._normalize_language_code(language)
+            if primary_language not in {"zh", "en"}:
+                primary_language = self._detect_metadata_text_language(info)
+                if primary_language:
+                    logger.info(
+                        "主语言结果不明确(%.2f)，改用标题/简介文本推断为 %s",
+                        language_confidence,
+                        primary_language,
+                    )
 
-            if language == "zh" and language_confidence >= 0.6:
-                # 中文视频：优先中文字幕
+            if primary_language == "zh":
                 lang_priority = self._get_zh_language_priority()
-            elif language == "en" and language_confidence >= 0.6:
-                # 英文视频：优先英文字幕
+            elif primary_language == "en":
                 lang_priority = self._get_en_language_priority()
-            elif auto_hint == "zh":
-                logger.info("自动字幕轨道更偏向中文，优先下载中文字幕")
-                return True, self._get_zh_language_priority()
-            elif auto_hint == "en":
-                logger.info("自动字幕轨道更偏向英文，优先下载英文字幕")
-                return True, self._get_en_language_priority()
-            elif language == "zh":
-                lang_priority = self._get_zh_language_priority()
-            elif language == "en":
-                lang_priority = self._get_en_language_priority()
-            elif subtitle_hint == "zh":
-                logger.info("人工字幕轨道更偏向中文，优先下载中文字幕")
-                return True, self._get_zh_language_priority()
-            elif subtitle_hint == "en":
-                logger.info("人工字幕轨道更偏向英文，优先下载英文字幕")
-                return True, self._get_en_language_priority()
             else:
-                if self._has_language_subtitles(info, self._get_zh_language_priority()):
-                    logger.info("检测到中文字幕，优先下载中文字幕")
-                    return True, self._get_zh_language_priority()
-                if self._has_language_subtitles(info, self._get_en_language_priority()):
-                    logger.info("检测到英文字幕，优先下载英文字幕")
-                    return True, self._get_en_language_priority()
+                logger.info("未能确认视频主语言，跳过字幕下载并改走转录")
                 return False, []
 
             # 检查是否有对应语言的字幕
@@ -1098,7 +1096,7 @@ class VideoService:
                     logger.info(f"找到{lang}字幕，将尝试下载")
                     return True, lang_priority
 
-            logger.info("未找到匹配的字幕语言")
+            logger.info("未找到与主语言 %s 匹配的字幕语言", primary_language)
             return False, lang_priority
 
         except Exception as e:
