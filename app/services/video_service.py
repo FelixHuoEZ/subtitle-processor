@@ -308,68 +308,9 @@ class VideoService:
                 )
                 signals.append(title_hint)
 
-            auto_hint = self._get_exclusive_language_hint(
-                self._extract_languages(info.get("automatic_captions", {}))
-            )
-            if auto_hint in {"zh", "en"}:
-                add_language_score(scores, auto_hint, 0.3)
-                signals.append(
-                    {
-                        "source": "tracks.automatic_captions",
-                        "language": auto_hint,
-                        "weight": 0.3,
-                    }
-                )
-
-            subtitle_hint = self._get_exclusive_language_hint(
-                self._extract_languages(info.get("subtitles", {}))
-            )
-            if subtitle_hint in {"zh", "en"}:
-                add_language_score(scores, subtitle_hint, 0.1)
-                signals.append(
-                    {
-                        "source": "tracks.subtitles",
-                        "language": subtitle_hint,
-                        "weight": 0.1,
-                    }
-                )
-
-            if subtitle_result:
-                claimed_language = self._normalize_language_code(
-                    subtitle_result.get("matched_lang")
-                )
-                source_type = subtitle_result.get("source_type") or "subtitle"
-                if claimed_language in {"zh", "en"}:
-                    claimed_weight = 0.14 if source_type == "automatic_caption" else 0.06
-                    add_language_score(scores, claimed_language, claimed_weight)
-                    signals.append(
-                        {
-                            "source": f"subtitle.{source_type}.track",
-                            "language": claimed_language,
-                            "weight": claimed_weight,
-                            "value": subtitle_result.get("matched_lang"),
-                        }
-                    )
-
-                subtitle_text = subtitle_result.get("content") or ""
-                normalized_subtitle = (
-                    self.subtitle_service.normalize_external_subtitle_content(
-                        subtitle_text
-                    )
-                    or subtitle_text
-                )
-                subtitle_text_hint = self._infer_language_from_text(
-                    normalized_subtitle,
-                    f"subtitle.{source_type}.text",
-                    max_weight=0.45 if source_type == "automatic_caption" else 0.16,
-                )
-                if subtitle_text_hint:
-                    add_language_score(
-                        scores,
-                        subtitle_text_hint["language"],
-                        subtitle_text_hint["weight"],
-                    )
-                    signals.append(subtitle_text_hint)
+            # Available subtitle tracks are not a reliable signal for the video's
+            # primary language. Keep the main-language decision grounded in
+            # metadata text, explicit metadata.language, and audio probing.
 
             if audio_result:
                 audio_language = self._normalize_language_code(
