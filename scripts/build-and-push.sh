@@ -258,6 +258,46 @@ SERVICES=(
 )
 
 USE_BUILDX=true
+BUILDX_BUILDER_NAME=${BUILDX_BUILDER_NAME:-repo-builder}
+
+current_docker_context() {
+  local context=""
+  context=$(docker context show 2>/dev/null || true)
+  trim "${context}"
+}
+
+buildx_builder_endpoint() {
+  local builder_name="$1"
+  local inspect_output=""
+  inspect_output=$(docker buildx inspect "${builder_name}" 2>/dev/null || true)
+  printf '%s\n' "${inspect_output}" | awk -F': *' '/^[[:space:]]*Endpoint:/ {print $2; exit}'
+}
+
+remove_buildx_builder() {
+  local builder_name="$1"
+  docker buildx rm --force "${builder_name}" >/dev/null 2>&1 || true
+}
+
+create_buildx_builder() {
+  local builder_name="$1"
+  local docker_context="$2"
+
+  local create_cmd=(
+    docker buildx create
+    --name "${builder_name}"
+    --driver docker-container
+    --driver-opt network=host
+    --driver-opt env.BUILDKIT_TLS_INSECURE_SKIP_VERIFY=1
+  )
+  if [[ -n "${BUILDKIT_CONFIG_PATH}" ]]; then
+    create_cmd+=(--config "${BUILDKIT_CONFIG_PATH}")
+  fi
+  if [[ -n "${docker_context}" ]]; then
+    create_cmd+=("${docker_context}")
+  fi
+  create_cmd+=(--use)
+  "${create_cmd[@]}" >/dev/null
+}
 
 check_buildx() {
   log_debug "Entering check_buildx"
@@ -282,22 +322,37 @@ check_buildx() {
   fi
   log_debug "'docker buildx version' succeeded: ${buildx_output}"
 
-  log_debug "Inspecting buildx builder 'repo-builder'"
-  if ! docker buildx inspect repo-builder >/dev/null 2>&1; then
-    echo "Creating buildx builder 'repo-builder' (docker-container driver)"
-    local create_cmd=(docker buildx create --name repo-builder --driver docker-container --driver-opt network=host --driver-opt env.BUILDKIT_TLS_INSECURE_SKIP_VERIFY=1)
-    if [[ -n "${BUILDKIT_CONFIG_PATH}" ]]; then
-      create_cmd+=(--config "${BUILDKIT_CONFIG_PATH}")
-    fi
-    create_cmd+=(--use)
-    "${create_cmd[@]}" >/dev/null
+  local docker_context builder_endpoint
+  local recreate_builder=false
+  docker_context=$(current_docker_context)
+
+  log_debug "Inspecting buildx builder '${BUILDX_BUILDER_NAME}'"
+  if ! docker buildx inspect "${BUILDX_BUILDER_NAME}" >/dev/null 2>&1; then
+    recreate_builder=true
   else
-    docker buildx use repo-builder >/dev/null
+    builder_endpoint=$(trim "$(buildx_builder_endpoint "${BUILDX_BUILDER_NAME}")")
+    if [[ -n "${docker_context}" && -n "${builder_endpoint}" && "${builder_endpoint}" != "${docker_context}" ]]; then
+      echo "WARN: buildx builder '${BUILDX_BUILDER_NAME}' is bound to '${builder_endpoint}', recreating for '${docker_context}'." >&2
+      recreate_builder=true
+    fi
   fi
 
-  log_debug "Bootstrapping buildx builder 'repo-builder'"
-  docker buildx inspect repo-builder --bootstrap >/dev/null
-  log_debug "Builder 'repo-builder' ready"
+  if [[ "${recreate_builder}" == "true" ]]; then
+    echo "Creating buildx builder '${BUILDX_BUILDER_NAME}' (docker-container driver)"
+    remove_buildx_builder "${BUILDX_BUILDER_NAME}"
+    create_buildx_builder "${BUILDX_BUILDER_NAME}" "${docker_context}"
+  else
+    docker buildx use "${BUILDX_BUILDER_NAME}" >/dev/null
+  fi
+
+  log_debug "Bootstrapping buildx builder '${BUILDX_BUILDER_NAME}'"
+  if ! docker buildx inspect "${BUILDX_BUILDER_NAME}" --bootstrap >/dev/null 2>&1; then
+    echo "WARN: buildx builder '${BUILDX_BUILDER_NAME}' failed to bootstrap; recreating." >&2
+    remove_buildx_builder "${BUILDX_BUILDER_NAME}"
+    create_buildx_builder "${BUILDX_BUILDER_NAME}" "${docker_context}"
+    docker buildx inspect "${BUILDX_BUILDER_NAME}" --bootstrap >/dev/null
+  fi
+  log_debug "Builder '${BUILDX_BUILDER_NAME}' ready"
 }
 
 trim() {
@@ -524,7 +579,7 @@ build_service() {
     fi
 
     echo "==> Building ${tags[*]}"
-    local cmd=(docker buildx build)
+    local cmd=(docker buildx build --builder "${BUILDX_BUILDER_NAME}")
     cmd+=("--platform" "${build_platform}" "-f" "${context}/${dockerfile}")
     for tag in "${tags[@]}"; do
       cmd+=(-t "${tag}")
@@ -542,40 +597,42 @@ build_service() {
     cmd+=("${context}")
 
     log_debug "Executing: ${cmd[*]}"
-    if "${cmd[@]}"; then
-      log_debug "Build completed for ${name}"
-      printf '%s\n' "${context_hash}" > "${cache_file}"
+    if ! "${cmd[@]}"; then
+      return 1
+    fi
 
-      if [[ "${PUSH}" == "true" && "${LOAD_LOCAL_PLATFORM:-true}" == "true" ]]; then
-        local host_platform
-        if host_platform=$(detect_host_platform); then
-          log_debug "Loading ${name} for host platform ${host_platform}"
-          echo "==> Loading ${tags[0]} locally for ${host_platform}"
-          local load_cmd=(docker buildx build)
-          load_cmd+=("--platform" "${host_platform}" "-f" "${context}/${dockerfile}" "--load")
-          for tag in "${tags[@]}"; do
-            load_cmd+=(-t "${tag}")
-          done
-          if [[ ${#cache_from_args[@]} -gt 0 ]]; then
-            load_cmd+=("${cache_from_args[@]}")
-          fi
-          if [[ ${#cache_to_args[@]} -gt 0 ]]; then
-            load_cmd+=("${cache_to_args[@]}")
-          fi
-          if [[ "${use_no_cache}" == "true" ]]; then
-            load_cmd+=(--no-cache)
-          fi
-          load_cmd+=("${context}")
-          log_debug "Executing load command: ${load_cmd[*]}"
-          if ! "${load_cmd[@]}"; then
-            echo "WARN: failed to load local image for ${name} (${host_platform}); continuing without local copy" >&2
-          fi
-        else
-          echo "WARN: unable to detect host platform; skip local load for ${name}" >&2
+    log_debug "Build completed for ${name}"
+    printf '%s\n' "${context_hash}" > "${cache_file}"
+
+    if [[ "${PUSH}" == "true" && "${LOAD_LOCAL_PLATFORM:-true}" == "true" ]]; then
+      local host_platform
+      if host_platform=$(detect_host_platform); then
+        log_debug "Loading ${name} for host platform ${host_platform}"
+        echo "==> Loading ${tags[0]} locally for ${host_platform}"
+        local load_cmd=(docker buildx build --builder "${BUILDX_BUILDER_NAME}")
+        load_cmd+=("--platform" "${host_platform}" "-f" "${context}/${dockerfile}" "--load")
+        for tag in "${tags[@]}"; do
+          load_cmd+=(-t "${tag}")
+        done
+        if [[ ${#cache_from_args[@]} -gt 0 ]]; then
+          load_cmd+=("${cache_from_args[@]}")
         fi
+        if [[ ${#cache_to_args[@]} -gt 0 ]]; then
+          load_cmd+=("${cache_to_args[@]}")
+        fi
+        if [[ "${use_no_cache}" == "true" ]]; then
+          load_cmd+=(--no-cache)
+        fi
+        load_cmd+=("${context}")
+        log_debug "Executing load command: ${load_cmd[*]}"
+        if ! "${load_cmd[@]}"; then
+          echo "WARN: failed to load local image for ${name} (${host_platform}); continuing without local copy" >&2
+        fi
+      else
+        echo "WARN: unable to detect host platform; skip local load for ${name}" >&2
       fi
     fi
-    return
+    return 0
   fi
 
   # Fallback path when buildx is unavailable
@@ -600,15 +657,19 @@ build_service() {
     build_cmd+=(-t "${tag}")
   done
   build_cmd+=("${context}")
-  if "${build_cmd[@]}"; then
-    printf '%s\n' "${context_hash}" > "${cache_file}"
-    if [[ "${PUSH}" == "true" ]]; then
-      for tag in "${tags[@]}"; do
-        echo "==> Pushing ${tag}"
-        docker push "${tag}"
-      done
-    fi
+  if ! "${build_cmd[@]}"; then
+    return 1
   fi
+
+  printf '%s\n' "${context_hash}" > "${cache_file}"
+  if [[ "${PUSH}" == "true" ]]; then
+    for tag in "${tags[@]}"; do
+      echo "==> Pushing ${tag}"
+      docker push "${tag}"
+    done
+  fi
+
+  return 0
 }
 
 log_debug "Invoking check_buildx"
