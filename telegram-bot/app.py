@@ -20,7 +20,7 @@ import telegram
 import urllib3
 import yaml
 from flask import Flask, jsonify, request
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.error import Conflict, NetworkError, TelegramError
 from telegram.ext import (
     Application,
@@ -369,6 +369,50 @@ def _format_task_display(task: Dict[str, Any]) -> str:
         uploader_display = _shorten_text(uploader, 24)
         return f"{title_display} ({uploader_display}) - {url_display}"
     return f"{title_display} - {url_display}"
+
+
+def _group_visible_queue_tasks(
+    user_id: int, chat_id: int
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """按状态分组当前队列中可展示的任务."""
+    active_items: List[Dict[str, Any]] = []
+    failed_items: List[Dict[str, Any]] = []
+    for task in _list_active_tasks(user_id, chat_id):
+        status = (task.get("status") or "").lower()
+        if status == "completed":
+            continue
+        if status == "failed":
+            failed_items.append(task)
+            continue
+        active_items.append(task)
+    return active_items, failed_items
+
+
+def _telegram_command_list() -> List[BotCommand]:
+    """返回 Telegram 客户端命令菜单."""
+    return [
+        BotCommand("start", "显示帮助"),
+        BotCommand("process", "处理一个视频链接"),
+        BotCommand("queue", "查看当前任务列表"),
+        BotCommand("queue_url", "仅显示队列中的 URL"),
+        BotCommand("retry", "重试上一次请求"),
+        BotCommand("retry_failed", "批量重试失败任务"),
+        BotCommand("queue_clear", "清理失败任务"),
+        BotCommand("skip", "跳过当前输入步骤"),
+        BotCommand("hotword_status", "查看热词状态"),
+        BotCommand("hotword_toggle", "切换自动热词开关"),
+        BotCommand("prompt_toggle", "切换标签和热词输入"),
+    ]
+
+
+async def _register_bot_commands(application: Application) -> None:
+    """在 Telegram 侧注册命令菜单."""
+    try:
+        commands = _telegram_command_list()
+        await application.bot.set_my_commands(commands)
+        logger.info("已注册 Telegram 命令菜单，共 %s 个命令", len(commands))
+    except Exception as exc:
+        logger.warning("注册 Telegram 命令菜单失败: %s", exc)
 
 
 def _queue_total(state: Dict[str, Any]) -> int:
@@ -889,7 +933,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. 直接发送YouTube/Bilibili URL\n"
         "2. 使用命令 /process URL\n"
         "3. 一次发送多条URL（换行/空格/逗号分隔），将自动跳过标签/热词并并行处理\n"
-        "4. 使用 /queue 查看当前任务列表，/queue_clear 清理失败任务\n"
+        "4. 使用 /queue 查看当前任务列表，/queue_url 仅查看 URL，/queue_clear 清理失败任务\n"
         "5. 使用 /retry_failed 批量重试失败任务\n"
         "6. 使用 /prompt_toggle on|off 开关标签/热词输入（仅对当前bot进程生效）"
     )
@@ -1804,16 +1848,7 @@ async def queue_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     log_update_metadata("/queue", update)
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
-    active_tasks_list = []
-    failed_tasks = []
-    for task in _list_active_tasks(user_id, chat_id):
-        status = (task.get("status") or "").lower()
-        if status == "completed":
-            continue
-        if status == "failed":
-            failed_tasks.append(task)
-        else:
-            active_tasks_list.append(task)
+    active_tasks_list, failed_tasks = _group_visible_queue_tasks(user_id, chat_id)
     if not active_tasks_list and not failed_tasks:
         await update.message.reply_text("当前没有正在处理的任务。")
         return
@@ -1840,6 +1875,27 @@ async def queue_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         lines.append("可使用 /retry_failed 批量重试，或 /queue_clear 清理失败任务。")
 
     await update.message.reply_text("\n".join(lines))
+
+
+async def queue_urls(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """仅输出当前队列中的任务 URL，便于复制."""
+    record_update(update)
+    log_update_metadata("/queue_url", update)
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    active_tasks_list, failed_tasks = _group_visible_queue_tasks(user_id, chat_id)
+    visible_tasks = active_tasks_list + failed_tasks
+    if not visible_tasks:
+        await update.message.reply_text("当前没有正在处理的任务。")
+        return
+
+    urls = [(task.get("url") or "").strip() for task in visible_tasks]
+    urls = [url for url in urls if url]
+    if not urls:
+        await update.message.reply_text("当前任务缺少可复制的 URL。")
+        return
+
+    await update.message.reply_text("\n".join(urls), parse_mode=None)
 
 
 async def queue_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2658,7 +2714,12 @@ def main():
     )
 
     # 创建应用
-    application_builder = Application.builder().token(TELEGRAM_TOKEN).defaults(defaults)
+    application_builder = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .defaults(defaults)
+        .post_init(_register_bot_commands)
+    )
 
     # 如果有代理，添加代理配置 - 修复新版本API
     if proxy_url:
@@ -2744,6 +2805,7 @@ def main():
     application.add_handler(CommandHandler("skip", skip_command))
     application.add_handler(CommandHandler("retry", retry_command))
     application.add_handler(CommandHandler("queue", queue_status))
+    application.add_handler(CommandHandler("queue_url", queue_urls))
     application.add_handler(CommandHandler("queue_clear", queue_clear))
     application.add_handler(CommandHandler("retry_failed", retry_failed))
     application.add_handler(CommandHandler("hotword_status", hotword_status))
