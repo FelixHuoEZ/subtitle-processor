@@ -398,6 +398,7 @@ def _telegram_command_list() -> List[BotCommand]:
         BotCommand("retry", "重试上一次请求"),
         BotCommand("retry_failed", "批量重试失败任务"),
         BotCommand("queue_clear", "清理失败任务"),
+        BotCommand("queue_clear_all", "清空全部队列记录"),
         BotCommand("skip", "跳过当前输入步骤"),
         BotCommand("hotword_status", "查看热词状态"),
         BotCommand("hotword_toggle", "切换自动热词开关"),
@@ -600,6 +601,15 @@ def _clear_failed_tasks(user_id: int, chat_id: int) -> int:
     if not tasks:
         active_tasks.pop(key, None)
     return len(failed_ids)
+
+
+def _clear_all_tasks(user_id: int, chat_id: int) -> int:
+    """清空当前用户/聊天中的全部任务记录，返回清空数量."""
+    key = _request_key(user_id, chat_id)
+    tasks = active_tasks.pop(key, None)
+    if not tasks:
+        return 0
+    return len(tasks)
 
 
 def _list_active_tasks(user_id: int, chat_id: int) -> List[Dict[str, Any]]:
@@ -933,7 +943,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. 直接发送YouTube/Bilibili URL\n"
         "2. 使用命令 /process URL\n"
         "3. 一次发送多条URL（换行/空格/逗号分隔），将自动跳过标签/热词并并行处理\n"
-        "4. 使用 /queue 查看当前任务列表，/queue_url 仅查看 URL，/queue_clear 清理失败任务\n"
+        "4. 使用 /queue 查看当前任务列表，/queue_url 仅查看 URL，"
+        "/queue_clear 清理失败任务，/queue_clear_all 清空全部队列记录\n"
         "5. 使用 /retry_failed 批量重试失败任务\n"
         "6. 使用 /prompt_toggle on|off 开关标签/热词输入（仅对当前bot进程生效）"
     )
@@ -1872,7 +1883,10 @@ async def queue_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 lines.append(f"{idx}. {item_display} (失败: {error})")
             else:
                 lines.append(f"{idx}. {item_display} (失败)")
-        lines.append("可使用 /retry_failed 批量重试，或 /queue_clear 清理失败任务。")
+        lines.append(
+            "可使用 /retry_failed 批量重试，/queue_clear 清理失败任务，"
+            "或 /queue_clear_all 清空全部任务记录。"
+        )
 
     await update.message.reply_text("\n".join(lines))
 
@@ -1909,6 +1923,21 @@ async def queue_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("当前没有可清理的失败任务。")
         return
     await update.message.reply_text(f"已清理 {cleared} 条失败任务。")
+
+
+async def queue_clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """清空当前聊天中的全部任务记录。"""
+    record_update(update)
+    log_update_metadata("/queue_clear_all", update)
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    cleared = _clear_all_tasks(user_id, chat_id)
+    if cleared == 0:
+        await update.message.reply_text("当前没有可清空的任务记录。")
+        return
+    await update.message.reply_text(
+        f"已清空 {cleared} 条任务记录。不会取消后台正在处理的任务。"
+    )
 
 
 async def retry_failed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2807,6 +2836,7 @@ def main():
     application.add_handler(CommandHandler("queue", queue_status))
     application.add_handler(CommandHandler("queue_url", queue_urls))
     application.add_handler(CommandHandler("queue_clear", queue_clear))
+    application.add_handler(CommandHandler("queue_clear_all", queue_clear_all))
     application.add_handler(CommandHandler("retry_failed", retry_failed))
     application.add_handler(CommandHandler("hotword_status", hotword_status))
     application.add_handler(CommandHandler("hotword_toggle", hotword_toggle))
