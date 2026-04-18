@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import threading
+import time
 import traceback
 import uuid
 from datetime import datetime
@@ -33,6 +34,10 @@ transcription_service = TranscriptionService()
 subtitle_service = SubtitleService()
 translation_service = TranslationService()
 readwise_service = ReadwiseService()
+
+LANGUAGE_CONFIRMATION_TIMEOUT_SECONDS = 180
+LANGUAGE_CONFIRMATION_POLL_INTERVAL_SECONDS = 1.0
+LANGUAGE_CONFIRMATION_CHOICES = {"zh", "en", "auto"}
 
 
 @upload_bp.route("/", methods=["GET", "POST"])
@@ -115,6 +120,7 @@ def upload_url():
             auto_transcribe = data.get("auto_transcribe", False)
             auto_start = data.get("auto_start", True)  # 默认自动开始处理
             tags = data.get("tags", [])  # 获取用户指定的标签
+            request_source = (data.get("request_source") or "").strip().lower()
         else:
             url = request.form.get("url", "").strip()
             extract_audio = request.form.get("extract_audio", "false").lower() == "true"
@@ -127,6 +133,7 @@ def upload_url():
                 if request.form.get("tags")
                 else []
             )  # 表单数据中的标签
+            request_source = (request.form.get("request_source") or "").strip().lower()
 
         if not url:
             if request.is_json:
@@ -159,6 +166,7 @@ def upload_url():
             "updated_time": datetime.now().isoformat(),
             "auto_transcribe": auto_transcribe,
             "extract_audio": extract_audio,
+            "request_source": request_source or None,
         }
 
         # 保存任务信息
@@ -395,6 +403,31 @@ def _process_video_task(task_info, auto_transcribe):
             task_info["spoken_pattern"] = result.get("spoken_pattern")
             task_info["updated_time"] = datetime.now().isoformat()
             file_service.update_file_info(process_id, task_info)
+
+            confirmation_state = _should_request_language_confirmation(
+                task_info, result
+            )
+            if confirmation_state:
+                task_info["status"] = "waiting_for_language_confirmation"
+                task_info["language_confirmation"] = confirmation_state
+                task_info["updated_time"] = datetime.now().isoformat()
+                file_service.update_file_info(process_id, task_info)
+
+                resolved_confirmation = _wait_for_language_confirmation(process_id)
+                task_info["language_confirmation"] = resolved_confirmation
+                task_info["status"] = "processing"
+                task_info["updated_time"] = datetime.now().isoformat()
+                file_service.update_file_info(
+                    process_id,
+                    {
+                        "status": "processing",
+                        "language_confirmation": resolved_confirmation,
+                        "updated_time": task_info["updated_time"],
+                    },
+                )
+                _apply_language_confirmation(result, task_info, resolved_confirmation)
+                task_info["updated_time"] = datetime.now().isoformat()
+                file_service.update_file_info(process_id, task_info)
 
             logger.info(
                 f"视频处理结果 - subtitle_content存在: {bool(result.get('subtitle_content'))}"
@@ -765,3 +798,145 @@ def _detect_platform(url):
         return "acfun"
     else:
         return None
+
+
+def _normalize_language_choice(language):
+    normalized = video_service._normalize_language_code(language)
+    if normalized in {"zh", "en", "mixed"}:
+        return normalized
+    raw_language = (language or "").strip().lower()
+    if raw_language == "auto":
+        return "auto"
+    return None
+
+
+def _should_request_language_confirmation(task_info, result):
+    if (task_info.get("request_source") or "").strip().lower() != "telegram":
+        return None
+
+    if result.get("skip_processing_for_url_only"):
+        return None
+
+    language_details = result.get("language_details") or {}
+    spoken_language = _normalize_language_choice(language_details.get("language"))
+    spoken_confidence = float(language_details.get("confidence", 0.0) or 0.0)
+    content_locale = _normalize_language_choice(
+        result.get("content_locale")
+        or (result.get("content_locale_details") or {}).get("language")
+    )
+
+    trigger_reason = None
+    if spoken_language == "mixed":
+        trigger_reason = "mixed_spoken_language"
+    elif spoken_confidence < 0.75:
+        trigger_reason = "low_spoken_confidence"
+    elif (
+        content_locale in {"zh", "en"}
+        and spoken_language in {"zh", "en"}
+        and content_locale != spoken_language
+        and spoken_confidence < 0.85
+    ):
+        trigger_reason = "content_locale_spoken_mismatch"
+
+    if not trigger_reason:
+        return None
+
+    video_info = result.get("video_info") or {}
+    return {
+        "status": "pending",
+        "reason": trigger_reason,
+        "suggested_language": spoken_language,
+        "suggested_confidence": round(spoken_confidence, 4),
+        "content_locale": content_locale,
+        "url": task_info.get("url"),
+        "video_title": video_info.get("title"),
+        "video_uploader": video_info.get("uploader") or video_info.get("channel"),
+        "requested_at": datetime.now().isoformat(),
+        "timeout_seconds": LANGUAGE_CONFIRMATION_TIMEOUT_SECONDS,
+        "choices": ["zh", "en", "auto"],
+    }
+
+
+def _wait_for_language_confirmation(process_id):
+    deadline = time.time() + LANGUAGE_CONFIRMATION_TIMEOUT_SECONDS
+    while time.time() < deadline:
+        current_task_info = file_service.get_file_info(process_id) or {}
+        confirmation = current_task_info.get("language_confirmation") or {}
+        selected_language = _normalize_language_choice(
+            confirmation.get("selected_language")
+        )
+        if selected_language in LANGUAGE_CONFIRMATION_CHOICES:
+            resolved_confirmation = dict(confirmation)
+            resolved_confirmation.setdefault("status", "confirmed")
+            resolved_confirmation.setdefault("resolved_at", datetime.now().isoformat())
+            return resolved_confirmation
+        time.sleep(LANGUAGE_CONFIRMATION_POLL_INTERVAL_SECONDS)
+
+    current_task_info = file_service.get_file_info(process_id) or {}
+    confirmation = dict(current_task_info.get("language_confirmation") or {})
+    confirmation.update(
+        {
+            "status": "timeout",
+            "selected_language": "auto",
+            "resolved_at": datetime.now().isoformat(),
+        }
+    )
+    file_service.update_file_info(
+        process_id,
+        {
+            "language_confirmation": confirmation,
+            "status": "processing",
+            "updated_time": datetime.now().isoformat(),
+        },
+    )
+    return confirmation
+
+
+def _apply_language_confirmation(result, task_info, confirmation):
+    selected_language = _normalize_language_choice(
+        (confirmation or {}).get("selected_language")
+    )
+    task_info["language_confirmation"] = confirmation
+    task_info["language_override"] = (
+        selected_language if selected_language in {"zh", "en"} else None
+    )
+
+    if selected_language not in {"zh", "en"}:
+        return
+
+    original_language_details = dict(result.get("language_details") or {})
+    overridden_language_details = dict(original_language_details)
+    overridden_language_details.update(
+        {
+            "language": selected_language,
+            "confidence": 1.0,
+            "source": "telegram_language_override",
+            "manual_override": True,
+            "auto_detected_language": original_language_details.get("language"),
+            "auto_detected_confidence": original_language_details.get("confidence"),
+        }
+    )
+
+    result["language"] = selected_language
+    result["language_details"] = overridden_language_details
+    task_info["language"] = selected_language
+    task_info["language_details"] = overridden_language_details
+
+    readwise_decision = video_service._build_readwise_decision(
+        result.get("track_catalog") or [],
+        overridden_language_details,
+        result.get("content_locale_details") or {},
+    )
+    result["readwise_mode"] = readwise_decision.get("mode")
+    result["readwise_reason"] = readwise_decision.get("reason")
+    result["readwise_url_only"] = readwise_decision.get("mode") == "url_only"
+    result["skip_processing_for_url_only"] = readwise_decision.get(
+        "skip_processing", False
+    )
+    result["spoken_pattern"] = readwise_decision.get("spoken_pattern")
+
+    task_info["readwise_mode"] = result["readwise_mode"]
+    task_info["readwise_reason"] = result["readwise_reason"]
+    task_info["readwise_url_only"] = result["readwise_url_only"]
+    task_info["skip_processing_for_url_only"] = result["skip_processing_for_url_only"]
+    task_info["spoken_pattern"] = result["spoken_pattern"]
