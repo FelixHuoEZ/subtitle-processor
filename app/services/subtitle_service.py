@@ -155,7 +155,7 @@ class SubtitleService:
                     ""
                 ])
             
-            srt_content = "\\n".join(srt_lines)
+            srt_content = "\n".join(srt_lines)
             logger.info(f"成功生成SRT格式字幕，共 {len(subtitles)} 条")
             return srt_content
             

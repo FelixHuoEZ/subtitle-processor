@@ -39,6 +39,17 @@ LANGUAGE_CONFIRMATION_TIMEOUT_SECONDS = 180
 LANGUAGE_CONFIRMATION_POLL_INTERVAL_SECONDS = 1.0
 LANGUAGE_CONFIRMATION_CHOICES = {"zh", "en", "auto"}
 LANGUAGE_CONFIRMATION_MISMATCH_MAX_CONFIDENCE = 0.9
+SRT_TIMING_LINE_RE = re.compile(
+    r"^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}$",
+    re.MULTILINE,
+)
+
+
+def _count_srt_entries(srt_content):
+    """统计SRT中的字幕条数，忽略字面量 \\n 造成的伪换行。"""
+    if not srt_content or not isinstance(srt_content, str):
+        return 0
+    return len(SRT_TIMING_LINE_RE.findall(srt_content))
 
 
 @upload_bp.route("/", methods=["GET", "POST"])
@@ -634,9 +645,7 @@ def _process_video_task(task_info, auto_transcribe):
                         if srt_content:
                             srt_length = len(srt_content)
                             logger.info(f"SRT内容长度: {srt_length}")
-                            subtitle_count = (
-                                srt_content.count("\n\n") + 1 if srt_content else 0
-                            )
+                            subtitle_count = _count_srt_entries(srt_content)
                             logger.info(f"生成字幕条数: {subtitle_count}")
 
                             task_info["status"] = "completed"

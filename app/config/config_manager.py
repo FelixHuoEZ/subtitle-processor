@@ -9,6 +9,16 @@ logger = logging.getLogger(__name__)
 
 class ConfigManager:
     """Central configuration manager for the application."""
+
+    _SENSITIVE_SEGMENT_MARKERS = (
+        "api_key",
+        "apikey",
+        "token",
+        "secret",
+        "password",
+        "cookie",
+        "authorization",
+    )
     
     def __init__(self):
         """Initialize the configuration manager."""
@@ -57,7 +67,7 @@ class ConfigManager:
                 
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-                logger.debug(f"配置文件内容:\\n{content}")
+                logger.debug("配置文件内容已读取，字符数: %s", len(content))
                 try:
                     loaded_config = yaml.safe_load(content)
                     if not loaded_config:
@@ -70,12 +80,19 @@ class ConfigManager:
                         return
                     self.config = loaded_config
                     logger.info("成功加载配置文件")
-                    logger.debug(f"解析后的配置: {loaded_config}")
+                    logger.debug(
+                        "解析后的配置: %s",
+                        self._sanitize_for_log(loaded_config),
+                    )
                     
                     if self.config:
                         logger.info(f"配置加载成功，包含以下部分: {list(self.config.keys())}")
                         for section in self.config.keys():
-                            logger.debug(f"配置部分 {section}: {self.config[section]}")
+                            logger.debug(
+                                "配置部分 %s: %s",
+                                section,
+                                self._sanitize_for_log(self.config[section], section),
+                            )
                     
                 except yaml.YAMLError as e:
                     logger.error(f"YAML解析错误: {str(e)}")
@@ -126,10 +143,19 @@ class ConfigManager:
                     return default
                 value = value[key]
 
-            logger.debug(f"获取配置 {key_path}: {value}")
+            logger.debug(
+                "获取配置 %s: %s",
+                key_path,
+                self._sanitize_for_log(value, key_path),
+            )
             return value
         except Exception as e:
-            logger.warning(f"获取配置 {key_path} 时出错: {str(e)}, 使用默认值: {default}")
+            logger.warning(
+                "获取配置 %s 时出错: %s, 使用默认值: %s",
+                key_path,
+                str(e),
+                self._sanitize_for_log(default, key_path),
+            )
             return default
     
     def get_config(self):
@@ -139,6 +165,68 @@ class ConfigManager:
     def reload_config(self):
         """重新加载配置文件"""
         self.load_config()
+
+    @classmethod
+    def _is_sensitive_segment(cls, segment):
+        normalized = str(segment or "").strip().lower()
+        if not normalized or normalized == "tokens":
+            return False
+        return any(marker in normalized for marker in cls._SENSITIVE_SEGMENT_MARKERS)
+
+    @classmethod
+    def _is_sensitive_key_path(cls, key_path):
+        if not key_path:
+            return False
+        segments = str(key_path).replace("-", ".").split(".")
+        return any(cls._is_sensitive_segment(segment) for segment in segments)
+
+    @classmethod
+    def _redact_value(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            if not value:
+                return ""
+            return f"<redacted len={len(value)}>"
+        if isinstance(value, bytes):
+            return f"<redacted bytes={len(value)}>"
+        if isinstance(value, (list, tuple, set)):
+            return f"<redacted items={len(value)}>"
+        if isinstance(value, dict):
+            return f"<redacted keys={len(value)}>"
+        return "<redacted>"
+
+    @classmethod
+    def _sanitize_for_log(cls, value, key_path=""):
+        if cls._is_sensitive_key_path(key_path):
+            return cls._redact_value(value)
+
+        if isinstance(value, dict):
+            sanitized = {}
+            for key, nested_value in value.items():
+                child_path = f"{key_path}.{key}" if key_path else str(key)
+                sanitized[key] = cls._sanitize_for_log(nested_value, child_path)
+            return sanitized
+
+        if isinstance(value, list):
+            return [
+                cls._sanitize_for_log(item, key_path)
+                for item in value
+            ]
+
+        if isinstance(value, tuple):
+            return tuple(
+                cls._sanitize_for_log(item, key_path)
+                for item in value
+            )
+
+        if isinstance(value, set):
+            return {
+                cls._sanitize_for_log(item, key_path)
+                for item in value
+            }
+
+        return value
     
     @staticmethod
     def _list_to_dict(value):
