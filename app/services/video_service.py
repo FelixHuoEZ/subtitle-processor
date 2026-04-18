@@ -2568,6 +2568,7 @@ class VideoService:
         audio_file = None
         temp_dir = None
         download_error = None
+        audio_probe = None
         if not subtitle_content:
             logger.info("未找到字幕，开始下载音频用于转录")
             download_result = self.download_video(url, platform=platform)
@@ -2609,6 +2610,7 @@ class VideoService:
             "subtitle_content": subtitle_content,
             "subtitle_metadata": subtitle_metadata,
             "audio_file": audio_file,
+            "audio_probe": audio_probe,
             "temp_dir": temp_dir,
             "download_error": download_error,
             "needs_transcription": subtitle_content is None,

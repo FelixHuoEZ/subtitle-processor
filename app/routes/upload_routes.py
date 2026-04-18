@@ -404,30 +404,9 @@ def _process_video_task(task_info, auto_transcribe):
             task_info["updated_time"] = datetime.now().isoformat()
             file_service.update_file_info(process_id, task_info)
 
-            confirmation_state = _should_request_language_confirmation(
-                task_info, result
+            _request_language_confirmation_if_needed(
+                process_id, task_info, result
             )
-            if confirmation_state:
-                task_info["status"] = "waiting_for_language_confirmation"
-                task_info["language_confirmation"] = confirmation_state
-                task_info["updated_time"] = datetime.now().isoformat()
-                file_service.update_file_info(process_id, task_info)
-
-                resolved_confirmation = _wait_for_language_confirmation(process_id)
-                task_info["language_confirmation"] = resolved_confirmation
-                task_info["status"] = "processing"
-                task_info["updated_time"] = datetime.now().isoformat()
-                file_service.update_file_info(
-                    process_id,
-                    {
-                        "status": "processing",
-                        "language_confirmation": resolved_confirmation,
-                        "updated_time": task_info["updated_time"],
-                    },
-                )
-                _apply_language_confirmation(result, task_info, resolved_confirmation)
-                task_info["updated_time"] = datetime.now().isoformat()
-                file_service.update_file_info(process_id, task_info)
 
             logger.info(
                 f"视频处理结果 - subtitle_content存在: {bool(result.get('subtitle_content'))}"
@@ -673,6 +652,64 @@ def _process_video_task(task_info, auto_transcribe):
                                 f"第2步完成：音频转录和SRT转换成功: {process_id}"
                             )
 
+                            refreshed_language_details = (
+                                _refresh_language_state_from_final_subtitle(
+                                    task_info,
+                                    result,
+                                    subtitle_content=srt_content,
+                                )
+                            )
+                            if refreshed_language_details:
+                                logger.info(
+                                    "转录后语言重算完成: language=%s confidence=%.4f readwise_mode=%s reason=%s",
+                                    task_info.get("language"),
+                                    float(
+                                        (
+                                            task_info.get("language_details") or {}
+                                        ).get("confidence", 0.0)
+                                    ),
+                                    task_info.get("readwise_mode"),
+                                    task_info.get("readwise_reason"),
+                                )
+                                task_info["updated_time"] = datetime.now().isoformat()
+                                file_service.update_file_info(
+                                    process_id,
+                                    {
+                                        "language": task_info.get("language"),
+                                        "language_details": task_info.get(
+                                            "language_details"
+                                        ),
+                                        "content_locale": task_info.get(
+                                            "content_locale"
+                                        ),
+                                        "content_locale_details": task_info.get(
+                                            "content_locale_details"
+                                        ),
+                                        "readwise_mode": task_info.get(
+                                            "readwise_mode"
+                                        ),
+                                        "readwise_reason": task_info.get(
+                                            "readwise_reason"
+                                        ),
+                                        "readwise_url_only": task_info.get(
+                                            "readwise_url_only"
+                                        ),
+                                        "skip_processing_for_url_only": task_info.get(
+                                            "skip_processing_for_url_only"
+                                        ),
+                                        "spoken_pattern": task_info.get(
+                                            "spoken_pattern"
+                                        ),
+                                        "updated_time": task_info["updated_time"],
+                                    },
+                                )
+                                _request_language_confirmation_if_needed(
+                                    process_id,
+                                    task_info,
+                                    result,
+                                    skip_if_resolved=True,
+                                )
+
                             logger.info(
                                 f"第3步：开始发送内容到Readwise Reader: {process_id}"
                             )
@@ -857,6 +894,49 @@ def _should_request_language_confirmation(task_info, result):
     }
 
 
+def _language_confirmation_is_resolved(task_info):
+    confirmation = (task_info or {}).get("language_confirmation") or {}
+    selected_language = _normalize_language_choice(
+        confirmation.get("selected_language")
+    )
+    return selected_language in LANGUAGE_CONFIRMATION_CHOICES or confirmation.get(
+        "status"
+    ) in {"confirmed", "timeout"}
+
+
+def _request_language_confirmation_if_needed(
+    process_id, task_info, result, skip_if_resolved=False
+):
+    if skip_if_resolved and _language_confirmation_is_resolved(task_info):
+        return None
+
+    confirmation_state = _should_request_language_confirmation(task_info, result)
+    if not confirmation_state:
+        return None
+
+    task_info["status"] = "waiting_for_language_confirmation"
+    task_info["language_confirmation"] = confirmation_state
+    task_info["updated_time"] = datetime.now().isoformat()
+    file_service.update_file_info(process_id, task_info)
+
+    resolved_confirmation = _wait_for_language_confirmation(process_id)
+    task_info["language_confirmation"] = resolved_confirmation
+    task_info["status"] = "processing"
+    task_info["updated_time"] = datetime.now().isoformat()
+    file_service.update_file_info(
+        process_id,
+        {
+            "status": "processing",
+            "language_confirmation": resolved_confirmation,
+            "updated_time": task_info["updated_time"],
+        },
+    )
+    _apply_language_confirmation(result, task_info, resolved_confirmation)
+    task_info["updated_time"] = datetime.now().isoformat()
+    file_service.update_file_info(process_id, task_info)
+    return resolved_confirmation
+
+
 def _wait_for_language_confirmation(process_id):
     deadline = time.time() + LANGUAGE_CONFIRMATION_TIMEOUT_SECONDS
     while time.time() < deadline:
@@ -890,6 +970,64 @@ def _wait_for_language_confirmation(process_id):
         },
     )
     return confirmation
+
+
+def _refresh_language_state_from_final_subtitle(
+    task_info,
+    result,
+    subtitle_content,
+    subtitle_track_type="asr_original",
+):
+    if not isinstance(subtitle_content, str) or not subtitle_content.strip():
+        return None
+
+    video_info = result.get("video_info") or task_info.get("video_info") or {}
+    refreshed_language_details = video_service.get_video_language_details(
+        video_info,
+        subtitle_result={
+            "content": subtitle_content,
+            "track_type": subtitle_track_type,
+        },
+        audio_result=result.get("audio_probe"),
+    )
+    refreshed_content_locale_details = video_service.get_content_locale_details(
+        video_info,
+        language_details=refreshed_language_details,
+    )
+    readwise_decision = video_service._build_readwise_decision(
+        result.get("track_catalog") or [],
+        refreshed_language_details,
+        refreshed_content_locale_details,
+    )
+
+    result["language"] = refreshed_language_details.get("language")
+    result["language_details"] = refreshed_language_details
+    result["content_locale"] = refreshed_content_locale_details.get("language")
+    result["content_locale_details"] = refreshed_content_locale_details
+    result["readwise_mode"] = readwise_decision.get("mode")
+    result["readwise_reason"] = readwise_decision.get("reason")
+    result["readwise_url_only"] = readwise_decision.get("mode") == "url_only"
+    result["skip_processing_for_url_only"] = readwise_decision.get(
+        "skip_processing", False
+    )
+    result["spoken_pattern"] = readwise_decision.get("spoken_pattern")
+
+    task_info["language"] = result["language"]
+    task_info["language_details"] = refreshed_language_details
+    task_info["content_locale"] = result["content_locale"]
+    task_info["content_locale_details"] = refreshed_content_locale_details
+    task_info["readwise_mode"] = result["readwise_mode"]
+    task_info["readwise_reason"] = result["readwise_reason"]
+    task_info["readwise_url_only"] = result["readwise_url_only"]
+    task_info["skip_processing_for_url_only"] = result[
+        "skip_processing_for_url_only"
+    ]
+    task_info["spoken_pattern"] = result["spoken_pattern"]
+
+    if _normalize_language_choice(task_info.get("language_override")) in {"zh", "en"}:
+        _apply_language_confirmation(result, task_info, task_info.get("language_confirmation"))
+
+    return refreshed_language_details
 
 
 def _apply_language_confirmation(result, task_info, confirmation):
