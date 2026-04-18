@@ -111,8 +111,14 @@ def start_video_processing(process_id):
             'video_info': result['video_info'],
             'language': result['language'],
             'language_details': result.get('language_details'),
+            'content_locale': result.get('content_locale'),
+            'content_locale_details': result.get('content_locale_details'),
             'subtitle_metadata': result.get('subtitle_metadata'),
             'needs_transcription': result['needs_transcription'],
+            'readwise_mode': result.get('readwise_mode'),
+            'readwise_reason': result.get('readwise_reason'),
+            'readwise_url_only': result.get('readwise_url_only', False),
+            'spoken_pattern': result.get('spoken_pattern'),
             'progress': 50,
             'updated_time': datetime.now().isoformat()
         })
@@ -135,6 +141,10 @@ def start_video_processing(process_id):
                 'filename': subtitle_filename,
                 'subtitle_content': subtitle_content,
                 'subtitle_path': subtitle_path,
+                'readwise_mode': result.get('readwise_mode'),
+                'readwise_reason': result.get('readwise_reason'),
+                'readwise_url_only': result.get('readwise_url_only', False),
+                'spoken_pattern': result.get('spoken_pattern'),
                 'progress': 100,
                 'updated_time': datetime.now().isoformat()
             })
@@ -177,6 +187,10 @@ def start_video_processing(process_id):
                 'subtitle_content': srt_content,
                 'subtitle_path': subtitle_path,
                 'transcription_result': transcription_result,
+                'readwise_mode': result.get('readwise_mode'),
+                'readwise_reason': result.get('readwise_reason'),
+                'readwise_url_only': result.get('readwise_url_only', False),
+                'spoken_pattern': result.get('spoken_pattern'),
                 'progress': 100,
                 'updated_time': datetime.now().isoformat()
             })
@@ -388,7 +402,10 @@ def create_readwise_article(file_id):
         # 构造字幕数据
         subtitle_data = {
             'video_info': file_info.get('video_info', {}),
-            'subtitle_content': file_info.get('subtitle_content', '')
+            'subtitle_content': file_info.get('subtitle_content', ''),
+            'readwise_mode': file_info.get('readwise_mode'),
+            'readwise_reason': file_info.get('readwise_reason'),
+            'readwise_url_only': file_info.get('readwise_url_only', False),
         }
         
         # 如果没有视频信息，从文件信息构造

@@ -1,0 +1,13 @@
+[
+  {
+    "case_id": "youtube_7R9H_EX6cnI",
+    "url": "https://www.youtube.com/watch?v=7R9H-EX6cnI",
+    "local_media_hint": "test/再次改良英语：这能行吗？ [7R9H-EX6cnI].webm",
+    "expected": {
+      "content_locale": "zh",
+      "readwise_mode": "url_only",
+      "readwise_reason": "zh_locale_foreign_spoken"
+    },
+    "notes": "Chinese-framed content with a long English body should not be treated as original Chinese subtitles; prefer URL-only clipping for Readwise."
+  }
+]

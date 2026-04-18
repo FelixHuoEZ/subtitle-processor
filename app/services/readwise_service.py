@@ -194,7 +194,15 @@ class ReadwiseService:
             subtitle_content = subtitle_data.get("subtitle_content", "")
             failure_message = subtitle_data.get("failure_message")
             user_tags = subtitle_data.get("tags", [])
-            readwise_url_only = bool(subtitle_data.get("readwise_url_only"))
+            readwise_mode = subtitle_data.get("readwise_mode")
+            readwise_url_only = (
+                readwise_mode == "url_only"
+                or (
+                    readwise_mode is None
+                    and bool(subtitle_data.get("readwise_url_only"))
+                )
+            )
+            readwise_reason = subtitle_data.get("readwise_reason")
 
             # 添加详细的调试信息
             logger.info("=== 开始创建Readwise文章 ===")
@@ -244,7 +252,10 @@ class ReadwiseService:
 
             if readwise_url_only:
                 title = video_info.get("title", "未知视频标题")
-                logger.info("Readwise URL剪藏模式启用，跳过字幕内容")
+                logger.info(
+                    "Readwise URL剪藏模式启用，跳过字幕内容: reason=%s",
+                    readwise_reason or "unspecified",
+                )
                 return self.create_article_from_url(
                     title=title,
                     url=url,

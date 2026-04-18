@@ -56,7 +56,6 @@ transcribe-audio/logs/
 # 单元测试文件和脚本
 build_images.ps1
 test_subtitles.py
-tests/
 logseq-plugin-whisper-subtitles/
 logseq-whisper-subtitles-server/
 app/export_cookies.py

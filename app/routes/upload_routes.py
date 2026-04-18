@@ -379,12 +379,20 @@ def _process_video_task(task_info, auto_transcribe):
             task_info["video_info"] = result.get("video_info", {})
             task_info["language"] = result.get("language")
             task_info["language_details"] = result.get("language_details")
+            task_info["content_locale"] = result.get("content_locale")
+            task_info["content_locale_details"] = result.get("content_locale_details")
             task_info["subtitle_content"] = result.get("subtitle_content")
             task_info["subtitle_metadata"] = result.get("subtitle_metadata")
             task_info["audio_file"] = result.get("audio_file")
             task_temp_dir = result.get("temp_dir")
             task_info["needs_transcription"] = result.get("needs_transcription", False)
+            task_info["readwise_mode"] = result.get("readwise_mode")
+            task_info["readwise_reason"] = result.get("readwise_reason")
             task_info["readwise_url_only"] = result.get("readwise_url_only", False)
+            task_info["skip_processing_for_url_only"] = result.get(
+                "skip_processing_for_url_only", False
+            )
+            task_info["spoken_pattern"] = result.get("spoken_pattern")
             task_info["updated_time"] = datetime.now().isoformat()
             file_service.update_file_info(process_id, task_info)
 
@@ -396,11 +404,14 @@ def _process_video_task(task_info, auto_transcribe):
             )
             logger.info(f"视频处理结果 - audio_file: {result.get('audio_file')}")
 
-            if result.get("readwise_url_only"):
+            if result.get("readwise_url_only") and result.get(
+                "skip_processing_for_url_only"
+            ):
                 task_info["status"] = "completed"
                 task_info["progress"] = 100
                 logger.info(
-                    f"第2步完成：检测到中文字幕且启用URL剪藏，跳过字幕下载与转录: {process_id}"
+                    "第2步完成：命中原始中文字幕 URL 剪藏规则，跳过字幕下载与转录: %s",
+                    process_id,
                 )
                 logger.info(f"第3步：开始发送URL剪藏到Readwise Reader: {process_id}")
 
