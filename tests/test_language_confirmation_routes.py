@@ -55,6 +55,19 @@ def test_should_request_language_confirmation_for_telegram_low_confidence():
     assert confirmation["suggested_language"] == "en"
 
 
+def test_count_srt_entries_uses_real_newlines():
+    srt_content = (
+        "1\n"
+        "00:00:00,000 --> 00:00:01,000\n"
+        "第一句\n\n"
+        "2\n"
+        "00:00:01,100 --> 00:00:02,000\n"
+        "Second sentence\n"
+    )
+
+    assert upload_routes._count_srt_entries(srt_content) == 2
+
+
 def test_should_request_language_confirmation_for_zh_locale_mismatch_under_085():
     task_info = {
         "request_source": "telegram",

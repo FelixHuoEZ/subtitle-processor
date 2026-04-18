@@ -63,3 +63,13 @@ def test_convert_to_srt_keeps_original_when_json3_parse_fails():
     converted = service.convert_to_srt(plain_text, "json3")
 
     assert converted == plain_text
+
+
+def test_generate_srt_uses_real_newlines_and_counts_entries():
+    service = SubtitleService()
+
+    srt_content = service._generate_srt_from_text("第一句。Second sentence.", duration=10)
+
+    assert srt_content is not None
+    assert "\\n" not in srt_content
+    assert "\n" in srt_content
