@@ -133,6 +133,18 @@ All defaults are listed in `.env.example`.
    docker compose pull
    docker compose up -d --no-build
    ```
+4. For the usual "build here, then roll it out on the NAS" workflow, use the fixed wrapper:
+   ```bash
+   ./scripts/release-to-nas.sh
+   ```
+   Useful variants:
+   - `./scripts/release-to-nas.sh --dry-run`
+   - `./scripts/release-to-nas.sh --services subtitle-processor,telegram-bot`
+   - `./scripts/release-to-nas.sh --nas-only --service subtitle-processor`
+   The wrapper runs local `build-and-push.sh`, then on the NAS executes
+   `docker compose pull`, `docker compose up -d --force-recreate`, and `docker compose ps`
+   inside `/share/ZFS530_DATA/.qpkg/container-station/data/application/subtitle`.
+   It uses direct `ssh nas` when available, otherwise falls back to `~/nas-remote`.
 
 ### 🤖 Telegram Deployment (Single Entry)
 - Choose **one** machine (for example the NAS that fronts Caddy) to run the `telegram-bot` service with webhook enabled. Configure `telegram.webhook.public_url` (or `TELEGRAM_WEBHOOK_*` envs) **only** on this host so it remains the sole webhook endpoint. Start the stack with the Telegram profile:
@@ -319,6 +331,19 @@ Special thanks to:
    docker compose pull
    docker compose up -d --no-build
    ```
+4. 如果是你平时那种“本机构建并推送，然后在 NAS 上拉取并重启”的流程，直接用固定脚本：
+   ```bash
+   ./scripts/release-to-nas.sh
+   ```
+   常用变体：
+   - `./scripts/release-to-nas.sh --dry-run`
+   - `./scripts/release-to-nas.sh --services subtitle-processor,telegram-bot`
+   - `./scripts/release-to-nas.sh --nas-only --service subtitle-processor`
+   这个脚本会先执行本地 `build-and-push.sh`，然后在 NAS 的
+   `/share/ZFS530_DATA/.qpkg/container-station/data/application/subtitle`
+   目录里运行 `docker compose pull`、`docker compose up -d --force-recreate`
+   和 `docker compose ps`。当前 shell 能直连 `ssh nas` 时会同步执行；
+   否则自动回退到 `~/nas-remote`。
 
 ### 🔧 使用方法
 1. **Telegram 机器人**
