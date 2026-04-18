@@ -406,7 +406,10 @@ def _process_video_task(task_info, auto_transcribe):
             file_service.update_file_info(process_id, task_info)
 
             _request_language_confirmation_if_needed(
-                process_id, task_info, result
+                process_id,
+                task_info,
+                result,
+                stage="pre_transcription",
             )
 
             logger.info(
@@ -709,6 +712,20 @@ def _process_video_task(task_info, auto_transcribe):
                                     task_info,
                                     result,
                                     skip_if_resolved=True,
+                                    stage="post_transcription",
+                                )
+                                logger.info(
+                                    "转录后最终语言状态: process=%s language=%s confidence=%.4f readwise_mode=%s reason=%s override=%s",
+                                    process_id,
+                                    task_info.get("language"),
+                                    float(
+                                        (
+                                            task_info.get("language_details") or {}
+                                        ).get("confidence", 0.0)
+                                    ),
+                                    task_info.get("readwise_mode"),
+                                    task_info.get("readwise_reason"),
+                                    task_info.get("language_override") or "auto",
                                 )
 
                             logger.info(
@@ -906,14 +923,34 @@ def _language_confirmation_is_resolved(task_info):
 
 
 def _request_language_confirmation_if_needed(
-    process_id, task_info, result, skip_if_resolved=False
+    process_id, task_info, result, skip_if_resolved=False, stage="unknown"
 ):
     if skip_if_resolved and _language_confirmation_is_resolved(task_info):
+        confirmation = (task_info or {}).get("language_confirmation") or {}
+        logger.info(
+            "跳过重复语言确认: process=%s stage=%s existing_status=%s selected_language=%s",
+            process_id,
+            stage,
+            confirmation.get("status"),
+            confirmation.get("selected_language") or "auto",
+        )
         return None
 
     confirmation_state = _should_request_language_confirmation(task_info, result)
     if not confirmation_state:
         return None
+
+    logger.info(
+        "语言确认触发: process=%s stage=%s reason=%s spoken_language=%s spoken_confidence=%.4f content_locale=%s readwise_mode=%s readwise_reason=%s",
+        process_id,
+        stage,
+        confirmation_state.get("reason"),
+        confirmation_state.get("suggested_language"),
+        float(confirmation_state.get("suggested_confidence", 0.0) or 0.0),
+        confirmation_state.get("content_locale"),
+        result.get("readwise_mode"),
+        result.get("readwise_reason"),
+    )
 
     task_info["status"] = "waiting_for_language_confirmation"
     task_info["language_confirmation"] = confirmation_state
@@ -921,6 +958,13 @@ def _request_language_confirmation_if_needed(
     file_service.update_file_info(process_id, task_info)
 
     resolved_confirmation = _wait_for_language_confirmation(process_id)
+    logger.info(
+        "语言确认已解决: process=%s stage=%s status=%s selected_language=%s",
+        process_id,
+        stage,
+        resolved_confirmation.get("status"),
+        resolved_confirmation.get("selected_language") or "auto",
+    )
     task_info["language_confirmation"] = resolved_confirmation
     task_info["status"] = "processing"
     task_info["updated_time"] = datetime.now().isoformat()
@@ -962,6 +1006,7 @@ def _wait_for_language_confirmation(process_id):
             "resolved_at": datetime.now().isoformat(),
         }
     )
+    logger.info("语言确认超时，继续自动处理: process=%s", process_id)
     file_service.update_file_info(
         process_id,
         {
@@ -1000,6 +1045,21 @@ def _refresh_language_state_from_final_subtitle(
         refreshed_language_details,
         refreshed_content_locale_details,
     )
+    process_id = (
+        task_info.get("id")
+        or task_info.get("process_id")
+        or result.get("process_id")
+        or "unknown"
+    )
+    logger.info(
+        "转录后自动语言重算: process=%s auto_language=%s auto_confidence=%.4f content_locale=%s auto_readwise_mode=%s auto_readwise_reason=%s",
+        process_id,
+        refreshed_language_details.get("language"),
+        float(refreshed_language_details.get("confidence", 0.0) or 0.0),
+        refreshed_content_locale_details.get("language"),
+        readwise_decision.get("mode"),
+        readwise_decision.get("reason"),
+    )
 
     result["language"] = refreshed_language_details.get("language")
     result["language_details"] = refreshed_language_details
@@ -1026,6 +1086,13 @@ def _refresh_language_state_from_final_subtitle(
     task_info["spoken_pattern"] = result["spoken_pattern"]
 
     if _normalize_language_choice(task_info.get("language_override")) in {"zh", "en"}:
+        logger.info(
+            "转录后自动语言重算将被人工选择覆盖: process=%s auto_language=%s auto_confidence=%.4f selected_language=%s",
+            process_id,
+            refreshed_language_details.get("language"),
+            float(refreshed_language_details.get("confidence", 0.0) or 0.0),
+            task_info.get("language_override"),
+        )
         _apply_language_confirmation(result, task_info, task_info.get("language_confirmation"))
 
     return refreshed_language_details
@@ -1041,6 +1108,11 @@ def _apply_language_confirmation(result, task_info, confirmation):
     )
 
     if selected_language not in {"zh", "en"}:
+        logger.info(
+            "语言确认保持自动: auto_language=%s auto_confidence=%.4f",
+            (result.get("language_details") or {}).get("language"),
+            float((result.get("language_details") or {}).get("confidence", 0.0) or 0.0),
+        )
         return
 
     original_language_details = dict(result.get("language_details") or {})
@@ -1079,3 +1151,11 @@ def _apply_language_confirmation(result, task_info, confirmation):
     task_info["readwise_url_only"] = result["readwise_url_only"]
     task_info["skip_processing_for_url_only"] = result["skip_processing_for_url_only"]
     task_info["spoken_pattern"] = result["spoken_pattern"]
+    logger.info(
+        "应用语言确认选择: selected_language=%s auto_language=%s auto_confidence=%s final_readwise_mode=%s final_readwise_reason=%s",
+        selected_language,
+        original_language_details.get("language"),
+        original_language_details.get("confidence"),
+        result["readwise_mode"],
+        result["readwise_reason"],
+    )
