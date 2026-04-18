@@ -11,7 +11,7 @@ import time
 from copy import deepcopy
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import requests
 import yt_dlp
@@ -203,6 +203,99 @@ class VideoService:
             return detected[0]
         return None
 
+    @staticmethod
+    def _extract_translation_target(
+        subtitle_formats: List[Dict[str, Any]]
+    ) -> Optional[str]:
+        for subtitle_format in subtitle_formats or []:
+            subtitle_url = subtitle_format.get("url")
+            if not subtitle_url:
+                continue
+            parsed = urlparse(subtitle_url)
+            translation_target = parse_qs(parsed.query).get("tlang", [None])[0]
+            normalized_target = normalize_primary_language(translation_target)
+            if normalized_target:
+                return normalized_target
+        return None
+
+    def _build_track_catalog(self, info: Dict[str, Any]) -> List[Dict[str, Any]]:
+        catalog: List[Dict[str, Any]] = []
+        if not info:
+            return catalog
+
+        for provider_bucket in ("subtitles", "automatic_captions"):
+            track_map = info.get(provider_bucket, {})
+            if not isinstance(track_map, dict):
+                continue
+
+            for provider_language, subtitle_formats in track_map.items():
+                if not isinstance(subtitle_formats, list) or not subtitle_formats:
+                    continue
+
+                translation_target = self._extract_translation_target(subtitle_formats)
+                normalized_language = self._normalize_language_code(provider_language)
+
+                if provider_bucket == "subtitles":
+                    track_type = "human"
+                elif translation_target:
+                    track_type = "translated"
+                else:
+                    track_type = "asr_original"
+
+                sample_url = None
+                sample_name = None
+                for subtitle_format in subtitle_formats:
+                    if not sample_url and subtitle_format.get("url"):
+                        sample_url = subtitle_format.get("url")
+                    if not sample_name and subtitle_format.get("name"):
+                        sample_name = subtitle_format.get("name")
+                    if sample_url and sample_name:
+                        break
+
+                catalog.append(
+                    {
+                        "provider_bucket": provider_bucket,
+                        "provider_language": provider_language,
+                        "language": normalized_language,
+                        "track_type": track_type,
+                        "translation_target": translation_target,
+                        "is_original_candidate": track_type in {"human", "asr_original"},
+                        "is_chinese_original_candidate": (
+                            normalized_language == "zh"
+                            and track_type in {"human", "asr_original"}
+                        ),
+                        "name": sample_name,
+                        "url": sample_url,
+                        "formats": subtitle_formats,
+                    }
+                )
+
+        return catalog
+
+    @staticmethod
+    def _dedupe_primary_languages(lang_priority: List[str]) -> List[str]:
+        deduped: List[str] = []
+        for language in lang_priority or []:
+            normalized = normalize_primary_language(language)
+            if normalized in {"zh", "en"} and normalized not in deduped:
+                deduped.append(normalized)
+        return deduped
+
+    @staticmethod
+    def _select_track_for_language(
+        track_catalog: List[Dict[str, Any]],
+        language: str,
+    ) -> Optional[Dict[str, Any]]:
+        for track_type in ("human", "asr_original"):
+            for track in track_catalog:
+                if (
+                    track.get("track_type") == track_type
+                    and track.get("language") == language
+                    and track.get("is_original_candidate")
+                ):
+                    return track
+        return None
+
     def _detect_metadata_text_language(
         self, info: Dict[str, Any], min_confidence: float = 0.8
     ) -> Optional[str]:
@@ -311,6 +404,22 @@ class VideoService:
             # Available subtitle tracks are not a reliable signal for the video's
             # primary language. Keep the main-language decision grounded in
             # metadata text, explicit metadata.language, and audio probing.
+            subtitle_track_type = (
+                subtitle_result.get("track_type") if subtitle_result else None
+            )
+            subtitle_content = subtitle_result.get("content") if subtitle_result else None
+            if subtitle_content and subtitle_track_type in {"human", "asr_original"}:
+                subtitle_weight = 0.82 if subtitle_track_type == "human" else 0.72
+                subtitle_hint = self._infer_language_from_text(
+                    subtitle_content,
+                    f"subtitle.text.{subtitle_track_type}",
+                    max_weight=subtitle_weight,
+                )
+                if subtitle_hint:
+                    add_language_score(
+                        scores, subtitle_hint["language"], subtitle_hint["weight"]
+                    )
+                    signals.append(subtitle_hint)
 
             if audio_result:
                 audio_language = self._normalize_language_code(
@@ -345,6 +454,160 @@ class VideoService:
             logger.error(f"检测视频语言详情时出错: {str(e)}")
             return self._build_language_details(None, 0.0, {}, [])
 
+    def get_content_locale_details(
+        self, info: Dict[str, Any], language_details: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Infer the content locale (packaging / target-audience language)."""
+        try:
+            if not info:
+                return self._build_language_details(None, 0.0, {}, [])
+
+            scores = blank_language_scores()
+            signals: List[Dict[str, Any]] = []
+
+            title_hint = self._infer_language_from_text(
+                info.get("title", "") or "",
+                "content_locale.title",
+                max_weight=0.55,
+            )
+            if title_hint:
+                add_language_score(scores, title_hint["language"], title_hint["weight"])
+                signals.append(title_hint)
+
+            channel_text = "\n".join(
+                [
+                    info.get("channel", "") or "",
+                    info.get("uploader", "") or "",
+                ]
+            ).strip()
+            channel_hint = self._infer_language_from_text(
+                channel_text,
+                "content_locale.channel",
+                max_weight=0.32,
+            )
+            if channel_hint:
+                add_language_score(
+                    scores, channel_hint["language"], channel_hint["weight"]
+                )
+                signals.append(channel_hint)
+
+            description_hint = self._infer_language_from_text(
+                (info.get("description", "") or "")[:600],
+                "content_locale.description",
+                max_weight=0.18,
+            )
+            if description_hint:
+                add_language_score(
+                    scores,
+                    description_hint["language"],
+                    description_hint["weight"],
+                )
+                signals.append(description_hint)
+
+            if not any(scores.values()) and language_details:
+                spoken_language = self._normalize_language_code(
+                    language_details.get("language")
+                )
+                spoken_confidence = float(language_details.get("confidence", 0.0))
+                if spoken_language in {"zh", "en"} and spoken_confidence > 0:
+                    fallback_weight = round(
+                        min(0.2, 0.08 + spoken_confidence * 0.12), 4
+                    )
+                    add_language_score(scores, spoken_language, fallback_weight)
+                    signals.append(
+                        {
+                            "source": "content_locale.fallback_spoken",
+                            "language": spoken_language,
+                            "weight": fallback_weight,
+                            "confidence": spoken_confidence,
+                        }
+                    )
+
+            decision = decide_primary_language(
+                scores, min_total=0.18, min_margin=0.12, min_confidence=0.58
+            )
+            locale = decision.get("language")
+            return self._build_language_details(
+                locale,
+                decision.get("confidence", 0.0),
+                decision.get("scores", scores),
+                signals,
+            )
+
+        except Exception as e:
+            logger.error(f"检测内容语境时出错: {str(e)}")
+            return self._build_language_details(None, 0.0, {}, [])
+
+    def _derive_spoken_pattern(
+        self,
+        spoken_language: Optional[str],
+        content_locale: Optional[str],
+    ) -> str:
+        normalized_spoken = self._normalize_language_code(spoken_language)
+        normalized_locale = self._normalize_language_code(content_locale)
+        if normalized_locale == "zh" and normalized_spoken == "en":
+            return "zh_framed_foreign_body"
+        if normalized_spoken == "mixed":
+            return "mixed"
+        if normalized_spoken in {"zh", "en"}:
+            return "single_language"
+        return "unknown"
+
+    def _build_readwise_decision(
+        self,
+        track_catalog: List[Dict[str, Any]],
+        language_details: Dict[str, Any],
+        content_locale_details: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        spoken_language = self._normalize_language_code(language_details.get("language"))
+        content_locale = self._normalize_language_code(
+            content_locale_details.get("language")
+        )
+        spoken_confidence = float(language_details.get("confidence", 0.0))
+        has_original_zh_track = any(
+            track.get("is_chinese_original_candidate") for track in track_catalog
+        )
+        spoken_pattern = self._derive_spoken_pattern(spoken_language, content_locale)
+
+        if self.readwise_url_only_when_zh_subs and has_original_zh_track:
+            return {
+                "mode": "url_only",
+                "reason": "original_zh_track_available",
+                "skip_processing": True,
+                "spoken_pattern": spoken_pattern,
+            }
+
+        if content_locale == "zh" and spoken_pattern == "zh_framed_foreign_body":
+            return {
+                "mode": "url_only",
+                "reason": "zh_locale_foreign_spoken",
+                "skip_processing": False,
+                "spoken_pattern": spoken_pattern,
+            }
+
+        if content_locale == "zh" and spoken_language == "mixed":
+            return {
+                "mode": "url_only",
+                "reason": "zh_locale_mixed_spoken",
+                "skip_processing": False,
+                "spoken_pattern": spoken_pattern,
+            }
+
+        if content_locale == "zh" and spoken_confidence < 0.5:
+            return {
+                "mode": "url_only",
+                "reason": "low_confidence_conflict",
+                "skip_processing": False,
+                "spoken_pattern": spoken_pattern,
+            }
+
+        return {
+            "mode": "full_text",
+            "reason": "validated_original_text",
+            "skip_processing": False,
+            "spoken_pattern": spoken_pattern,
+        }
+
     @staticmethod
     def _get_zh_language_priority() -> List[str]:
         return ["zh-CN", "zh", "zh-TW", "zh-Hans", "zh-Hant"]
@@ -353,22 +616,27 @@ class VideoService:
     def _get_en_language_priority() -> List[str]:
         return ["en", "en-US", "en-GB"]
 
-    def _has_language_subtitles(
-        self, info: Dict[str, Any], lang_priority: List[str]
+    def _has_original_language_tracks(
+        self,
+        track_catalog: List[Dict[str, Any]],
+        lang_priority: List[str],
     ) -> bool:
-        available_subtitles = self._extract_languages(info.get("subtitles", {}))
-        available_auto = self._extract_languages(info.get("automatic_captions", {}))
-        for lang in lang_priority:
-            if self._language_available(
-                lang, available_subtitles
-            ) or self._language_available(lang, available_auto):
+        for language in self._dedupe_primary_languages(lang_priority):
+            if self._select_track_for_language(track_catalog, language):
                 return True
         return False
 
-    def _should_clip_url_only(self, info: Dict[str, Any]) -> bool:
+    def _should_clip_url_only(
+        self,
+        info: Dict[str, Any],
+        track_catalog: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
         if not self.readwise_url_only_when_zh_subs:
             return False
-        return self._has_language_subtitles(info, self._get_zh_language_priority())
+        resolved_track_catalog = track_catalog or self._build_track_catalog(info)
+        return any(
+            track.get("is_chinese_original_candidate") for track in resolved_track_catalog
+        )
 
     def _setup_yt_dlp_options(self):
         """设置yt-dlp默认选项"""
@@ -985,6 +1253,7 @@ class VideoService:
         language: Optional[str],
         info: Dict[str, Any],
         language_confidence: float = 0.0,
+        track_catalog: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[bool, List[str]]:
         """确定字幕获取策略
 
@@ -1005,6 +1274,7 @@ class VideoService:
                     return languages
                 return languages[:limit] + [f"...(+{len(languages) - limit})"]
 
+            resolved_track_catalog = track_catalog or self._build_track_catalog(info)
             available_subtitles = self._extract_languages(info.get("subtitles", {}))
             available_auto = self._extract_languages(info.get("automatic_captions", {}))
 
@@ -1029,15 +1299,11 @@ class VideoService:
                 logger.info("未能确认视频主语言，跳过字幕下载并改走转录")
                 return False, []
 
-            # 检查是否有对应语言的字幕
-            for lang in lang_priority:
-                if self._language_available(
-                    lang, available_subtitles
-                ) or self._language_available(lang, available_auto):
-                    logger.info(f"找到{lang}字幕，将尝试下载")
-                    return True, lang_priority
+            if self._has_original_language_tracks(resolved_track_catalog, lang_priority):
+                logger.info("找到与主语言 %s 匹配的原始字幕轨，将尝试下载", primary_language)
+                return True, lang_priority
 
-            logger.info("未找到与主语言 %s 匹配的字幕语言", primary_language)
+            logger.info("未找到与主语言 %s 匹配的原始字幕轨", primary_language)
             return False, lang_priority
 
         except Exception as e:
@@ -2044,34 +2310,30 @@ class VideoService:
             with yt_dlp.YoutubeDL(self.yt_dlp_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
 
-                available_subtitles = info.get("subtitles", {})
-                available_auto = info.get("automatic_captions", {})
-                subtitle_keys = list(available_subtitles.keys())
-                auto_keys = list(available_auto.keys())
+                track_catalog = self._build_track_catalog(info)
 
-                # 按优先级查找字幕
-                for lang in lang_priority:
-                    # 优先使用人工字幕
-                    matched_lang = self._match_language_key(lang, subtitle_keys)
-                    if matched_lang:
-                        logger.info(f"找到{matched_lang}人工字幕")
-                        subtitle_result = self._extract_subtitle_content(
-                            available_subtitles[matched_lang]
-                        )
-                        return self._build_subtitle_result(
-                            subtitle_result, matched_lang, "subtitle"
-                        )
+                for normalized_language in self._dedupe_primary_languages(lang_priority):
+                    selected_track = self._select_track_for_language(
+                        track_catalog, normalized_language
+                    )
+                    if not selected_track:
+                        continue
 
-                    # 如果没有人工字幕，使用自动字幕
-                    matched_lang = self._match_language_key(lang, auto_keys)
-                    if matched_lang:
-                        logger.info(f"找到{matched_lang}自动字幕")
-                        subtitle_result = self._extract_subtitle_content(
-                            available_auto[matched_lang]
-                        )
-                        return self._build_subtitle_result(
-                            subtitle_result, matched_lang, "automatic_caption"
-                        )
+                    logger.info(
+                        "找到%s原始字幕轨: provider=%s type=%s",
+                        selected_track.get("provider_language"),
+                        selected_track.get("provider_bucket"),
+                        selected_track.get("track_type"),
+                    )
+                    subtitle_result = self._extract_subtitle_content(
+                        selected_track.get("formats", [])
+                    )
+                    return self._build_subtitle_result(
+                        subtitle_result,
+                        selected_track.get("provider_language"),
+                        selected_track.get("provider_bucket"),
+                        track_info=selected_track,
+                    )
 
                 logger.warning("未找到匹配语言的字幕")
                 return None
@@ -2212,15 +2474,23 @@ class VideoService:
         subtitle_payload: Optional[Dict[str, Any]],
         matched_lang: Optional[str],
         source_type: str,
+        track_info: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         if not subtitle_payload or not subtitle_payload.get("content"):
             return None
+        resolved_track_type = (
+            track_info.get("track_type")
+            if track_info
+            else ("human" if source_type == "subtitle" else "asr_original")
+        )
         return {
             "content": subtitle_payload.get("content"),
             "format": subtitle_payload.get("format"),
             "url": subtitle_payload.get("url"),
             "matched_lang": matched_lang,
             "source_type": source_type,
+            "track_type": resolved_track_type,
+            "track_info": track_info,
         }
 
     def _process_video_for_transcription_with_url(
@@ -2235,25 +2505,42 @@ class VideoService:
             logger.error("获取视频信息失败")
             return None
 
-        # 2. 检测语言和字幕策略
+        # 2. 轨道分类、语言和Readwise策略
+        track_catalog = self._build_track_catalog(video_info)
         language_details = self.get_video_language_details(video_info)
         language = language_details.get("language")
+        content_locale_details = self.get_content_locale_details(
+            video_info, language_details=language_details
+        )
         should_download_subs, lang_priority = self.get_subtitle_strategy(
-            language, video_info, language_details.get("confidence", 0.0)
+            language,
+            video_info,
+            language_details.get("confidence", 0.0),
+            track_catalog=track_catalog,
+        )
+        readwise_decision = self._build_readwise_decision(
+            track_catalog, language_details, content_locale_details
         )
 
-        if self._should_clip_url_only(video_info):
-            logger.info("检测到中文字幕且启用URL剪藏，跳过字幕下载与转录")
+        if self._should_clip_url_only(video_info, track_catalog=track_catalog):
+            logger.info("检测到原始中文字幕且启用URL剪藏，跳过字幕下载与转录")
             return {
                 "video_info": video_info,
                 "language": language,
                 "language_details": language_details,
+                "content_locale": content_locale_details.get("language"),
+                "content_locale_details": content_locale_details,
                 "subtitle_content": None,
                 "subtitle_metadata": None,
                 "audio_file": None,
                 "temp_dir": None,
                 "needs_transcription": False,
-                "readwise_url_only": True,
+                "readwise_mode": readwise_decision.get("mode"),
+                "readwise_reason": readwise_decision.get("reason"),
+                "readwise_url_only": readwise_decision.get("mode") == "url_only",
+                "skip_processing_for_url_only": True,
+                "spoken_pattern": readwise_decision.get("spoken_pattern"),
+                "track_catalog": track_catalog,
             }
 
         # 3. 尝试下载字幕
@@ -2273,6 +2560,9 @@ class VideoService:
                 ):
                     language_details = refined_details
                     language = language_details.get("language")
+                    content_locale_details = self.get_content_locale_details(
+                        video_info, language_details=language_details
+                    )
 
         # 4. 如果没有字幕，下载音频用于转录
         audio_file = None
@@ -2302,17 +2592,32 @@ class VideoService:
                     ):
                         language_details = refined_details
                         language = language_details.get("language")
+                        content_locale_details = self.get_content_locale_details(
+                            video_info, language_details=language_details
+                        )
+
+        readwise_decision = self._build_readwise_decision(
+            track_catalog, language_details, content_locale_details
+        )
 
         return {
             "video_info": video_info,
             "language": language,
             "language_details": language_details,
+            "content_locale": content_locale_details.get("language"),
+            "content_locale_details": content_locale_details,
             "subtitle_content": subtitle_content,
             "subtitle_metadata": subtitle_metadata,
             "audio_file": audio_file,
             "temp_dir": temp_dir,
             "download_error": download_error,
             "needs_transcription": subtitle_content is None,
+            "readwise_mode": readwise_decision.get("mode"),
+            "readwise_reason": readwise_decision.get("reason"),
+            "readwise_url_only": readwise_decision.get("mode") == "url_only",
+            "skip_processing_for_url_only": readwise_decision.get("skip_processing", False),
+            "spoken_pattern": readwise_decision.get("spoken_pattern"),
+            "track_catalog": track_catalog,
         }
 
     def process_video_for_transcription(
