@@ -96,6 +96,110 @@ def test_apply_language_confirmation_updates_language_and_readwise_mode():
     assert task_info["language_override"] == "zh"
 
 
+def test_refresh_language_state_from_final_subtitle_can_trigger_confirmation(
+    monkeypatch,
+):
+    task_info = {
+        "request_source": "telegram",
+        "url": "https://www.youtube.com/watch?v=7R9H-EX6cnI",
+    }
+    result = {
+        "video_info": {"title": "再次改良英语 这能行吗", "uploader": "Demo Channel"},
+        "language": "en",
+        "language_details": {"language": "en", "confidence": 0.9067},
+        "content_locale": "zh",
+        "content_locale_details": {"language": "zh", "confidence": 0.91},
+        "readwise_mode": "url_only",
+        "readwise_reason": "zh_locale_foreign_spoken",
+        "readwise_url_only": True,
+        "skip_processing_for_url_only": False,
+        "spoken_pattern": "zh_framed_foreign_body",
+        "track_catalog": [],
+        "audio_probe": {"language": "en", "confidence": 0.9067},
+    }
+    captured_args = {}
+
+    def fake_get_video_language_details(info, subtitle_result=None, audio_result=None):
+        captured_args["info"] = info
+        captured_args["subtitle_result"] = subtitle_result
+        captured_args["audio_result"] = audio_result
+        return {"language": "mixed", "confidence": 0.68}
+
+    monkeypatch.setattr(
+        upload_routes.video_service,
+        "get_video_language_details",
+        fake_get_video_language_details,
+    )
+    monkeypatch.setattr(
+        upload_routes.video_service,
+        "get_content_locale_details",
+        lambda info, language_details=None: {"language": "zh", "confidence": 0.91},
+    )
+    monkeypatch.setattr(
+        upload_routes.video_service,
+        "_build_readwise_decision",
+        lambda track_catalog, language_details, content_locale_details: {
+            "mode": "url_only",
+            "reason": "zh_locale_mixed_spoken",
+            "skip_processing": False,
+            "spoken_pattern": "mixed",
+        },
+    )
+
+    assert upload_routes._should_request_language_confirmation(task_info, result) is None
+
+    upload_routes._refresh_language_state_from_final_subtitle(
+        task_info,
+        result,
+        subtitle_content="1\n00:00:00,000 --> 00:00:02,000\n这次我们一步一步来。\n",
+    )
+
+    confirmation = upload_routes._should_request_language_confirmation(
+        task_info, result
+    )
+
+    assert captured_args["subtitle_result"]["track_type"] == "asr_original"
+    assert "一步一步来" in captured_args["subtitle_result"]["content"]
+    assert captured_args["audio_result"] == {"language": "en", "confidence": 0.9067}
+    assert result["language"] == "mixed"
+    assert result["readwise_reason"] == "zh_locale_mixed_spoken"
+    assert confirmation is not None
+    assert confirmation["reason"] == "mixed_spoken_language"
+
+
+def test_request_language_confirmation_skips_reprompt_after_resolution(monkeypatch):
+    task_info = {
+        "request_source": "telegram",
+        "language_confirmation": {
+            "status": "confirmed",
+            "selected_language": "zh",
+        },
+    }
+    result = {
+        "language_details": {"language": "mixed", "confidence": 0.64},
+        "content_locale": "zh",
+        "content_locale_details": {"language": "zh", "confidence": 0.91},
+        "skip_processing_for_url_only": False,
+    }
+
+    monkeypatch.setattr(
+        upload_routes.file_service,
+        "update_file_info",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("should not reprompt once confirmation is resolved")
+        ),
+    )
+
+    resolved = upload_routes._request_language_confirmation_if_needed(
+        "task-1",
+        task_info,
+        result,
+        skip_if_resolved=True,
+    )
+
+    assert resolved is None
+
+
 def test_status_endpoint_returns_language_confirmation(monkeypatch):
     client = _build_process_test_client()
     task_info = {
