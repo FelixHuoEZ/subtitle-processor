@@ -6,6 +6,7 @@
 > **注意**：本 README 完全由 AI 生成，仅供参考。
 
 ### Recent Updates
+- Current language decision flow is documented in [`docs/language-decision-logic.md`](docs/language-decision-logic.md), including spoken language, content locale, subtitle strategy, and Readwise branching.
 - Runtime hotword settings can be toggled without restarting: `/process/settings/hotword` persists to `config/hotword_settings.json`, and Telegram 中新增 `/hotword_status` / `/hotword_toggle` 支持在线开关。
 - Telegram 机器人增加标签/热词交互提示、`/skip` 快捷命令，并在后台轮询 `/process/status/<id>` 自动推送字幕文件。
 - `scripts/build-and-push.sh` 新增 `bgutil-provider` 镜像构建；默认 Dockerfile 仅保留必需依赖，X11/VNC 相关组件以注释形式保留，构建镜像更轻量。
@@ -174,6 +175,7 @@ Special thanks to:
 一个综合性的字幕处理服务，可以自动下载、转录和管理来自各种平台的视频字幕。提供 Telegram 机器人接口和网页管理门户。
 
 ### 最近更新
+- 当前语言判定链路已整理到 [`docs/language-decision-logic.md`](docs/language-decision-logic.md)，包含主语言、内容语境、字幕策略和 Readwise 分支流程图。
 - `scripts/build-and-push.sh` 支持持续化 BuildKit 缓存，多架构推送后会自动在本机加载当前架构镜像，无需再执行 `docker pull`。
 - Telegram Webhook 立即返回，并将字幕处理放到后台执行，避免因为重试导致的重复回复。
 - Telegram 部署改为“单入口 + 多工作节点”模式，避免同一条消息被多个 bot 实例重复回复。
