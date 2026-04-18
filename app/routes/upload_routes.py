@@ -38,6 +38,7 @@ readwise_service = ReadwiseService()
 LANGUAGE_CONFIRMATION_TIMEOUT_SECONDS = 180
 LANGUAGE_CONFIRMATION_POLL_INTERVAL_SECONDS = 1.0
 LANGUAGE_CONFIRMATION_CHOICES = {"zh", "en", "auto"}
+LANGUAGE_CONFIRMATION_MISMATCH_MAX_CONFIDENCE = 0.9
 
 
 @upload_bp.route("/", methods=["GET", "POST"])
@@ -871,7 +872,7 @@ def _should_request_language_confirmation(task_info, result):
         content_locale in {"zh", "en"}
         and spoken_language in {"zh", "en"}
         and content_locale != spoken_language
-        and spoken_confidence < 0.85
+        and spoken_confidence < LANGUAGE_CONFIRMATION_MISMATCH_MAX_CONFIDENCE
     ):
         trigger_reason = "content_locale_spoken_mismatch"
 

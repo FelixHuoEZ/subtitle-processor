@@ -78,6 +78,29 @@ def test_should_request_language_confirmation_for_zh_locale_mismatch_under_085()
     assert confirmation["suggested_language"] == "en"
 
 
+def test_should_request_language_confirmation_for_zh_locale_mismatch_under_090():
+    task_info = {
+        "request_source": "telegram",
+        "url": "https://www.youtube.com/watch?v=7R9H-EX6cnI",
+    }
+    result = {
+        "language_details": {"language": "en", "confidence": 0.8618},
+        "content_locale": "zh",
+        "content_locale_details": {"language": "zh", "confidence": 0.91},
+        "video_info": {"title": "再次改良英语 这能行吗", "uploader": "Demo Channel"},
+        "skip_processing_for_url_only": False,
+    }
+
+    confirmation = upload_routes._should_request_language_confirmation(
+        task_info, result
+    )
+
+    assert confirmation is not None
+    assert confirmation["reason"] == "content_locale_spoken_mismatch"
+    assert confirmation["suggested_language"] == "en"
+    assert confirmation["suggested_confidence"] == 0.8618
+
+
 def test_apply_language_confirmation_updates_language_and_readwise_mode():
     result = {
         "language": "en",
