@@ -15,7 +15,6 @@ from ..config.config_manager import get_config_value
 from ..utils.language_detection import (
     add_language_score,
     blank_language_scores,
-    decide_primary_language,
     detect_text_primary_language,
     normalize_primary_language,
 )
@@ -28,6 +27,14 @@ logger = logging.getLogger(__name__)
 
 class TranscriptionService:
     """音频转录服务 - 使用FunASR进行音频转录"""
+
+    _AUDIO_PROBE_LANGUAGE_PRIORS = {
+        "zh": 1.0,
+        "en": 0.78,
+    }
+    _AUDIO_PROBE_REPEAT_BONUS = 0.12
+    _AUDIO_PROBE_REPEAT_BONUS_CAP = 0.24
+    _AUDIO_PROBE_MIXED_UNCERTAINTY_WEIGHT = 0.35
 
     def __init__(self):
         """初始化转录服务"""
@@ -667,6 +674,8 @@ class TranscriptionService:
         offsets = self._get_audio_probe_offsets(duration_seconds, segment_seconds)
 
         scores = blank_language_scores()
+        sample_counts = {language: 0 for language in scores}
+        uncertainty_mass = 0.0
         samples = []
         temp_files: List[str] = []
         provider_metadata: Dict[str, Any] = {}
@@ -692,8 +701,18 @@ class TranscriptionService:
                 language = normalize_primary_language(detection.get("language"))
                 confidence = float(detection.get("confidence", 0.0))
                 if language in {"zh", "en"} and confidence > 0:
-                    weight = max(0.2, round(confidence, 4))
+                    weight = self._score_audio_probe_sample(language, confidence)
                     add_language_score(scores, language, weight)
+                    sample_counts[language] += 1
+                elif language == "mixed" and confidence > 0:
+                    uncertainty_mass = round(
+                        uncertainty_mass
+                        + (
+                            round(confidence, 4)
+                            * self._AUDIO_PROBE_MIXED_UNCERTAINTY_WEIGHT
+                        ),
+                        6,
+                    )
 
                 samples.append(
                     {
@@ -714,18 +733,102 @@ class TranscriptionService:
         if not samples:
             return None
 
-        decision = decide_primary_language(
-            scores, min_total=0.2, min_margin=0.12, min_confidence=0.58
+        adjusted_scores = self._apply_audio_probe_sample_adjustments(
+            scores, sample_counts
+        )
+        decision = self._decide_audio_probe_primary_language(
+            adjusted_scores,
+            uncertainty_mass=uncertainty_mass,
+            min_total=0.2,
+            min_margin=0.12,
+            min_confidence=0.58,
         )
         result = {
             "language": normalize_primary_language(decision.get("language")),
             "confidence": float(decision.get("confidence", 0.0)),
             "scores": decision.get("scores", {}),
+            "raw_scores": {key: round(float(value), 4) for key, value in scores.items()},
+            "sample_counts": sample_counts,
+            "uncertainty_mass": round(uncertainty_mass, 4),
             "samples": samples,
             "provider": provider,
             "provider_metadata": provider_metadata,
         }
         logger.info("音频语言探测 provider=%s 结果: %s", provider, result)
+        return result
+
+    @classmethod
+    def _score_audio_probe_sample(cls, language: str, confidence: float) -> float:
+        normalized = normalize_primary_language(language)
+        if normalized not in {"zh", "en"}:
+            return 0.0
+        prior_multiplier = cls._AUDIO_PROBE_LANGUAGE_PRIORS.get(normalized, 1.0)
+        return max(0.2, round(round(confidence, 4) * prior_multiplier, 4))
+
+    @classmethod
+    def _apply_audio_probe_sample_adjustments(
+        cls,
+        scores: Dict[str, float],
+        sample_counts: Dict[str, int],
+    ) -> Dict[str, float]:
+        adjusted_scores = {}
+        for language in blank_language_scores():
+            base_score = float(scores.get(language, 0.0))
+            repeats = max(0, int(sample_counts.get(language, 0)) - 1)
+            repeat_bonus = min(
+                cls._AUDIO_PROBE_REPEAT_BONUS_CAP,
+                repeats * cls._AUDIO_PROBE_REPEAT_BONUS,
+            )
+            adjusted_scores[language] = round(base_score * (1.0 + repeat_bonus), 6)
+        return adjusted_scores
+
+    @staticmethod
+    def _decide_audio_probe_primary_language(
+        scores: Dict[str, float],
+        *,
+        uncertainty_mass: float = 0.0,
+        min_total: float = 0.25,
+        min_margin: float = 0.18,
+        min_confidence: float = 0.62,
+    ) -> Dict[str, Any]:
+        normalized_scores = {
+            language: round(float(scores.get(language, 0.0)), 6)
+            for language in blank_language_scores()
+        }
+        supported_total = round(sum(normalized_scores.values()), 6)
+        total = round(supported_total + max(0.0, float(uncertainty_mass)), 6)
+        result = {
+            "language": None,
+            "confidence": 0.0,
+            "scores": normalized_scores,
+            "total_score": total,
+            "supported_total": supported_total,
+            "uncertainty_mass": round(max(0.0, float(uncertainty_mass)), 6),
+            "margin": 0.0,
+        }
+
+        if supported_total < min_total:
+            return result
+
+        best_language, best_score = max(
+            normalized_scores.items(), key=lambda item: item[1]
+        )
+        other_score = supported_total - best_score
+        confidence = best_score / total if total else 0.0
+        margin = best_score - other_score
+
+        result["confidence"] = round(confidence, 4)
+        result["margin"] = round(margin, 4)
+
+        if other_score >= min_total and margin < min_margin:
+            result["language"] = "mixed"
+            return result
+
+        if confidence >= min_confidence and margin >= min_margin:
+            result["language"] = best_language
+        else:
+            result["language"] = "mixed"
+
         return result
 
     def _probe_audio_language_with_configured_funasr(

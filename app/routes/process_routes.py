@@ -30,6 +30,15 @@ translation_service = TranslationService()
 readwise_service = ReadwiseService()
 
 
+def _normalize_language_confirmation_choice(language):
+    normalized = video_service._normalize_language_code(language)
+    if normalized in {"zh", "en"}:
+        return normalized
+    if isinstance(language, str) and language.strip().lower() == "auto":
+        return "auto"
+    return None
+
+
 @process_bp.route('/', methods=['GET', 'OPTIONS'])
 def process_index():
     """处理服务主页"""
@@ -461,6 +470,16 @@ def get_processing_status(task_id):
             'progress': task_info.get('progress'),
             'error': task_info.get('error'),
             'video_info': task_info.get('video_info'),
+            'language': task_info.get('language'),
+            'language_details': task_info.get('language_details'),
+            'content_locale': task_info.get('content_locale'),
+            'content_locale_details': task_info.get('content_locale_details'),
+            'readwise_mode': task_info.get('readwise_mode'),
+            'readwise_reason': task_info.get('readwise_reason'),
+            'readwise_url_only': task_info.get('readwise_url_only'),
+            'spoken_pattern': task_info.get('spoken_pattern'),
+            'language_confirmation': task_info.get('language_confirmation'),
+            'language_override': task_info.get('language_override'),
             'filename': task_info.get('filename'),
             'subtitle_path': task_info.get('subtitle_path') or task_info.get('path'),
             'view_url': task_info.get('url'),
@@ -493,6 +512,62 @@ def get_processing_status(task_id):
     except Exception as e:
         logger.error(f"获取处理状态失败: {str(e)}")
         return jsonify({'success': False, 'status': 'error', 'error': str(e)}), 500
+
+
+@process_bp.route('/status/<task_id>/language', methods=['POST'])
+def confirm_processing_language(task_id):
+    """记录语言确认结果，供后台处理线程继续执行."""
+    try:
+        task_info = file_service.get_file_info(task_id)
+        if not task_info:
+            return jsonify({'success': False, 'error': 'task_not_found'}), 404
+
+        data = request.get_json(silent=True) or {}
+        selected_language = _normalize_language_confirmation_choice(
+            data.get('language')
+        )
+        if selected_language not in {'zh', 'en', 'auto'}:
+            return jsonify({'success': False, 'error': 'invalid_language'}), 400
+
+        confirmation = dict(task_info.get('language_confirmation') or {})
+        if not confirmation:
+            return jsonify({'success': False, 'error': 'language_confirmation_not_required'}), 409
+
+        if task_info.get('status') != 'waiting_for_language_confirmation':
+            return jsonify(
+                {
+                    'success': False,
+                    'error': 'task_not_waiting_for_language_confirmation',
+                    'status': task_info.get('status'),
+                }
+            ), 409
+
+        confirmation.update(
+            {
+                'status': 'confirmed',
+                'selected_language': selected_language,
+                'resolved_at': datetime.now().isoformat(),
+                'resolved_by': data.get('source') or 'telegram',
+            }
+        )
+        file_service.update_file_info(
+            task_id,
+            {
+                'language_confirmation': confirmation,
+                'updated_time': datetime.now().isoformat(),
+            },
+        )
+        return jsonify(
+            {
+                'success': True,
+                'process_id': task_id,
+                'selected_language': selected_language,
+                'language_confirmation': confirmation,
+            }
+        )
+    except Exception as e:
+        logger.error(f"记录语言确认失败: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @process_bp.route('/batch/transcribe', methods=['POST'])

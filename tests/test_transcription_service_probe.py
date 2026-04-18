@@ -159,3 +159,43 @@ def test_audio_probe_returns_best_candidate_when_no_provider_is_decisive(
     assert result["provider"] == "configured_funasr"
     assert result["language"] == "zh"
     assert calls == ["configured_funasr", "openai"]
+
+
+def test_audio_probe_sample_scoring_discounts_english():
+    assert TranscriptionService._score_audio_probe_sample("zh", 1.0) == 1.0
+    assert TranscriptionService._score_audio_probe_sample("en", 1.0) == 0.78
+
+
+def test_audio_probe_repeat_bonus_rewards_sustained_samples():
+    adjusted = TranscriptionService._apply_audio_probe_sample_adjustments(
+        {"zh": 0.0, "en": 1.56},
+        {"zh": 0, "en": 2},
+    )
+
+    assert adjusted["en"] > 1.56
+
+
+def test_audio_probe_uncertainty_lowers_confidence_without_flipping_language():
+    decision = TranscriptionService._decide_audio_probe_primary_language(
+        {"zh": 0.0, "en": 1.7472},
+        uncertainty_mass=0.1799,
+        min_total=0.2,
+        min_margin=0.12,
+        min_confidence=0.58,
+    )
+
+    assert decision["language"] == "en"
+    assert 0.85 < decision["confidence"] < 1.0
+
+
+def test_audio_probe_two_en_and_one_mixed_stays_en_but_becomes_less_certain():
+    decision = TranscriptionService._decide_audio_probe_primary_language(
+        {"zh": 0.0, "en": 1.7472},
+        uncertainty_mass=0.35,
+        min_total=0.2,
+        min_margin=0.12,
+        min_confidence=0.58,
+    )
+
+    assert decision["language"] == "en"
+    assert 0.82 < decision["confidence"] < 0.84

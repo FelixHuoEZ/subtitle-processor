@@ -163,8 +163,12 @@ flowchart TD
 3. 每段提取为 16kHz 单声道 WAV。
 4. 用当前 provider 转写每段短音频。
 5. 对每段转写文本调用 `detect_text_primary_language()`。
-6. 将每段结果以 `max(0.2, confidence)` 计入 `scores`。
-7. 对该 provider 的所有样本做一次 `decide_primary_language(min_total=0.2, min_margin=0.12, min_confidence=0.58)`。
+6. 将每段结果按“基线先验 + 重复覆盖”计入 `scores`：
+   - `zh` 样本维持原权重。
+   - `en` 样本先做一次折价，避免“视频里常见的英文片段”被当成过强证据。
+   - 同一语言如果在多个采样段里重复出现，会获得一个覆盖补偿，表示它更像主体语言而不是插入语。
+   - `mixed` 样本不会直接记到 `zh/en` 分数桶，而是记成一份 `uncertainty_mass`，专门压低最终置信度。
+7. 对该 provider 的所有样本做一次带 `uncertainty_mass` 的总裁决，阈值仍是 `min_total=0.2`, `min_margin=0.12`, `min_confidence=0.58`。
 8. 如果结果够可靠则提前采用；否则继续下一个 provider，并保留最佳候选。
 
 ### 5.2 一个关键保护
@@ -176,7 +180,22 @@ flowchart TD
 
 那么当前结果**不会立刻采用**，只会先保留为候选，继续跑后续 provider。这样可以降低“单语模型把所有音频都判成自己那种语言”的风险。
 
-### 5.3 决策图
+### 5.3 一个新的权重直觉
+
+当前实现里，音频 probe 已经开始显式体现一个“近似贝叶斯”的直觉：
+
+- 英语是常见插入语，所以单个英文样本默认折价。
+- 中文样本不额外折价。
+- 同一种语言如果在多个采样点持续出现，才逐步把权重补回来。
+- `mixed` 样本不直接支持任一语言，而是增加“不确定性质量”。
+
+这不是严格的贝叶斯模型，但它对应的产品语义是：
+
+- “出现过英文”不等于“主体语言就是英文”
+- “多个采样段都稳定是英文”才更接近“主体语言是英文”
+- 置信度既受主导语言分数影响，也受混合样本带来的不确定性影响
+
+### 5.4 决策图
 
 ```mermaid
 flowchart TD
@@ -184,8 +203,8 @@ flowchart TD
     B --> C["切 1~3 个短音频片段"]
     C --> D["转写每个片段"]
     D --> E["detect_text_primary_language()"]
-    E --> F["累计 provider scores"]
-    F --> G["decide_primary_language()<br/>min_total=0.2, min_margin=0.12, min_confidence=0.58"]
+    E --> F["累计 provider scores + uncertainty"]
+    F --> G["audio probe decision<br/>min_total=0.2, min_margin=0.12, min_confidence=0.58"]
     G --> H["得到 provider result"]
     H --> I{"语言是 zh/en<br/>且 confidence >= AUDIO_PROBE_MIN_CONFIDENCE?"}
     I -- No --> J["保留最佳候选，继续下一个 provider"]
@@ -281,6 +300,26 @@ flowchart TD
 - `zh_locale_foreign_spoken`
 - `zh_locale_mixed_spoken`
 - `low_confidence_conflict`
+
+### 8.3 Telegram 低置信度人工确认
+
+对于 `request_source = telegram` 的任务，当前还加了一层“低置信度人工确认”：
+
+- 如果 `spoken_language == mixed`
+- 或 `spoken_confidence < 0.75`
+- 或 `content_locale != spoken_language` 且 `spoken_confidence < 0.85`
+
+后台任务会先进入 `waiting_for_language_confirmation`，由 Telegram bot 发一条带内联按钮的确认消息：
+
+- `按中文处理`
+- `按英文处理`
+- `保持自动`
+
+这条确认消息会显式带上对应视频的 URL，避免用户同时处理多条视频时混淆任务。
+
+用户选择后，系统会覆盖本次任务的 `spoken_language`，并重新计算 `Readwise` 分支；如果超时未选，则回退到自动判断继续执行。
+
+注意：这层人工确认发生在初次语言探测之后，因此它主要影响后续处理分支和 `Readwise` 决策，不会回溯重做前面已经完成的字幕下载策略。
 
 ## 9. 当前实现的几个边界
 

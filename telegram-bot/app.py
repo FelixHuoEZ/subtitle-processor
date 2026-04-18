@@ -20,11 +20,17 @@ import telegram
 import urllib3
 import yaml
 from flask import Flask, jsonify, request
-from telegram import BotCommand, Update
+from telegram import (
+    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.error import Conflict, NetworkError, TelegramError
 from telegram.ext import (
     Application,
     CallbackContext,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -298,6 +304,19 @@ LOCATION_HELP_MESSAGE = (
     "4. Feed"
 )
 VIDEO_URL_DOMAINS = ("youtube.com", "youtu.be", "bilibili.com", "b23.tv")
+LANGUAGE_CONFIRMATION_CALLBACK_PREFIX = "langsel"
+LANGUAGE_CHOICE_LABELS = {
+    "zh": "中文",
+    "en": "英文",
+    "mixed": "中英混合",
+    "auto": "自动判断",
+    None: "未知",
+}
+LANGUAGE_CONFIRMATION_REASON_LABELS = {
+    "mixed_spoken_language": "自动判断为中英混合",
+    "low_spoken_confidence": "自动判断置信度偏低",
+    "content_locale_spoken_mismatch": "内容语境和主体口语不一致",
+}
 
 # 用户状态存储
 user_states = {}
@@ -529,6 +548,16 @@ def _register_active_task(
     return entry
 
 
+def _get_active_task(
+    user_id: int, chat_id: int, process_id: str
+) -> Optional[Dict[str, Any]]:
+    key = _request_key(user_id, chat_id)
+    tasks = active_tasks.get(key)
+    if not tasks:
+        return None
+    return tasks.get(process_id)
+
+
 def _update_active_task_status(
     user_id: int,
     chat_id: int,
@@ -625,11 +654,134 @@ def _status_label(status: str) -> str:
         "queued": "排队中",
         "processing": "处理中",
         "pending": "准备中",
+        "waiting_for_language_confirmation": "等待语言确认",
         "failed": "失败",
         "completed": "已完成",
         "unknown": "处理中",
     }
     return mapping.get(status, status)
+
+
+def _language_choice_label(language: Optional[str]) -> str:
+    normalized = (language or "").strip().lower() if isinstance(language, str) else None
+    return LANGUAGE_CHOICE_LABELS.get(normalized, LANGUAGE_CHOICE_LABELS[None])
+
+
+def _format_confidence(confidence: Any) -> str:
+    try:
+        numeric = float(confidence)
+    except (TypeError, ValueError):
+        return ""
+    if numeric <= 0:
+        return ""
+    return f" ({numeric:.2f})"
+
+
+def _build_language_confirmation_callback_data(process_id: str, language: str) -> str:
+    return f"{LANGUAGE_CONFIRMATION_CALLBACK_PREFIX}:{process_id}:{language}"
+
+
+def _parse_language_confirmation_callback_data(
+    callback_data: Optional[str],
+) -> Optional[Tuple[str, str]]:
+    if not callback_data:
+        return None
+    prefix = f"{LANGUAGE_CONFIRMATION_CALLBACK_PREFIX}:"
+    if not callback_data.startswith(prefix):
+        return None
+    parts = callback_data.split(":")
+    if len(parts) != 3:
+        return None
+    _, process_id, language = parts
+    normalized_language = (language or "").strip().lower()
+    if normalized_language not in {"zh", "en", "auto"}:
+        return None
+    if not process_id:
+        return None
+    return process_id, normalized_language
+
+
+def _build_language_confirmation_keyboard(process_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "按中文处理",
+                    callback_data=_build_language_confirmation_callback_data(
+                        process_id, "zh"
+                    ),
+                ),
+                InlineKeyboardButton(
+                    "按英文处理",
+                    callback_data=_build_language_confirmation_callback_data(
+                        process_id, "en"
+                    ),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "保持自动",
+                    callback_data=_build_language_confirmation_callback_data(
+                        process_id, "auto"
+                    ),
+                )
+            ],
+        ]
+    )
+
+
+def _build_language_confirmation_prompt(
+    task: Dict[str, Any],
+    confirmation: Dict[str, Any],
+    video_info: Optional[Dict[str, Any]] = None,
+) -> str:
+    resolved_video_info = video_info or {}
+    url = (
+        (confirmation.get("url") if isinstance(confirmation, dict) else None)
+        or task.get("url")
+        or ""
+    ).strip()
+    title = (resolved_video_info.get("title") or confirmation.get("video_title") or "").strip()
+    spoken_language = _language_choice_label(
+        confirmation.get("suggested_language") if isinstance(confirmation, dict) else None
+    )
+    spoken_confidence = _format_confidence(
+        confirmation.get("suggested_confidence") if isinstance(confirmation, dict) else None
+    )
+    content_locale = _language_choice_label(
+        confirmation.get("content_locale") if isinstance(confirmation, dict) else None
+    )
+    reason = LANGUAGE_CONFIRMATION_REASON_LABELS.get(
+        confirmation.get("reason") if isinstance(confirmation, dict) else None
+    )
+
+    lines = ["需要你确认这条视频的处理语言："]
+    if title:
+        lines.append(f"标题：{title}")
+    if url:
+        lines.append("对应 URL：")
+        lines.append(url)
+    lines.append(
+        f"自动判断：主体语言 {spoken_language}{spoken_confidence}，内容语境 {content_locale}"
+    )
+    if reason:
+        lines.append(f"触发原因：{reason}")
+    lines.append("请选择这次按哪种主语言处理：")
+    return "\n".join(lines)
+
+
+def _build_language_confirmation_submitted_text(
+    task: Dict[str, Any], selected_language: str
+) -> str:
+    url = (task.get("url") or "").strip()
+    lines = [
+        f"已记录：按{_language_choice_label(selected_language)}处理",
+    ]
+    if url:
+        lines.append("对应 URL：")
+        lines.append(url)
+    lines.append("任务会继续处理。")
+    return "\n".join(lines)
 
 
 def _start_processing_attempt(
@@ -2146,6 +2298,138 @@ async def prompt_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def _send_language_confirmation_prompt(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    chat_id: int,
+    process_id: str,
+    processing_message_id: int,
+    payload: Dict[str, Any],
+) -> None:
+    confirmation = payload.get("language_confirmation") or {}
+    if confirmation.get("status") != "pending":
+        return
+
+    task = _get_active_task(user_id, chat_id, process_id)
+    if not task or task.get("language_prompt_message_id"):
+        return
+
+    prompt_text = _build_language_confirmation_prompt(
+        task,
+        confirmation,
+        payload.get("video_info") if isinstance(payload.get("video_info"), dict) else {},
+    )
+    prompt_message = await context.bot.send_message(
+        chat_id=chat_id,
+        text=prompt_text,
+        reply_markup=_build_language_confirmation_keyboard(process_id),
+        parse_mode=None,
+    )
+    _update_active_task_metadata(
+        user_id,
+        chat_id,
+        process_id,
+        language_prompt_message_id=prompt_message.message_id,
+        language_confirmation_status="pending",
+    )
+
+    if not task.get("language_waiting_notified"):
+        try:
+            await context.bot.edit_message_text(
+                "⏸ 这条任务需要你确认处理语言，按钮已经发出。",
+                chat_id=chat_id,
+                message_id=processing_message_id,
+            )
+        except Exception as edit_err:
+            logger.debug("更新等待语言确认消息失败: %s", edit_err)
+        _update_active_task_metadata(
+            user_id,
+            chat_id,
+            process_id,
+            language_waiting_notified=True,
+        )
+
+
+async def handle_language_confirmation_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """处理 Telegram 内联按钮返回的语言选择."""
+    record_update(update)
+    query = update.callback_query
+    if not query or not query.message or not update.effective_user:
+        return
+
+    parsed = _parse_language_confirmation_callback_data(query.data)
+    if not parsed:
+        await query.answer("无效的语言选择", show_alert=True)
+        return
+
+    process_id, selected_language = parsed
+    user_id = update.effective_user.id
+    chat_id = query.message.chat.id
+    task = _get_active_task(user_id, chat_id, process_id)
+
+    if not task:
+        await query.answer("这条任务已经不在当前队列里了", show_alert=True)
+        return
+
+    try:
+        response = await asyncio.to_thread(
+            requests.post,
+            f"{SUBTITLE_PROCESSOR_URL}/process/status/{process_id}/language",
+            json={"language": selected_language, "source": "telegram"},
+            timeout=30,
+        )
+    except Exception as exc:
+        logger.error("提交语言确认失败(%s): %s", process_id, exc)
+        await query.answer("提交失败，请稍后再试", show_alert=True)
+        return
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+
+    if response.status_code >= 400 or not payload.get("success"):
+        error_message = payload.get("error") or "这条任务已经不再等待语言确认"
+        if response.status_code == 409:
+            try:
+                await query.edit_message_text(
+                    "这条任务已不再等待语言确认，系统会继续按当前判断处理。\n"
+                    f"对应 URL：\n{task.get('url') or ''}",
+                    parse_mode=None,
+                )
+            except Exception as edit_err:
+                logger.debug("更新语言确认消息失败: %s", edit_err)
+        await query.answer(error_message, show_alert=True)
+        return
+
+    _update_active_task_metadata(
+        user_id,
+        chat_id,
+        process_id,
+        language_prompt_message_id=query.message.message_id,
+        language_confirmation_status="submitted",
+        selected_language=selected_language,
+    )
+    _update_active_task_status(
+        user_id,
+        chat_id,
+        process_id,
+        "processing",
+    )
+
+    try:
+        await query.edit_message_text(
+            _build_language_confirmation_submitted_text(task, selected_language),
+            parse_mode=None,
+        )
+    except Exception as edit_err:
+        logger.debug("更新语言确认结果消息失败: %s", edit_err)
+
+    await query.answer(f"已改为按{_language_choice_label(selected_language)}处理")
+
+
 async def monitor_process_completion(
     context: ContextTypes.DEFAULT_TYPE,
     user_id: int,
@@ -2256,6 +2540,26 @@ async def monitor_process_completion(
         )
         if status:
             _update_active_task_status(user_id, chat_id, process_id, status)
+
+        if status == "waiting_for_language_confirmation":
+            confirmation = payload.get("language_confirmation") or {}
+            _update_active_task_metadata(
+                user_id,
+                chat_id,
+                process_id,
+                language_confirmation_status=confirmation.get("status") or "pending",
+            )
+            if confirmation.get("status") == "pending":
+                await _send_language_confirmation_prompt(
+                    context,
+                    user_id,
+                    chat_id,
+                    process_id,
+                    message_id,
+                    payload,
+                )
+            await asyncio.sleep(poll_interval)
+            continue
 
         if status == "completed":
             subtitle_content = payload.get("subtitle_content") or ""
@@ -2510,6 +2814,7 @@ async def process_url_with_location(
             "platform": platform,
             "location": location,
             "video_id": video_id,
+            "request_source": "telegram",
         }
 
         data["tags"] = tags or []
@@ -2841,6 +3146,12 @@ def main():
     application.add_handler(CommandHandler("hotword_status", hotword_status))
     application.add_handler(CommandHandler("hotword_toggle", hotword_toggle))
     application.add_handler(CommandHandler("prompt_toggle", prompt_toggle))
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_language_confirmation_callback,
+            pattern=rf"^{LANGUAGE_CONFIRMATION_CALLBACK_PREFIX}:",
+        )
+    )
     # 处理普通消息
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
