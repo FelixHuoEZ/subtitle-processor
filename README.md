@@ -116,6 +116,7 @@ All defaults are listed in `.env.example`.
    - `${IMAGE_PREFIX}/telegram-bot:${IMAGE_TAG}`
    Notes:
    - If `IMAGE_PREFIX` points at a self-signed registry, place its CA at `~/.docker/certs.d/<registry>/ca.crt`; `scripts/build-and-push.sh` will auto-mount it into BuildKit.
+   - If `IMAGE_PREFIX` points at a private registry host and `BASE_IMAGE_REGISTRY` is unset, `scripts/build-and-push.sh` now defaults it to `<registry>/dockerhub`.
    - To avoid unstable Docker Hub access on the build machine, set `BASE_IMAGE_REGISTRY` to an internal mirror prefix such as `10.0.0.23:5443/dockerhub`. The Dockerfiles will then read:
      - `${BASE_IMAGE_REGISTRY}/library/python:3.11-slim`
      - `${BASE_IMAGE_REGISTRY}/library/python:3.9-slim`
@@ -314,6 +315,7 @@ Special thanks to:
    - `${IMAGE_PREFIX}/telegram-bot:${IMAGE_TAG}`
    说明：
    - 如果 `IMAGE_PREFIX` 指向自签名 registry，把 CA 放到 `~/.docker/certs.d/<registry>/ca.crt`；`scripts/build-and-push.sh` 会自动挂到 BuildKit。
+   - 如果 `IMAGE_PREFIX` 指向私有 registry，且没有显式设置 `BASE_IMAGE_REGISTRY`，`scripts/build-and-push.sh` 现在会默认补成 `<registry>/dockerhub`。
    - 如果构建机访问 Docker Hub 不稳定，可以设置 `BASE_IMAGE_REGISTRY=10.0.0.23:5443/dockerhub` 之类的内网 mirror。各 Dockerfile 会改为读取：
      - `${BASE_IMAGE_REGISTRY}/library/python:3.11-slim`
      - `${BASE_IMAGE_REGISTRY}/library/python:3.9-slim`
