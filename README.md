@@ -145,6 +145,7 @@ All defaults are listed in `.env.example`.
    The wrapper runs local `build-and-push.sh`, then on the NAS executes
    `docker compose pull`, `docker compose up -d --force-recreate`, and `docker compose ps`
    inside `/share/ZFS530_DATA/.qpkg/container-station/data/application/subtitle`.
+   When `--services` is provided, the same service filter now applies to both the local build step and the NAS deploy step.
    It uses direct `ssh nas` when available, otherwise falls back to `~/nas-remote`.
 5. If the private base-image mirror is missing and `build-and-push.sh` fails on `${BASE_IMAGE_REGISTRY}/...: not found`, sync the mirror first:
    ```bash
@@ -352,8 +353,9 @@ Special thanks to:
    这个脚本会先执行本地 `build-and-push.sh`，然后在 NAS 的
    `/share/ZFS530_DATA/.qpkg/container-station/data/application/subtitle`
    目录里运行 `docker compose pull`、`docker compose up -d --force-recreate`
-   和 `docker compose ps`。当前 shell 能直连 `ssh nas` 时会同步执行；
-   否则自动回退到 `~/nas-remote`。
+   和 `docker compose ps`。当前 shell 能直连 `ssh nas` 时会同步执行，
+   不能直连时自动回退到 `~/nas-remote`。传入 `--services` 时，
+   这个服务过滤会同时作用在本地 build 和 NAS deploy 两边。
 5. 如果私有 base-image mirror 缺失，导致 `build-and-push.sh` 报 `${BASE_IMAGE_REGISTRY}/...: not found`，先执行：
    ```bash
    ./scripts/sync-base-images.sh
