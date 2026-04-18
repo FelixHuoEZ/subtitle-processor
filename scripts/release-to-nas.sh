@@ -23,7 +23,7 @@ Usage:
   scripts/release-to-nas.sh [options]
 
 Options:
-  --services svc1,svc2   Limit NAS pull/up/ps to selected services.
+  --services svc1,svc2   Limit local build and NAS pull/up/ps to selected services.
   --service svc          Append one service (repeatable).
   --nas-only             Skip local build+push; deploy existing images on NAS.
   --build-only           Run local build+push only; skip NAS deploy.
@@ -90,6 +90,17 @@ append_csv_services() {
       SERVICES+=("$item")
     fi
   done
+}
+
+services_csv() {
+  local joined=""
+  local service
+
+  for service in "${SERVICES[@]}"; do
+    joined+="${joined:+,}${service}"
+  done
+
+  printf '%s' "${joined}"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -278,8 +289,10 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   echo "Remote Docker config: ${NAS_DOCKER_CONFIG}"
   if has_services; then
     echo "Services: ${SERVICES[*]}"
+    echo "Local ONLY_SERVICES: $(services_csv)"
   else
     echo "Services: <all compose services>"
+    echo "Local ONLY_SERVICES: <all build services>"
   fi
   echo "Remote command:"
   echo "${remote_command}"
@@ -290,7 +303,12 @@ if [[ "${SKIP_BUILD_PUSH}" == "false" ]]; then
   log "Running local build+push via ${BUILD_SCRIPT}"
   (
     cd "${ROOT_DIR}"
-    "${BUILD_SCRIPT}"
+    if has_services; then
+      log "Limiting local build to services: ${SERVICES[*]}"
+      ONLY_SERVICES="$(services_csv)" "${BUILD_SCRIPT}"
+    else
+      "${BUILD_SCRIPT}"
+    fi
   )
 fi
 

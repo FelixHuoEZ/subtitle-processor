@@ -15,6 +15,7 @@ set -euo pipefail
 #   LOAD_LOCAL_PLATFORM When PUSH=true, set to 'false' to skip the local --load pass (default: true).
 #   EXTRA_TAGS     Optional comma separated extra tags to publish (e.g. "latest,prod").
 #   DOCKERFILE_*   Optional overrides for dockerfile path per service (see map below).
+#   ONLY_SERVICES  Comma separated service names to build for this run (e.g. "subtitle-processor,telegram-bot").
 #   SKIP_SERVICES  Comma separated service names to skip for this run (e.g. "subtitle-processor,telegram-bot").
 #   CACHE_MODE     Select cache strategy: full (default), download, or none. When unset, the script
 #                  prompts on interactive TTYs. Legacy USE_CACHE=true/false still works.
@@ -328,6 +329,12 @@ SERVICES=(
   "bgutil-provider=docker-config/bgutil:Dockerfile"
 )
 
+KNOWN_SERVICE_NAMES=()
+for entry in "${SERVICES[@]}"; do
+  IFS='=' read -r service_name _ <<< "${entry}"
+  KNOWN_SERVICE_NAMES+=("${service_name}")
+done
+
 USE_BUILDX=true
 BUILDX_BUILDER_NAME=${BUILDX_BUILDER_NAME:-repo-builder}
 
@@ -486,6 +493,49 @@ trim() {
   printf '%s' "$value"
 }
 
+service_name_exists() {
+  local candidate
+  candidate=$(to_lower "$1")
+  for known in "${KNOWN_SERVICE_NAMES[@]}"; do
+    if [[ "$(to_lower "${known}")" == "${candidate}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+validate_service_filter_values() {
+  local label="$1"
+  shift
+
+  for candidate in "$@"; do
+    if ! service_name_exists "${candidate}"; then
+      echo "ERROR: Unknown service in ${label}: ${candidate}" >&2
+      echo "Known services: ${KNOWN_SERVICE_NAMES[*]}" >&2
+      exit 1
+    fi
+  done
+}
+
+ONLY_SERVICES_DISPLAY=""
+ONLY_SERVICES_ARRAY=()
+if [[ -n "${ONLY_SERVICES:-}" ]]; then
+  IFS=',' read -r -a __only_raw <<< "${ONLY_SERVICES}"
+  for item in "${__only_raw[@]}"; do
+    local_name=$(trim "${item}")
+    if [[ -n "${local_name}" ]]; then
+      local_name=$(to_lower "${local_name}")
+      ONLY_SERVICES_ARRAY+=("${local_name}")
+      if [[ -n "${ONLY_SERVICES_DISPLAY}" ]]; then
+        ONLY_SERVICES_DISPLAY="${ONLY_SERVICES_DISPLAY}, ${local_name}"
+      else
+        ONLY_SERVICES_DISPLAY="${local_name}"
+      fi
+    fi
+  done
+fi
+validate_service_filter_values "ONLY_SERVICES" "${ONLY_SERVICES_ARRAY[@]}"
+
 SKIP_SERVICES_DISPLAY=""
 SKIP_SERVICES_ARRAY=()
 if [[ -n "${SKIP_SERVICES:-}" ]]; then
@@ -503,8 +553,24 @@ if [[ -n "${SKIP_SERVICES:-}" ]]; then
     fi
   done
 fi
+validate_service_filter_values "SKIP_SERVICES" "${SKIP_SERVICES_ARRAY[@]}"
 
+log_debug "Only services: ${ONLY_SERVICES_DISPLAY:-<all>}"
 log_debug "Skip services: ${SKIP_SERVICES_DISPLAY:-<none>}"
+
+should_build_service() {
+  local candidate
+  candidate=$(to_lower "$1")
+  if [[ ${#ONLY_SERVICES_ARRAY[@]} -eq 0 ]]; then
+    return 0
+  fi
+  for selected in "${ONLY_SERVICES_ARRAY[@]}"; do
+    if [[ "${selected}" == "${candidate}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 should_skip_service() {
   local candidate
@@ -838,7 +904,9 @@ for entry in "${SERVICES[@]}"; do
     exit 1
   fi
 
-  if should_skip_service "${name}"; then
+  if ! should_build_service "${name}"; then
+    echo "==> Skipping ${name}; not listed in ONLY_SERVICES"
+  elif should_skip_service "${name}"; then
     echo "==> Skipping ${name}; listed in SKIP_SERVICES"
   else
     build_service "${name}" "${context}" "${dockerfile}"
