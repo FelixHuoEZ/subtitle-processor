@@ -65,6 +65,25 @@ to_lower() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
+is_private_registry_host() {
+  local host="${1:-}"
+  if [[ -z "${host}" ]]; then
+    return 1
+  fi
+
+  case "${host}" in
+    docker.io|index.docker.io|registry-1.docker.io|ghcr.io|quay.io|registry.gitlab.com|public.ecr.aws)
+      return 1
+      ;;
+  esac
+
+  if [[ "${host}" == *.* || "${host}" == *:* ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
 resolve_base_image() {
   local upstream_path="$1"
   local fallback_image="$2"
@@ -247,6 +266,10 @@ BUILDKIT_CONFIG_PATH=""
 REGISTRY_HOST=""
 if [[ -n "${IMAGE_PREFIX}" ]]; then
   REGISTRY_HOST="${IMAGE_PREFIX%%/*}"
+  if [[ -z "${BASE_IMAGE_REGISTRY}" ]] && is_private_registry_host "${REGISTRY_HOST}"; then
+    BASE_IMAGE_REGISTRY="${REGISTRY_HOST}/dockerhub"
+    echo "INFO: BASE_IMAGE_REGISTRY not set; defaulting to ${BASE_IMAGE_REGISTRY} based on IMAGE_PREFIX registry." >&2
+  fi
   if [[ "${REGISTRY_HOST}" == *:* ]]; then
     if [[ -z "${REGISTRY_CA_FILE}" ]]; then
       for candidate in \
