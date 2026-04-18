@@ -56,6 +56,10 @@ class _YtDlpLogger:
 class VideoService:
     """视频处理服务 - 支持YouTube、Bilibili、AcFun等平台"""
 
+    _SUBTITLE_SECONDARY_ZH_RATIO_MIN = 0.08
+    _SUBTITLE_SECONDARY_ZH_CHARS_MIN = 40
+    _SUBTITLE_SECONDARY_ZH_BOOST = 3.0
+
     def __init__(self):
         """初始化视频服务"""
         self.supported_platforms = ["youtube", "bilibili", "acfun"]
@@ -348,6 +352,69 @@ class VideoService:
             "stats": detection.get("stats", {}),
         }
 
+    def _infer_subtitle_language_signals(
+        self, text: str, source: str, max_weight: float
+    ) -> List[Dict[str, Any]]:
+        detection = detect_text_primary_language(text)
+        stats = detection.get("stats", {}) or {}
+        total_units = float(stats.get("total_units", 0.0) or 0.0)
+        if total_units < 12:
+            return []
+
+        zh_ratio = float(stats.get("zh_ratio", 0.0) or 0.0)
+        en_ratio = float(stats.get("en_ratio", 0.0) or 0.0)
+        if zh_ratio <= 0 and en_ratio <= 0:
+            return []
+
+        adjusted_zh_ratio = zh_ratio
+        adjusted_en_ratio = en_ratio
+        used_secondary_zh_boost = False
+        if self._has_significant_secondary_zh_evidence(detection):
+            adjusted_zh_ratio *= self._SUBTITLE_SECONDARY_ZH_BOOST
+            adjusted_total = adjusted_zh_ratio + adjusted_en_ratio
+            if adjusted_total > 0:
+                adjusted_zh_ratio /= adjusted_total
+                adjusted_en_ratio /= adjusted_total
+                used_secondary_zh_boost = True
+
+        signals: List[Dict[str, Any]] = []
+        for language, adjusted_ratio, raw_ratio in (
+            ("zh", adjusted_zh_ratio, zh_ratio),
+            ("en", adjusted_en_ratio, en_ratio),
+        ):
+            if adjusted_ratio <= 0:
+                continue
+            weight = round(max_weight * adjusted_ratio, 4)
+            if weight <= 0:
+                continue
+            signals.append(
+                {
+                    "language": language,
+                    "weight": weight,
+                    "source": source,
+                    "confidence": round(adjusted_ratio, 4),
+                    "stats": stats,
+                    "raw_ratio": round(raw_ratio, 4),
+                    "adjusted_ratio": round(adjusted_ratio, 4),
+                    "secondary_zh_boost": used_secondary_zh_boost,
+                }
+            )
+
+        return signals
+
+    def _has_significant_secondary_zh_evidence(
+        self, detection: Optional[Dict[str, Any]]
+    ) -> bool:
+        stats = (detection or {}).get("stats", {}) or {}
+        zh_ratio = float(stats.get("zh_ratio", 0.0) or 0.0)
+        en_ratio = float(stats.get("en_ratio", 0.0) or 0.0)
+        chinese_chars = int(stats.get("chinese_chars", 0) or 0)
+        return (
+            en_ratio > zh_ratio
+            and zh_ratio >= self._SUBTITLE_SECONDARY_ZH_RATIO_MIN
+            and chinese_chars >= self._SUBTITLE_SECONDARY_ZH_CHARS_MIN
+        )
+
     def get_video_language_details(
         self,
         info: Dict[str, Any],
@@ -410,12 +477,12 @@ class VideoService:
             subtitle_content = subtitle_result.get("content") if subtitle_result else None
             if subtitle_content and subtitle_track_type in {"human", "asr_original"}:
                 subtitle_weight = 0.82 if subtitle_track_type == "human" else 0.72
-                subtitle_hint = self._infer_language_from_text(
+                subtitle_signals = self._infer_subtitle_language_signals(
                     subtitle_content,
                     f"subtitle.text.{subtitle_track_type}",
                     max_weight=subtitle_weight,
                 )
-                if subtitle_hint:
+                for subtitle_hint in subtitle_signals:
                     add_language_score(
                         scores, subtitle_hint["language"], subtitle_hint["weight"]
                     )
