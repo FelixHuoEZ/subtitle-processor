@@ -114,6 +114,14 @@ All defaults are listed in `.env.example`.
    - `${IMAGE_PREFIX}/subtitle-processor:${IMAGE_TAG}`
    - `${IMAGE_PREFIX}/transcribe-audio:${IMAGE_TAG}`
    - `${IMAGE_PREFIX}/telegram-bot:${IMAGE_TAG}`
+   Notes:
+   - If `IMAGE_PREFIX` points at a self-signed registry, place its CA at `~/.docker/certs.d/<registry>/ca.crt`; `scripts/build-and-push.sh` will auto-mount it into BuildKit.
+   - To avoid unstable Docker Hub access on the build machine, set `BASE_IMAGE_REGISTRY` to an internal mirror prefix such as `10.0.0.23:5443/dockerhub`. The Dockerfiles will then read:
+     - `${BASE_IMAGE_REGISTRY}/library/python:3.11-slim`
+     - `${BASE_IMAGE_REGISTRY}/library/python:3.9-slim`
+     - `${BASE_IMAGE_REGISTRY}/nvidia/cuda:11.8.0-base-ubuntu22.04`
+     - `${BASE_IMAGE_REGISTRY}/brainicism/bgutil-ytdlp-pot-provider:1.2.2`
+   - If the build host itself must go through a local proxy, export `BUILDER_HTTP_PROXY` / `BUILDER_HTTPS_PROXY` before running the script.
 2. On each target host, create (or edit) `.env` with the new image references:
    ```env
    SUBTITLE_PROCESSOR_IMAGE=${IMAGE_PREFIX}/subtitle-processor:${IMAGE_TAG}
@@ -292,6 +300,14 @@ Special thanks to:
    - `${IMAGE_PREFIX}/subtitle-processor:${IMAGE_TAG}`
    - `${IMAGE_PREFIX}/transcribe-audio:${IMAGE_TAG}`
    - `${IMAGE_PREFIX}/telegram-bot:${IMAGE_TAG}`
+   说明：
+   - 如果 `IMAGE_PREFIX` 指向自签名 registry，把 CA 放到 `~/.docker/certs.d/<registry>/ca.crt`；`scripts/build-and-push.sh` 会自动挂到 BuildKit。
+   - 如果构建机访问 Docker Hub 不稳定，可以设置 `BASE_IMAGE_REGISTRY=10.0.0.23:5443/dockerhub` 之类的内网 mirror。各 Dockerfile 会改为读取：
+     - `${BASE_IMAGE_REGISTRY}/library/python:3.11-slim`
+     - `${BASE_IMAGE_REGISTRY}/library/python:3.9-slim`
+     - `${BASE_IMAGE_REGISTRY}/nvidia/cuda:11.8.0-base-ubuntu22.04`
+     - `${BASE_IMAGE_REGISTRY}/brainicism/bgutil-ytdlp-pot-provider:1.2.2`
+   - 如果构建机本身必须走本地代理，可在运行脚本前导出 `BUILDER_HTTP_PROXY` / `BUILDER_HTTPS_PROXY`。
 2. 在每台目标机器根目录创建（或修改）`.env` 文件，填入最新镜像：
    ```env
    SUBTITLE_PROCESSOR_IMAGE=${IMAGE_PREFIX}/subtitle-processor:${IMAGE_TAG}

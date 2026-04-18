@@ -19,6 +19,13 @@ set -euo pipefail
 #   CACHE_MODE     Select cache strategy: full (default), download, or none. When unset, the script
 #                  prompts on interactive TTYs. Legacy USE_CACHE=true/false still works.
 #   USE_CACHE      Deprecated boolean alias; true -> CACHE_MODE=full, false -> CACHE_MODE=none.
+#   BASE_IMAGE_REGISTRY Optional mirror prefix for upstream base images
+#                  (e.g. 10.0.0.23:5443/dockerhub).
+#   REGISTRY_CA_FILE Optional CA bundle for IMAGE_PREFIX registry. When unset, the script
+#                  auto-detects ${DOCKER_CONFIG}/certs.d/<registry>/ca.crt if present.
+#   BUILDER_HTTP_PROXY / BUILDER_HTTPS_PROXY
+#                  Optional proxy envs injected into the buildx builder container.
+#   BUILDX_IMAGE   Optional custom buildkit image for the buildx builder.
 #
 # Services and build contexts:
 #   subtitle-processor -> ./ (Dockerfile)
@@ -41,6 +48,11 @@ if [[ -z "${IMAGE_PREFIX:-}" ]]; then
   echo "WARN: IMAGE_PREFIX not set; images will be tagged locally only." >&2
 fi
 IMAGE_PREFIX=${IMAGE_PREFIX:-}
+BASE_IMAGE_REGISTRY=${BASE_IMAGE_REGISTRY:-}
+REGISTRY_CA_FILE=${REGISTRY_CA_FILE:-}
+BUILDER_HTTP_PROXY=${BUILDER_HTTP_PROXY:-}
+BUILDER_HTTPS_PROXY=${BUILDER_HTTPS_PROXY:-${BUILDER_HTTP_PROXY:-}}
+BUILDX_IMAGE=${BUILDX_IMAGE:-}
 
 CACHE_DIR="${PWD}/.image-cache"
 mkdir -p "${CACHE_DIR}"
@@ -51,6 +63,16 @@ log_debug() {
 
 to_lower() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+resolve_base_image() {
+  local upstream_path="$1"
+  local fallback_image="$2"
+  if [[ -n "${BASE_IMAGE_REGISTRY}" ]]; then
+    printf '%s/%s' "${BASE_IMAGE_REGISTRY%/}" "${upstream_path}"
+    return 0
+  fi
+  printf '%s' "${fallback_image}"
 }
 
 normalize_bool() {
@@ -222,14 +244,35 @@ log_debug "Using DOCKER_CONFIG=${DOCKER_CONFIG}"
 log_debug "DOCKER_CLI_PLUGIN_EXTRA_DIRS=${DOCKER_CLI_PLUGIN_EXTRA_DIRS:-<unset>}"
 
 BUILDKIT_CONFIG_PATH=""
+REGISTRY_HOST=""
 if [[ -n "${IMAGE_PREFIX}" ]]; then
   REGISTRY_HOST="${IMAGE_PREFIX%%/*}"
   if [[ "${REGISTRY_HOST}" == *:* ]]; then
+    if [[ -z "${REGISTRY_CA_FILE}" ]]; then
+      for candidate in \
+        "${DOCKER_CONFIG}/certs.d/${REGISTRY_HOST}/ca.crt" \
+        "${HOME:-}/.docker/certs.d/${REGISTRY_HOST}/ca.crt"; do
+        if [[ -f "${candidate}" ]]; then
+          REGISTRY_CA_FILE="${candidate}"
+          break
+        fi
+      done
+    fi
+
+    if [[ -n "${REGISTRY_CA_FILE}" && ! -f "${REGISTRY_CA_FILE}" ]]; then
+      echo "WARN: REGISTRY_CA_FILE '${REGISTRY_CA_FILE}' not found; continuing without custom CA." >&2
+      REGISTRY_CA_FILE=""
+    fi
+
     BUILDKIT_CONFIG_PATH="${DOCKER_CONFIG}/buildkitd.toml"
     cat >"${BUILDKIT_CONFIG_PATH}" <<EOF
 [registry."${REGISTRY_HOST}"]
   insecure = true
 EOF
+    if [[ -n "${REGISTRY_CA_FILE}" ]]; then
+      printf '  ca = ["%s"]\n' "${REGISTRY_CA_FILE}" >>"${BUILDKIT_CONFIG_PATH}"
+      echo "INFO: Using registry CA for ${REGISTRY_HOST}: ${REGISTRY_CA_FILE}" >&2
+    fi
   fi
 fi
 
@@ -249,6 +292,11 @@ else
   LOAD=${LOAD:-true}
 fi
 EXTRA_TAGS=${EXTRA_TAGS:-}
+
+SUBTITLE_PROCESSOR_BASE_IMAGE=${SUBTITLE_PROCESSOR_BASE_IMAGE:-$(resolve_base_image "library/python:3.11-slim" "python:3.11-slim")}
+TELEGRAM_BOT_BASE_IMAGE=${TELEGRAM_BOT_BASE_IMAGE:-$(resolve_base_image "library/python:3.9-slim" "python:3.9-slim")}
+TRANSCRIBE_AUDIO_BASE_IMAGE=${TRANSCRIBE_AUDIO_BASE_IMAGE:-$(resolve_base_image "nvidia/cuda:11.8.0-base-ubuntu22.04" "nvidia/cuda:11.8.0-base-ubuntu22.04")}
+BGUTIL_PROVIDER_BASE_IMAGE=${BGUTIL_PROVIDER_BASE_IMAGE:-$(resolve_base_image "brainicism/bgutil-ytdlp-pot-provider:1.2.2" "brainicism/bgutil-ytdlp-pot-provider:1.2.2")}
 
 SERVICES=(
   "subtitle-processor=.:Dockerfile"
@@ -273,6 +321,43 @@ buildx_builder_endpoint() {
   printf '%s\n' "${inspect_output}" | awk -F': *' '/^[[:space:]]*Endpoint:/ {print $2; exit}'
 }
 
+builder_matches_requested_config() {
+  local inspect_output="$1"
+
+  if [[ -n "${BUILDKIT_CONFIG_PATH}" ]]; then
+    if [[ -z "${REGISTRY_HOST}" || "${inspect_output}" != *"[registry.\"${REGISTRY_HOST}\"]"* ]]; then
+      return 1
+    fi
+    if [[ -n "${REGISTRY_CA_FILE}" && "${inspect_output}" != *"ca = ["* ]]; then
+      return 1
+    fi
+  fi
+
+  if [[ -n "${BUILDX_IMAGE}" && "${inspect_output}" != *"image=\"${BUILDX_IMAGE}\""* ]]; then
+    return 1
+  fi
+
+  if [[ -n "${BUILDER_HTTP_PROXY}" ]]; then
+    if [[ "${inspect_output}" != *"env.http_proxy=\"${BUILDER_HTTP_PROXY}\""* ]]; then
+      return 1
+    fi
+    if [[ "${inspect_output}" != *"env.HTTP_PROXY=\"${BUILDER_HTTP_PROXY}\""* ]]; then
+      return 1
+    fi
+  fi
+
+  if [[ -n "${BUILDER_HTTPS_PROXY}" ]]; then
+    if [[ "${inspect_output}" != *"env.https_proxy=\"${BUILDER_HTTPS_PROXY}\""* ]]; then
+      return 1
+    fi
+    if [[ "${inspect_output}" != *"env.HTTPS_PROXY=\"${BUILDER_HTTPS_PROXY}\""* ]]; then
+      return 1
+    fi
+  fi
+
+  return 0
+}
+
 remove_buildx_builder() {
   local builder_name="$1"
   docker buildx rm --force "${builder_name}" >/dev/null 2>&1 || true
@@ -289,6 +374,17 @@ create_buildx_builder() {
     --driver-opt network=host
     --driver-opt env.BUILDKIT_TLS_INSECURE_SKIP_VERIFY=1
   )
+  if [[ -n "${BUILDX_IMAGE}" ]]; then
+    create_cmd+=(--driver-opt "image=${BUILDX_IMAGE}")
+  fi
+  if [[ -n "${BUILDER_HTTP_PROXY}" ]]; then
+    create_cmd+=(--driver-opt "env.http_proxy=${BUILDER_HTTP_PROXY}")
+    create_cmd+=(--driver-opt "env.HTTP_PROXY=${BUILDER_HTTP_PROXY}")
+  fi
+  if [[ -n "${BUILDER_HTTPS_PROXY}" ]]; then
+    create_cmd+=(--driver-opt "env.https_proxy=${BUILDER_HTTPS_PROXY}")
+    create_cmd+=(--driver-opt "env.HTTPS_PROXY=${BUILDER_HTTPS_PROXY}")
+  fi
   if [[ -n "${BUILDKIT_CONFIG_PATH}" ]]; then
     create_cmd+=(--config "${BUILDKIT_CONFIG_PATH}")
   fi
@@ -322,17 +418,22 @@ check_buildx() {
   fi
   log_debug "'docker buildx version' succeeded: ${buildx_output}"
 
-  local docker_context builder_endpoint
+  local docker_context builder_endpoint builder_inspect_output
   local recreate_builder=false
   docker_context=$(current_docker_context)
 
   log_debug "Inspecting buildx builder '${BUILDX_BUILDER_NAME}'"
-  if ! docker buildx inspect "${BUILDX_BUILDER_NAME}" >/dev/null 2>&1; then
+  builder_inspect_output=$(docker buildx inspect "${BUILDX_BUILDER_NAME}" 2>/dev/null || true)
+  if [[ -z "${builder_inspect_output}" ]]; then
     recreate_builder=true
   else
-    builder_endpoint=$(trim "$(buildx_builder_endpoint "${BUILDX_BUILDER_NAME}")")
+    builder_endpoint=$(printf '%s\n' "${builder_inspect_output}" | awk -F': *' '/^[[:space:]]*Endpoint:/ {print $2; exit}')
+    builder_endpoint=$(trim "${builder_endpoint}")
     if [[ -n "${docker_context}" && -n "${builder_endpoint}" && "${builder_endpoint}" != "${docker_context}" ]]; then
       echo "WARN: buildx builder '${BUILDX_BUILDER_NAME}' is bound to '${builder_endpoint}', recreating for '${docker_context}'." >&2
+      recreate_builder=true
+    elif ! builder_matches_requested_config "${builder_inspect_output}"; then
+      echo "WARN: buildx builder '${BUILDX_BUILDER_NAME}' is missing requested registry/proxy settings; recreating." >&2
       recreate_builder=true
     fi
   fi
@@ -551,6 +652,7 @@ build_service() {
   mkdir -p "${cache_dir}"
   local cache_from_args=()
   local cache_to_args=()
+  local service_build_args=()
   local use_no_cache=false
   if [[ "${CACHE_MODE}" == "none" ]]; then
     use_no_cache=true
@@ -562,6 +664,21 @@ build_service() {
     cache_to_args=(--cache-to "type=local,dest=${cache_dir},mode=max")
   fi
   local build_platform="${PLATFORMS}"
+
+  case "${name}" in
+    subtitle-processor)
+      service_build_args+=(--build-arg "SUBTITLE_PROCESSOR_BASE_IMAGE=${SUBTITLE_PROCESSOR_BASE_IMAGE}")
+      ;;
+    transcribe-audio)
+      service_build_args+=(--build-arg "TRANSCRIBE_AUDIO_BASE_IMAGE=${TRANSCRIBE_AUDIO_BASE_IMAGE}")
+      ;;
+    telegram-bot)
+      service_build_args+=(--build-arg "TELEGRAM_BOT_BASE_IMAGE=${TELEGRAM_BOT_BASE_IMAGE}")
+      ;;
+    bgutil-provider)
+      service_build_args+=(--build-arg "BGUTIL_PROVIDER_BASE_IMAGE=${BGUTIL_PROVIDER_BASE_IMAGE}")
+      ;;
+  esac
 
   if [[ "${USE_BUILDX}" == "true" ]]; then
     log_debug "Building ${name} via buildx for platform(s) ${build_platform}"
@@ -581,6 +698,9 @@ build_service() {
     echo "==> Building ${tags[*]}"
     local cmd=(docker buildx build --builder "${BUILDX_BUILDER_NAME}")
     cmd+=("--platform" "${build_platform}" "-f" "${context}/${dockerfile}")
+    if [[ ${#service_build_args[@]} -gt 0 ]]; then
+      cmd+=("${service_build_args[@]}")
+    fi
     for tag in "${tags[@]}"; do
       cmd+=(-t "${tag}")
     done
@@ -611,6 +731,9 @@ build_service() {
         echo "==> Loading ${tags[0]} locally for ${host_platform}"
         local load_cmd=(docker buildx build --builder "${BUILDX_BUILDER_NAME}")
         load_cmd+=("--platform" "${host_platform}" "-f" "${context}/${dockerfile}" "--load")
+        if [[ ${#service_build_args[@]} -gt 0 ]]; then
+          load_cmd+=("${service_build_args[@]}")
+        fi
         for tag in "${tags[@]}"; do
           load_cmd+=(-t "${tag}")
         done
@@ -653,6 +776,9 @@ build_service() {
     build_cmd+=(--no-cache)
   fi
   build_cmd+=(-f "${context}/${dockerfile}")
+  if [[ ${#service_build_args[@]} -gt 0 ]]; then
+    build_cmd+=("${service_build_args[@]}")
+  fi
   for tag in "${tags[@]}"; do
     build_cmd+=(-t "${tag}")
   done
