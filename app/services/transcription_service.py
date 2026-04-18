@@ -7,7 +7,7 @@ import os
 import subprocess
 import tempfile
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
@@ -77,6 +77,17 @@ class TranscriptionService:
             logger.info("转录并发限制: %s", self.transcribe_concurrency)
         else:
             logger.info("转录并发限制: 未启用")
+        self.audio_probe_providers = self._parse_audio_probe_providers(
+            os.getenv("AUDIO_PROBE_PROVIDERS", "configured_funasr,openai")
+        )
+        self.audio_probe_min_confidence = min(
+            1.0, max(0.0, float(os.getenv("AUDIO_PROBE_MIN_CONFIDENCE", "0.58")))
+        )
+        logger.info(
+            "音频语言探测 provider 顺序: %s (min_confidence=%.2f)",
+            " -> ".join(self.audio_probe_providers) or "none",
+            self.audio_probe_min_confidence,
+        )
 
     @staticmethod
     def _parse_optional_concurrency_env(key: str, label: str) -> Optional[int]:
@@ -94,6 +105,15 @@ class TranscriptionService:
                 logger.info("%s 并发设置为 %s，按串行处理", label, value)
             return 1
         return value
+
+    @staticmethod
+    def _parse_audio_probe_providers(raw_value: Optional[str]) -> List[str]:
+        providers: List[str] = []
+        for provider in str(raw_value or "").split(","):
+            normalized = provider.strip().lower()
+            if normalized in {"configured_funasr", "openai"} and normalized not in providers:
+                providers.append(normalized)
+        return providers or ["configured_funasr", "openai"]
 
     def _load_transcribe_servers(self) -> List[Dict[str, Any]]:
         """加载转录服务器列表"""
@@ -134,13 +154,19 @@ class TranscriptionService:
                 health_url = f"{url.rstrip('/')}/health"
                 response = requests.get(health_url, timeout=5)
                 if response.status_code == 200:
+                    try:
+                        server["health"] = response.json()
+                    except ValueError:
+                        server["health"] = {}
                     server["status"] = "healthy"
                     available_servers.append(server)
                     logger.debug(f"转录服务器可用: {url}")
                 else:
+                    server["health"] = {}
                     server["status"] = "unhealthy"
                     logger.warning(f"转录服务器不可用: {url}")
             except Exception as e:
+                server["health"] = {}
                 server["status"] = "error"
                 logger.debug(f"转录服务器检查失败 {url}: {str(e)}")
 
@@ -148,10 +174,10 @@ class TranscriptionService:
             logger.error("没有可用的转录服务器")
         return available_servers
 
-    def _get_available_transcribe_server(
+    def _get_available_transcribe_server_info(
         self, exclude_urls: Optional[List[str]] = None
-    ) -> Optional[str]:
-        """获取可用的转录服务器"""
+    ) -> Optional[Dict[str, Any]]:
+        """获取可用的转录服务器信息。"""
         try:
             available_servers = self._get_available_transcribe_servers()
             if not available_servers:
@@ -171,11 +197,20 @@ class TranscriptionService:
 
             selected_server = self._select_transcribe_server(available_servers)
             logger.info(f"选择转录服务器: {selected_server['url']}")
-            return selected_server["url"]
+            return selected_server
 
         except Exception as e:
             logger.error(f"获取可用转录服务器失败: {str(e)}")
-            return self.funasr_server  # 返回默认服务器
+            return {"url": self.funasr_server, "status": "unknown", "health": {}}
+
+    def _get_available_transcribe_server(
+        self, exclude_urls: Optional[List[str]] = None
+    ) -> Optional[str]:
+        """获取可用的转录服务器"""
+        server_info = self._get_available_transcribe_server_info(exclude_urls=exclude_urls)
+        if not server_info:
+            return self.funasr_server
+        return server_info.get("url")
 
     def _select_transcribe_server(
         self, available_servers: List[Dict[str, Any]]
@@ -529,24 +564,26 @@ class TranscriptionService:
         )
         return min(timeout, self.transcribe_timeout_max)
 
-    def _transcribe_with_retry(
+    def _transcribe_with_retry_details(
         self, audio_file: str, hotwords: List[str]
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """带重试的单文件转录，失败时切换服务器"""
         timeout = self._calculate_transcribe_timeout(audio_file)
         used_servers: List[str] = []
         max_retries = max(1, self.transcribe_max_retries)
 
         for attempt in range(1, max_retries + 1):
-            server_url = self._get_available_transcribe_server(
+            server_info = self._get_available_transcribe_server_info(
                 exclude_urls=used_servers
             )
+            server_url = server_info.get("url") if server_info else None
             if not server_url:
                 if used_servers:
-                    server_url = self._get_available_transcribe_server()
+                    server_info = self._get_available_transcribe_server_info()
+                    server_url = server_info.get("url") if server_info else None
                 if not server_url:
                     logger.error("没有可用的FunASR服务器")
-                    return None
+                    return None, None
 
             if server_url not in used_servers:
                 used_servers.append(server_url)
@@ -564,11 +601,219 @@ class TranscriptionService:
                 audio_file, hotwords, server_url, timeout=timeout
             )
             if result:
-                return result
+                return result, server_info
             logger.warning("转录重试 %s/%s 失败: %s", attempt, max_retries, server_url)
 
         logger.error("音频转录失败：已重试 %s 次仍未成功", max_retries)
+        return None, None
+
+    def _transcribe_with_retry(
+        self, audio_file: str, hotwords: List[str]
+    ) -> Optional[Dict[str, Any]]:
+        """带重试的单文件转录，失败时切换服务器"""
+        result, _ = self._transcribe_with_retry_details(audio_file, hotwords)
+        return result
+
+    @staticmethod
+    def _extract_probe_provider_metadata(
+        provider: str, server_info: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {"provider": provider}
+        if not server_info:
+            return metadata
+
+        server_health = server_info.get("health") or {}
+        transcription_model = server_health.get("transcription_model") or {}
+        main_model = transcription_model.get("main") or {}
+        model_runtime = (
+            main_model.get("runtime")
+            or main_model.get("name")
+            or main_model.get("id")
+            or ""
+        )
+        model_id = main_model.get("id") or model_runtime
+        normalized_ref = " ".join([str(model_runtime), str(model_id)]).lower()
+        model_language_bias = None
+        if "zh" in normalized_ref and "en" not in normalized_ref:
+            model_language_bias = "zh"
+        elif "en" in normalized_ref and "zh" not in normalized_ref:
+            model_language_bias = "en"
+
+        metadata.update(
+            {
+                "server_url": server_info.get("url"),
+                "server_name": server_info.get("name"),
+                "server_status": server_info.get("status"),
+                "model_runtime": model_runtime or None,
+                "model_id": model_id or None,
+                "model_language_bias": model_language_bias,
+                "transcription_model": transcription_model or None,
+                "device": server_health.get("device"),
+                "gpu_available": server_health.get("gpu_available"),
+            }
+        )
+        return metadata
+
+    def _detect_audio_language_with_transcriber(
+        self,
+        audio_file: str,
+        provider: str,
+        transcribe_probe_fn: Callable[[str], Optional[Dict[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
+        """Run language probing with a specific transcript provider."""
+        audio_info = self._get_audio_info(audio_file) or {}
+        duration_seconds = float(audio_info.get("duration_seconds") or 0.0)
+        segment_seconds = min(20.0, max(8.0, duration_seconds / 4.0 or 15.0))
+        offsets = self._get_audio_probe_offsets(duration_seconds, segment_seconds)
+
+        scores = blank_language_scores()
+        samples = []
+        temp_files: List[str] = []
+        provider_metadata: Dict[str, Any] = {}
+
+        try:
+            for offset in offsets:
+                probe_path = self._extract_audio_probe_segment(
+                    audio_file, offset, segment_seconds
+                )
+                if not probe_path:
+                    continue
+                temp_files.append(probe_path)
+
+                transcript = transcribe_probe_fn(probe_path)
+                if not transcript or not transcript.get("text"):
+                    continue
+
+                transcript_metadata = transcript.get("probe_provider_metadata") or {}
+                if transcript_metadata and not provider_metadata:
+                    provider_metadata = transcript_metadata
+
+                detection = detect_text_primary_language(transcript["text"])
+                language = normalize_primary_language(detection.get("language"))
+                confidence = float(detection.get("confidence", 0.0))
+                if language in {"zh", "en"} and confidence > 0:
+                    weight = max(0.2, round(confidence, 4))
+                    add_language_score(scores, language, weight)
+
+                samples.append(
+                    {
+                        "offset_seconds": offset,
+                        "language": language,
+                        "confidence": round(confidence, 4),
+                        "text_preview": transcript["text"][:80],
+                    }
+                )
+        finally:
+            for temp_file in temp_files:
+                try:
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+                except OSError:
+                    logger.debug("清理音频探测临时文件失败: %s", temp_file)
+
+        if not samples:
+            return None
+
+        decision = decide_primary_language(
+            scores, min_total=0.2, min_margin=0.12, min_confidence=0.58
+        )
+        result = {
+            "language": normalize_primary_language(decision.get("language")),
+            "confidence": float(decision.get("confidence", 0.0)),
+            "scores": decision.get("scores", {}),
+            "samples": samples,
+            "provider": provider,
+            "provider_metadata": provider_metadata,
+        }
+        logger.info("音频语言探测 provider=%s 结果: %s", provider, result)
+        return result
+
+    def _probe_audio_language_with_configured_funasr(
+        self, audio_file: str
+    ) -> Optional[Dict[str, Any]]:
+        """Use the current configured FunASR backend as the first local probe."""
+
+        def _transcribe_probe(probe_path: str) -> Optional[Dict[str, Any]]:
+            transcript, server_info = self._transcribe_with_retry_details(probe_path, [])
+            if not transcript:
+                return None
+            transcript = dict(transcript)
+            transcript["probe_provider_metadata"] = self._extract_probe_provider_metadata(
+                "configured_funasr", server_info
+            )
+            return transcript
+
+        return self._detect_audio_language_with_transcriber(
+            audio_file, "configured_funasr", _transcribe_probe
+        )
+
+    def _probe_audio_language_with_openai(
+        self, audio_file: str
+    ) -> Optional[Dict[str, Any]]:
+        """Use OpenAI Whisper as the last-resort remote audio probe."""
+
+        def _transcribe_probe(probe_path: str) -> Optional[Dict[str, Any]]:
+            transcript = self._transcribe_with_openai(probe_path)
+            if not transcript:
+                return None
+            transcript = dict(transcript)
+            transcript["probe_provider_metadata"] = {"provider": "openai"}
+            return transcript
+
+        return self._detect_audio_language_with_transcriber(
+            audio_file, "openai", _transcribe_probe
+        )
+
+    def _probe_audio_language_with_provider(
+        self, provider: str, audio_file: str
+    ) -> Optional[Dict[str, Any]]:
+        if provider == "configured_funasr":
+            return self._probe_audio_language_with_configured_funasr(audio_file)
+        if provider == "openai":
+            return self._probe_audio_language_with_openai(audio_file)
+        logger.debug("未知的音频探测 provider，跳过: %s", provider)
         return None
+
+    @staticmethod
+    def _audio_probe_result_rank(result: Dict[str, Any]) -> Tuple[int, float, int]:
+        language = normalize_primary_language(result.get("language"))
+        confidence = float(result.get("confidence", 0.0))
+        samples = len(result.get("samples") or [])
+        if language in {"zh", "en"}:
+            return (2, confidence, samples)
+        if language == "mixed":
+            return (1, confidence, samples)
+        return (0, confidence, samples)
+
+    def _is_audio_probe_result_acceptable(
+        self,
+        result: Dict[str, Any],
+        remaining_providers: List[str],
+    ) -> bool:
+        language = normalize_primary_language(result.get("language"))
+        confidence = float(result.get("confidence", 0.0))
+        if language not in {"zh", "en"}:
+            return False
+        if confidence < self.audio_probe_min_confidence:
+            return False
+
+        provider = result.get("provider")
+        provider_metadata = result.get("provider_metadata") or {}
+        model_language_bias = provider_metadata.get("model_language_bias")
+        if (
+            provider == "configured_funasr"
+            and model_language_bias in {"zh", "en"}
+            and model_language_bias == language
+            and remaining_providers
+        ):
+            logger.info(
+                "音频探测 provider=%s 使用单语偏置模型(%s)，结果 %s 先保留为候选并继续后续 provider",
+                provider,
+                model_language_bias,
+                language,
+            )
+            return False
+        return True
 
     def _transcribe_with_openai(self, audio_file: str) -> Optional[Dict[str, Any]]:
         """使用OpenAI Whisper转录音频"""
@@ -681,71 +926,30 @@ class TranscriptionService:
         try:
             if not audio_file or not os.path.exists(audio_file):
                 return None
-            if not self.openai_api_key:
-                logger.info("未配置OpenAI，跳过音频语言探测")
-                return None
+            best_result = None
+            for index, provider in enumerate(self.audio_probe_providers):
+                result = self._probe_audio_language_with_provider(provider, audio_file)
+                if not result:
+                    continue
 
-            audio_info = self._get_audio_info(audio_file) or {}
-            duration_seconds = float(audio_info.get("duration_seconds") or 0.0)
-            segment_seconds = min(20.0, max(8.0, duration_seconds / 4.0 or 15.0))
-            offsets = self._get_audio_probe_offsets(duration_seconds, segment_seconds)
+                if best_result is None or self._audio_probe_result_rank(
+                    result
+                ) > self._audio_probe_result_rank(best_result):
+                    best_result = result
 
-            scores = blank_language_scores()
-            samples = []
-            temp_files: List[str] = []
+                remaining_providers = self.audio_probe_providers[index + 1 :]
+                if self._is_audio_probe_result_acceptable(
+                    result, remaining_providers
+                ):
+                    logger.info("音频语言探测采用 provider=%s", provider)
+                    return result
 
-            try:
-                for offset in offsets:
-                    probe_path = self._extract_audio_probe_segment(
-                        audio_file, offset, segment_seconds
-                    )
-                    if not probe_path:
-                        continue
-                    temp_files.append(probe_path)
-
-                    transcript = self._transcribe_with_openai(probe_path)
-                    if not transcript or not transcript.get("text"):
-                        continue
-
-                    detection = detect_text_primary_language(transcript["text"])
-                    language = normalize_primary_language(detection.get("language"))
-                    confidence = float(detection.get("confidence", 0.0))
-                    if language not in {"zh", "en"} or confidence <= 0:
-                        continue
-
-                    weight = max(0.2, round(confidence, 4))
-                    add_language_score(scores, language, weight)
-                    samples.append(
-                        {
-                            "offset_seconds": offset,
-                            "language": language,
-                            "confidence": round(confidence, 4),
-                            "text_preview": transcript["text"][:80],
-                        }
-                    )
-            finally:
-                for temp_file in temp_files:
-                    try:
-                        if os.path.exists(temp_file):
-                            os.remove(temp_file)
-                    except OSError:
-                        logger.debug("清理音频探测临时文件失败: %s", temp_file)
-
-            decision = decide_primary_language(
-                scores, min_total=0.2, min_margin=0.12, min_confidence=0.58
-            )
-            language = normalize_primary_language(decision.get("language"))
-            if language not in {"zh", "en"}:
-                return None
-
-            result = {
-                "language": language,
-                "confidence": float(decision.get("confidence", 0.0)),
-                "scores": decision.get("scores", {}),
-                "samples": samples,
-            }
-            logger.info("音频语言探测结果: %s", result)
-            return result
+            if best_result:
+                logger.info(
+                    "所有音频探测 provider 都未达到直接采用阈值，返回最佳候选: provider=%s",
+                    best_result.get("provider"),
+                )
+            return best_result
 
         except Exception as e:
             logger.warning(f"音频语言探测失败: {str(e)}")

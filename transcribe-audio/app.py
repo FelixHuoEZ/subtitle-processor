@@ -126,6 +126,7 @@ app.config['UPLOAD_FOLDER'] = '/app/uploads'
 
 # 全局模型变量
 model = None
+CURRENT_MODEL_INFO = {}
 
 # 全局进度跟踪
 current_progress = {
@@ -394,7 +395,7 @@ MODEL_SUPPORTS_TIMESTAMP = False
 
 
 def init_model():
-    global model, MODEL_SUPPORTS_TIMESTAMP  # 声明使用全局变量
+    global model, MODEL_SUPPORTS_TIMESTAMP, CURRENT_MODEL_INFO  # 声明使用全局变量
     print("="*50)
     print("开始初始化FunASR模型...")
     print("正在检测GPU状态...")
@@ -467,6 +468,13 @@ def init_model():
 
             logger.info("FunASR初始化参数: %s", {k: v if k != "hotword" else "***" for k, v in init_kwargs.items()})
             model = AutoModel(**init_kwargs)
+            CURRENT_MODEL_INFO = {
+                "main": model_info.get("main"),
+                "vad": vad_config,
+                "punc": punc_config,
+                "spk": spk_config,
+                "supports_timestamp": MODEL_SUPPORTS_TIMESTAMP,
+            }
             print(f"FunASR模型加载完成，使用设备: {device}")
             print(f"主模型: {model_info['main']['name']} ({model_info['main']['id']})")
             if vad_config:
@@ -509,6 +517,29 @@ def init_model():
             logger.warning("使用默认模型参数: %s", fallback_kwargs)
             model = AutoModel(**fallback_kwargs)
             MODEL_SUPPORTS_TIMESTAMP = False
+            CURRENT_MODEL_INFO = {
+                "main": {
+                    "name": "paraformer-zh",
+                    "runtime": "paraformer-zh",
+                    "id": "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+                },
+                "vad": {
+                    "name": "fsmn-vad",
+                    "runtime": "fsmn-vad",
+                    "id": "damo/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+                },
+                "punc": {
+                    "name": "ct-punc",
+                    "runtime": "ct-punc",
+                    "id": "damo/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+                },
+                "spk": {
+                    "name": "cam++",
+                    "runtime": "cam++",
+                    "id": "damo/speech_campplus_sv_zh-cn_16k-common",
+                },
+                "supports_timestamp": MODEL_SUPPORTS_TIMESTAMP,
+            }
             print(f"FunASR模型加载完成，使用设备: {device}")
             print(f"主模型: paraformer-zh")
             print(f"VAD模型: fsmn-vad")
@@ -543,7 +574,8 @@ def health_check():
         "gpu_available": torch.cuda.is_available(),
         "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
         "gpu_names": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())] if torch.cuda.is_available() else [],
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "transcription_model": CURRENT_MODEL_INFO,
     }
     return jsonify(device_info)
 
