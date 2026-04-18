@@ -1,5 +1,7 @@
-# syntax=docker/dockerfile:1.6
-FROM python:3.11-slim
+# Use the BuildKit-bundled Dockerfile frontend so builds do not depend on
+# fetching docker/dockerfile from Docker Hub at parse time.
+ARG SUBTITLE_PROCESSOR_BASE_IMAGE=python:3.11-slim
+FROM ${SUBTITLE_PROCESSOR_BASE_IMAGE}
 ARG TARGETARCH
 ARG DENO_VERSION=2.6.5
 
