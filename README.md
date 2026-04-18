@@ -146,6 +146,14 @@ All defaults are listed in `.env.example`.
    `docker compose pull`, `docker compose up -d --force-recreate`, and `docker compose ps`
    inside `/share/ZFS530_DATA/.qpkg/container-station/data/application/subtitle`.
    It uses direct `ssh nas` when available, otherwise falls back to `~/nas-remote`.
+5. If the private base-image mirror is missing and `build-and-push.sh` fails on `${BASE_IMAGE_REGISTRY}/...: not found`, sync the mirror first:
+   ```bash
+   ./scripts/sync-base-images.sh
+   ```
+   Notes:
+   - The script defaults to the 4 upstream bases used by the current Dockerfiles.
+   - It runs on the NAS over `ssh nas`, pulls both `linux/amd64` and `linux/arm64`, then publishes a multi-arch manifest to `${BASE_IMAGE_REGISTRY}`.
+   - Use `./scripts/sync-base-images.sh --verify-only` to inspect the mirrored manifests without copying again.
 
 ### 🤖 Telegram Deployment (Single Entry)
 - Choose **one** machine (for example the NAS that fronts Caddy) to run the `telegram-bot` service with webhook enabled. Configure `telegram.webhook.public_url` (or `TELEGRAM_WEBHOOK_*` envs) **only** on this host so it remains the sole webhook endpoint. Start the stack with the Telegram profile:
@@ -346,6 +354,14 @@ Special thanks to:
    目录里运行 `docker compose pull`、`docker compose up -d --force-recreate`
    和 `docker compose ps`。当前 shell 能直连 `ssh nas` 时会同步执行；
    否则自动回退到 `~/nas-remote`。
+5. 如果私有 base-image mirror 缺失，导致 `build-and-push.sh` 报 `${BASE_IMAGE_REGISTRY}/...: not found`，先执行：
+   ```bash
+   ./scripts/sync-base-images.sh
+   ```
+   说明：
+   - 脚本默认同步当前 Dockerfile 用到的 4 个 upstream base image。
+   - 它会通过 `ssh nas` 在 NAS 上分别拉取 `linux/amd64` 和 `linux/arm64`，再向 `${BASE_IMAGE_REGISTRY}` 推送多架构 manifest。
+   - 只想核对 mirror 是否齐全，可运行 `./scripts/sync-base-images.sh --verify-only`。
 
 ### 🔧 使用方法
 1. **Telegram 机器人**
