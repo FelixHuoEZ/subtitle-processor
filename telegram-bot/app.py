@@ -2325,6 +2325,17 @@ async def _send_language_confirmation_prompt(
         reply_markup=_build_language_confirmation_keyboard(process_id),
         parse_mode=None,
     )
+    logger.info(
+        "language_confirmation_prompt_sent: user=%s chat=%s process=%s reason=%s suggested_language=%s suggested_confidence=%s content_locale=%s url=%s",
+        user_id,
+        chat_id,
+        process_id,
+        confirmation.get("reason"),
+        confirmation.get("suggested_language"),
+        confirmation.get("suggested_confidence"),
+        confirmation.get("content_locale"),
+        confirmation.get("url") or task.get("url"),
+    )
     _update_active_task_metadata(
         user_id,
         chat_id,
@@ -2373,6 +2384,14 @@ async def handle_language_confirmation_callback(
         await query.answer("这条任务已经不在当前队列里了", show_alert=True)
         return
 
+    logger.info(
+        "language_confirmation_callback: user=%s chat=%s process=%s selected_language=%s",
+        user_id,
+        chat_id,
+        process_id,
+        selected_language,
+    )
+
     try:
         response = await asyncio.to_thread(
             requests.post,
@@ -2417,6 +2436,13 @@ async def handle_language_confirmation_callback(
         chat_id,
         process_id,
         "processing",
+    )
+    logger.info(
+        "language_confirmation_submitted: user=%s chat=%s process=%s selected_language=%s",
+        user_id,
+        chat_id,
+        process_id,
+        selected_language,
     )
 
     try:
