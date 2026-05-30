@@ -756,6 +756,102 @@ def _list_active_tasks(user_id: int, chat_id: int) -> List[Dict[str, Any]]:
     return sorted(tasks, key=lambda item: item.get("created_at", 0))
 
 
+def _sync_active_task_video_metadata(
+    user_id: int, chat_id: int, process_id: str, payload: Dict[str, Any]
+) -> None:
+    """根据状态接口返回同步任务展示所需的标题/作者信息."""
+    video_info = payload.get("video_info") or {}
+    if not isinstance(video_info, dict):
+        return
+    title = (video_info.get("title") or "").strip()
+    uploader = (
+        video_info.get("uploader")
+        or video_info.get("author")
+        or video_info.get("channel")
+    )
+    uploader = (uploader or "").strip()
+    if title or uploader:
+        _update_active_task_metadata(
+            user_id,
+            chat_id,
+            process_id,
+            title=title or None,
+            uploader=uploader or None,
+        )
+
+
+async def _refresh_active_tasks_from_processor(user_id: int, chat_id: int) -> None:
+    """在展示队列前向后端对账，清理已经结束的陈旧任务."""
+    tracked_tasks = [
+        task
+        for task in _list_active_tasks(user_id, chat_id)
+        if (task.get("status") or "").lower() not in {"failed", "completed"}
+        and task.get("process_id")
+    ]
+    if not tracked_tasks:
+        return
+
+    async def _fetch_status(
+        task: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], Optional[requests.Response], Optional[Dict[str, Any]]]:
+        process_id = task["process_id"]
+        try:
+            response = await asyncio.to_thread(
+                requests.get,
+                f"{SUBTITLE_PROCESSOR_URL}/process/status/{process_id}",
+                timeout=15,
+            )
+        except Exception as exc:
+            logger.debug("刷新队列状态失败(%s): %s", process_id, exc)
+            return task, None, None
+
+        try:
+            payload = response.json()
+        except ValueError:
+            logger.debug("刷新队列状态返回非JSON(%s): %s", process_id, response.text)
+            payload = None
+        return task, response, payload
+
+    refreshed = await asyncio.gather(
+        *(_fetch_status(task) for task in tracked_tasks),
+        return_exceptions=True,
+    )
+    for item in refreshed:
+        if isinstance(item, Exception):
+            logger.debug("刷新队列状态时出现异常: %s", item)
+            continue
+
+        task, response, payload = item
+        process_id = task["process_id"]
+        if response is None:
+            continue
+        if response.status_code == 404:
+            _update_active_task_status(
+                user_id, chat_id, process_id, "failed", error="未找到处理任务"
+            )
+            continue
+        if response.status_code >= 500 or not isinstance(payload, dict):
+            continue
+
+        _sync_active_task_video_metadata(user_id, chat_id, process_id, payload)
+
+        status = (payload.get("status") or "").lower()
+        if status == "completed":
+            _remove_active_task(user_id, chat_id, process_id)
+            continue
+        if status == "failed":
+            _update_active_task_status(
+                user_id,
+                chat_id,
+                process_id,
+                "failed",
+                error=payload.get("error") or "处理失败",
+            )
+            continue
+        if status:
+            _update_active_task_status(user_id, chat_id, process_id, status)
+
+
 def _status_label(status: str) -> str:
     """友好的状态展示."""
     mapping = {
@@ -2119,6 +2215,7 @@ async def queue_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     log_update_metadata("/queue", update)
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
+    await _refresh_active_tasks_from_processor(user_id, chat_id)
     active_tasks_list, failed_tasks = _group_visible_queue_tasks(user_id, chat_id)
     if not active_tasks_list and not failed_tasks:
         await update.message.reply_text("当前没有正在处理的任务。")
@@ -2157,6 +2254,7 @@ async def queue_urls(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     log_update_metadata("/queue_url", update)
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
+    await _refresh_active_tasks_from_processor(user_id, chat_id)
     active_tasks_list, failed_tasks = _group_visible_queue_tasks(user_id, chat_id)
     visible_tasks = active_tasks_list + failed_tasks
     if not visible_tasks:
@@ -2655,23 +2753,7 @@ async def monitor_process_completion(
             continue
 
         status = (payload.get("status") or "").lower()
-        video_info = payload.get("video_info") or {}
-        if isinstance(video_info, dict):
-            title = (video_info.get("title") or "").strip()
-            uploader = (
-                video_info.get("uploader")
-                or video_info.get("author")
-                or video_info.get("channel")
-            )
-            uploader = (uploader or "").strip()
-            if title or uploader:
-                _update_active_task_metadata(
-                    user_id,
-                    chat_id,
-                    process_id,
-                    title=title or None,
-                    uploader=uploader or None,
-                )
+        _sync_active_task_video_metadata(user_id, chat_id, process_id, payload)
         logger.debug(
             "任务状态(%s) attempt=%s status=%s progress=%s",
             process_id,
@@ -2859,15 +2941,23 @@ async def monitor_process_completion(
 
         await asyncio.sleep(poll_interval)
 
-    logger.warning("任务超时未完成: %s", process_id)
-    try:
-        await context.bot.edit_message_text(
-            "⏳ 处理时间超过预期，但仍在后台处理中。请稍后使用 /queue 或网页查询结果。",
-            chat_id=chat_id,
-            message_id=message_id,
+    logger.warning("任务超时未完成，将继续后台跟踪: %s", process_id)
+    task = _get_active_task(user_id, chat_id, process_id)
+    if task and not task.get("timeout_notice_sent"):
+        try:
+            await context.bot.edit_message_text(
+                "⏳ 处理时间超过预期，但仍在后台处理中。请稍后使用 /queue 或网页查询结果。",
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+        except Exception as edit_err:
+            logger.debug("更新消息失败: %s", edit_err)
+        _update_active_task_metadata(
+            user_id,
+            chat_id,
+            process_id,
+            timeout_notice_sent=True,
         )
-    except Exception as edit_err:
-        logger.debug("更新消息失败: %s", edit_err)
     _update_last_request(
         user_id,
         chat_id,
@@ -2875,6 +2965,26 @@ async def monitor_process_completion(
         error=None,
     )
     _update_active_task_status(user_id, chat_id, process_id, "processing")
+    task = _get_active_task(user_id, chat_id, process_id)
+    if task and (task.get("status") or "").lower() not in {"failed", "completed"}:
+        _update_active_task_metadata(
+            user_id,
+            chat_id,
+            process_id,
+            monitor_rounds=int(task.get("monitor_rounds") or 1) + 1,
+        )
+        schedule_background_task(
+            context,
+            monitor_process_completion(
+                context,
+                user_id,
+                chat_id,
+                message_id,
+                process_id,
+                poll_interval=poll_interval,
+                max_attempts=max_attempts,
+            ),
+        )
 
 
 async def process_url_with_location(

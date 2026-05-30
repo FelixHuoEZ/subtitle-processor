@@ -73,7 +73,42 @@ def test_update_active_task_metadata_sets_title(app_module):
     assert tasks[0]["uploader"] == "Demo Channel"
 
 
-def test_queue_urls_returns_only_urls(app_module):
+def test_queue_status_refresh_removes_completed_tasks(app_module, monkeypatch):
+    app_module.active_tasks.clear()
+    app_module._register_active_task(
+        user_id=1,
+        chat_id=2,
+        process_id="proc-1",
+        url="https://youtu.be/abc123",
+        status="processing",
+    )
+
+    class DummyResponse:
+        status_code = 200
+        text = "{'status': 'completed'}"
+
+        def json(self):
+            return {
+                "status": "completed",
+                "video_info": {"title": "Done Title", "uploader": "Done Channel"},
+            }
+
+    monkeypatch.setattr(app_module.requests, "get", lambda *args, **kwargs: DummyResponse())
+
+    reply_text = AsyncMock()
+    update = SimpleNamespace(
+        effective_user=SimpleNamespace(id=1),
+        effective_chat=SimpleNamespace(id=2),
+        message=SimpleNamespace(reply_text=reply_text, date=None),
+    )
+
+    asyncio.run(app_module.queue_status(update, SimpleNamespace()))
+
+    reply_text.assert_awaited_once_with("当前没有正在处理的任务。")
+    assert app_module._list_active_tasks(1, 2) == []
+
+
+def test_queue_urls_returns_only_urls(app_module, monkeypatch):
     app_module.active_tasks.clear()
     app_module._register_active_task(
         user_id=1,
@@ -89,6 +124,15 @@ def test_queue_urls_returns_only_urls(app_module):
         url="https://www.bilibili.com/video/BV1xx411c7mD",
         status="failed",
     )
+
+    class DummyResponse:
+        status_code = 200
+        text = "{'status': 'queued'}"
+
+        def json(self):
+            return {"status": "queued"}
+
+    monkeypatch.setattr(app_module.requests, "get", lambda *args, **kwargs: DummyResponse())
 
     reply_text = AsyncMock()
     update = SimpleNamespace(
@@ -150,3 +194,60 @@ def test_queue_clear_all_clears_all_visible_tasks(app_module):
         "已清空 2 条任务记录。不会取消后台正在处理的任务。"
     )
     assert app_module._list_active_tasks(1, 2) == []
+
+
+def test_monitor_process_completion_reschedules_after_timeout(app_module, monkeypatch):
+    app_module.active_tasks.clear()
+    app_module._register_active_task(
+        user_id=1,
+        chat_id=2,
+        process_id="proc-1",
+        url="https://youtu.be/abc123",
+        status="processing",
+        message_id=99,
+    )
+
+    class DummyResponse:
+        status_code = 200
+        text = "{'status': 'processing'}"
+
+        def json(self):
+            return {"status": "processing", "progress": 42, "video_info": {}}
+
+    monkeypatch.setattr(app_module.requests, "get", lambda *args, **kwargs: DummyResponse())
+
+    rescheduled = {"called": False}
+
+    def fake_schedule_background_task(context, coro):
+        rescheduled["called"] = True
+        coro.close()
+        return None
+
+    monkeypatch.setattr(app_module, "schedule_background_task", fake_schedule_background_task)
+
+    bot = SimpleNamespace(edit_message_text=AsyncMock())
+    context = SimpleNamespace(bot=bot)
+
+    asyncio.run(
+        app_module.monitor_process_completion(
+            context,
+            user_id=1,
+            chat_id=2,
+            message_id=99,
+            process_id="proc-1",
+            poll_interval=0,
+            max_attempts=1,
+        )
+    )
+
+    assert rescheduled["called"] is True
+    bot.edit_message_text.assert_awaited_once_with(
+        "⏳ 处理时间超过预期，但仍在后台处理中。请稍后使用 /queue 或网页查询结果。",
+        chat_id=2,
+        message_id=99,
+    )
+    task = app_module._get_active_task(1, 2, "proc-1")
+    assert task is not None
+    assert task["status"] == "processing"
+    assert task["timeout_notice_sent"] is True
+    assert task["monitor_rounds"] == 2
