@@ -902,16 +902,15 @@ for entry in "${SERVICES[@]}"; do
   env_var="DOCKERFILE_${name//-/_}"
   dockerfile=${!env_var:-${default_dockerfile}}
 
-  if [[ ! -f "${context}/${dockerfile}" ]]; then
-    echo "ERROR: Dockerfile '${context}/${dockerfile}' not found for service ${name}" >&2
-    exit 1
-  fi
-
   if ! should_build_service "${name}"; then
     echo "==> Skipping ${name}; not listed in ONLY_SERVICES"
   elif should_skip_service "${name}"; then
     echo "==> Skipping ${name}; listed in SKIP_SERVICES"
   else
+    if [[ ! -f "${context}/${dockerfile}" ]]; then
+      echo "ERROR: Dockerfile '${context}/${dockerfile}' not found for service ${name}" >&2
+      exit 1
+    fi
     build_service "${name}" "${context}" "${dockerfile}"
   fi
 
