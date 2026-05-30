@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import traceback
+from pathlib import Path
 from threading import Thread
 from typing import Any, Awaitable, Dict, List, Optional, Tuple
 
@@ -50,12 +51,13 @@ logging.getLogger("requests").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+CONFIG_PATH = os.getenv("CONFIG_PATH", "config/config.yml")
+
 
 def load_config():
     """加载YAML配置文件"""
-    config_path = os.getenv("CONFIG_PATH", "config/config.yml")
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             return yaml.safe_load(f)
     except Exception as e:
         logger.error(f"加载配置文件失败: {str(e)}")
@@ -92,6 +94,99 @@ def _normalize_path(path: str) -> str:
     if not path:
         return "/telegram/webhook"
     return "/" + path.strip("/")
+
+
+DEFAULT_PROMPT_FLOW_SETTINGS_PATH = str(
+    Path(CONFIG_PATH).expanduser().with_name("prompt_flow_settings.json")
+)
+
+
+class PromptFlowSettingsManager:
+    """Persist prompt flow overrides so they survive bot restarts."""
+
+    def __init__(
+        self,
+        defaults: Dict[str, Any],
+        settings_path: Optional[str] = None,
+    ) -> None:
+        self._lock = threading.RLock()
+        self._defaults = {
+            "require_location": _get_bool(defaults.get("require_location"), True),
+            "require_tags": _get_bool(defaults.get("require_tags"), True),
+            "require_hotwords": _get_bool(defaults.get("require_hotwords"), True),
+        }
+        raw_path = settings_path or os.getenv(
+            "PROMPT_FLOW_SETTINGS_PATH", DEFAULT_PROMPT_FLOW_SETTINGS_PATH
+        )
+        self._settings_path = Path(raw_path).expanduser()
+        file_state = self._load_from_file()
+        if file_state is not None:
+            self._state = file_state
+        else:
+            self._state = dict(self._defaults)
+            self._persist_to_file()
+
+    @property
+    def settings_path(self) -> Path:
+        return self._settings_path
+
+    def _normalize_state(self, state: Dict[str, Any]) -> Dict[str, bool]:
+        return {
+            "require_location": _get_bool(
+                state.get("require_location"), self._defaults["require_location"]
+            ),
+            "require_tags": _get_bool(
+                state.get("require_tags"), self._defaults["require_tags"]
+            ),
+            "require_hotwords": _get_bool(
+                state.get("require_hotwords"), self._defaults["require_hotwords"]
+            ),
+        }
+
+    def _load_from_file(self) -> Optional[Dict[str, bool]]:
+        try:
+            if self._settings_path.is_file():
+                with self._settings_path.open("r", encoding="utf-8") as fp:
+                    data = json.load(fp)
+                if isinstance(data, dict):
+                    return self._normalize_state(data)
+                logger.warning("prompt flow 设置文件格式无效，将回退到默认值")
+        except Exception as exc:
+            logger.warning("读取 prompt flow 设置文件失败，将使用默认值: %s", exc)
+        return None
+
+    def _persist_to_file(self) -> None:
+        try:
+            self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._settings_path.with_name(f"{self._settings_path.name}.tmp")
+            with tmp_path.open("w", encoding="utf-8") as fp:
+                json.dump(self._state, fp, ensure_ascii=False, indent=2)
+            tmp_path.replace(self._settings_path)
+        except Exception as exc:
+            logger.error("写入 prompt flow 设置文件失败: %s", exc)
+
+    def get_state(self) -> Dict[str, bool]:
+        with self._lock:
+            return dict(self._state)
+
+    def update_state(self, **changes: Any) -> Dict[str, bool]:
+        with self._lock:
+            merged = dict(self._state)
+            if "require_location" in changes:
+                merged["require_location"] = _get_bool(
+                    changes["require_location"], merged["require_location"]
+                )
+            if "require_tags" in changes:
+                merged["require_tags"] = _get_bool(
+                    changes["require_tags"], merged["require_tags"]
+                )
+            if "require_hotwords" in changes:
+                merged["require_hotwords"] = _get_bool(
+                    changes["require_hotwords"], merged["require_hotwords"]
+                )
+            self._state = self._normalize_state(merged)
+            self._persist_to_file()
+            return dict(self._state)
 
 
 # 获取配置
@@ -152,9 +247,18 @@ PROMPT_FLOW_CONFIG = (
     else {}
 )
 
-REQUIRE_LOCATION_SELECTION = _get_bool(PROMPT_FLOW_CONFIG.get("require_location"), True)
-REQUIRE_TAG_INPUT = _get_bool(PROMPT_FLOW_CONFIG.get("require_tags"), True)
-REQUIRE_HOTWORD_INPUT = _get_bool(PROMPT_FLOW_CONFIG.get("require_hotwords"), True)
+PROMPT_FLOW_SETTINGS_MANAGER = PromptFlowSettingsManager(PROMPT_FLOW_CONFIG)
+
+
+def _apply_prompt_flow_state(state: Dict[str, Any]) -> None:
+    """Keep in-memory prompt flow switches aligned with persisted state."""
+    global REQUIRE_LOCATION_SELECTION, REQUIRE_TAG_INPUT, REQUIRE_HOTWORD_INPUT
+    REQUIRE_LOCATION_SELECTION = _get_bool(state.get("require_location"), True)
+    REQUIRE_TAG_INPUT = _get_bool(state.get("require_tags"), True)
+    REQUIRE_HOTWORD_INPUT = _get_bool(state.get("require_hotwords"), True)
+
+
+_apply_prompt_flow_state(PROMPT_FLOW_SETTINGS_MANAGER.get_state())
 TAGS_TIMEOUT_SECONDS = _get_int(PROMPT_FLOW_CONFIG.get("tags_timeout_seconds"), 180)
 HOTWORDS_TIMEOUT_SECONDS = _get_int(
     PROMPT_FLOW_CONFIG.get("hotwords_timeout_seconds"), 180
@@ -179,6 +283,10 @@ logger.info(
     REQUIRE_HOTWORD_INPUT,
     TAGS_TIMEOUT_SECONDS,
     HOTWORDS_TIMEOUT_SECONDS,
+)
+logger.info(
+    "Telegram输入流程运行态设置文件: %s",
+    PROMPT_FLOW_SETTINGS_MANAGER.settings_path,
 )
 
 # 获取环境变量
@@ -2271,7 +2379,6 @@ async def prompt_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = text.split(maxsplit=1)
     arg = parts[1] if len(parts) > 1 else None
 
-    global REQUIRE_TAG_INPUT, REQUIRE_HOTWORD_INPUT
     try:
         new_tags, new_hotwords, should_update = _resolve_prompt_toggle_arg(
             arg, REQUIRE_TAG_INPUT, REQUIRE_HOTWORD_INPUT
@@ -2283,8 +2390,11 @@ async def prompt_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if should_update:
-        REQUIRE_TAG_INPUT = new_tags
-        REQUIRE_HOTWORD_INPUT = new_hotwords
+        state = PROMPT_FLOW_SETTINGS_MANAGER.update_state(
+            require_tags=new_tags,
+            require_hotwords=new_hotwords,
+        )
+        _apply_prompt_flow_state(state)
         logger.info(
             "prompt_toggle: user=%s require_tags=%s require_hotwords=%s",
             user_id,
@@ -2293,8 +2403,13 @@ async def prompt_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     status_text = _prompt_toggle_status_text(REQUIRE_TAG_INPUT, REQUIRE_HOTWORD_INPUT)
+    persistence_text = (
+        "\n💾 新设置已持久化，当前 bot 重启后仍会保留。"
+        if should_update
+        else ""
+    )
     await update.message.reply_text(
-        f"{status_text}\n💡 已在等待输入的请求可用 /skip 跳过。"
+        f"{status_text}{persistence_text}\n💡 已在等待输入的请求可用 /skip 跳过。"
     )
 
 

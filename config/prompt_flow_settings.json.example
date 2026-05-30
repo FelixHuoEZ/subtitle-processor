@@ -1,0 +1,9 @@
+{
+  "_comment": "复制此文件为 config/prompt_flow_settings.json 后再修改；未复制时机器人会在首次启动时自动创建。",
+  "_comment_require_location": "require_location: 是否要求手动选择地点（true/false）",
+  "_comment_require_tags": "require_tags: 是否要求手动输入标签（true/false）",
+  "_comment_require_hotwords": "require_hotwords: 是否要求手动输入热词（true/false）",
+  "require_location": false,
+  "require_tags": true,
+  "require_hotwords": true
+}

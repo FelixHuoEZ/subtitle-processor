@@ -57,9 +57,10 @@ A comprehensive subtitle processing service that automatically downloads, transc
 - **Hotword Management**
   - Runtime toggle API (`/process/settings/hotword`) with persisted JSON state
   - Telegram commands `/hotword_status`、`/hotword_toggle` 查看/切换自动热词
-  - `/prompt_toggle on|off|status` only affects the current bot process (not persisted or shared)
+  - `/prompt_toggle on|off|status` persists to `config/prompt_flow_settings.json` on the current bot node, so restarts keep the override
+  - Prompt flow overrides are local to each bot node and are not shared across multiple bot instances
   - Conversation flow supports manual hotword input或 `/skip` 跳过
-  - `config/hotwords-example/` 与 `config/hotword_settings.json.example` 提供可定制模板
+  - `config/hotwords-example/`、`config/hotword_settings.json.example`、`config/prompt_flow_settings.json.example` 提供可定制模板
 
 ### 🛠️ Technical Stack
 - Backend: Python Flask
@@ -80,6 +81,8 @@ A comprehensive subtitle processing service that automatically downloads, transc
    ```bash
    cp config/hotword_settings.json.example config/hotword_settings.json
    # Edit config/hotword_settings.json to set defaults for auto_hotwords/post_process/mode/max_count
+   cp config/prompt_flow_settings.json.example config/prompt_flow_settings.json
+   # Edit config/prompt_flow_settings.json to preseed require_location/require_tags/require_hotwords overrides
    # For advanced generation rules, copy config/hotwords-example/hotwords_config-example.yml to config/hotwords/hotwords_config.yml
    ```
 5. Configure YouTube cookies (required for member-only/age-restricted videos):
@@ -249,9 +252,10 @@ Special thanks to:
   - 可选：检测到中文字幕时直接剪藏原始 URL
 - **热词管理**
   - 运行期热词开关可通过 `/process/settings/hotword` 与 Telegram 指令在线调整
-  - `/prompt_toggle on|off|status` 仅对当前 bot 进程生效，不会持久化或跨节点同步
+  - `/prompt_toggle on|off|status` 会写入当前 bot 节点的 `config/prompt_flow_settings.json`，容器重启后仍会保留
+  - Prompt flow 运行态覆盖仅保存在本节点，不会跨多实例自动同步
   - 标签/热词会话支持手动输入或 `/skip` 快捷跳过
-  - `config/hotword_settings.json.example`、`config/hotwords-example/` 提供自定义模板，轻松扩展自动热词策略
+  - `config/hotword_settings.json.example`、`config/prompt_flow_settings.json.example`、`config/hotwords-example/` 提供自定义模板，轻松扩展自动热词策略
 
 ### 🛠️ 技术栈
 - 后端：Python Flask
@@ -272,6 +276,8 @@ Special thanks to:
    ```bash
    cp config/hotword_settings.json.example config/hotword_settings.json
    # 编辑热词开关/模式/最大数量等默认值
+   cp config/prompt_flow_settings.json.example config/prompt_flow_settings.json
+   # 编辑 prompt flow 的 require_location/require_tags/require_hotwords 初始覆盖值
    # 如需自定义生成规则，可复制 config/hotwords-example/hotwords_config-example.yml 至 config/hotwords/hotwords_config.yml
    ```
 5. 配置 YouTube cookies（会员/受限视频下载需要自己的 cookies）：
