@@ -509,6 +509,9 @@ validate_service_filter_values() {
   shift
 
   for candidate in "$@"; do
+    if [[ -z "${candidate}" ]]; then
+      continue
+    fi
     if ! service_name_exists "${candidate}"; then
       echo "ERROR: Unknown service in ${label}: ${candidate}" >&2
       echo "Known services: ${KNOWN_SERVICE_NAMES[*]}" >&2
@@ -534,7 +537,7 @@ if [[ -n "${ONLY_SERVICES:-}" ]]; then
     fi
   done
 fi
-validate_service_filter_values "ONLY_SERVICES" "${ONLY_SERVICES_ARRAY[@]}"
+validate_service_filter_values "ONLY_SERVICES" "${ONLY_SERVICES_ARRAY[@]-}"
 
 SKIP_SERVICES_DISPLAY=""
 SKIP_SERVICES_ARRAY=()
@@ -553,7 +556,7 @@ if [[ -n "${SKIP_SERVICES:-}" ]]; then
     fi
   done
 fi
-validate_service_filter_values "SKIP_SERVICES" "${SKIP_SERVICES_ARRAY[@]}"
+validate_service_filter_values "SKIP_SERVICES" "${SKIP_SERVICES_ARRAY[@]-}"
 
 log_debug "Only services: ${ONLY_SERVICES_DISPLAY:-<all>}"
 log_debug "Skip services: ${SKIP_SERVICES_DISPLAY:-<none>}"
