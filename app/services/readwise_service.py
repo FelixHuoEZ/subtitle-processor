@@ -118,6 +118,7 @@ class ReadwiseService:
             response = self._make_request("POST", "/save/", data=article_data)
 
             if response and response.get("id"):
+                response = self._ensure_reader_url(response)
                 logger.info(f"Readwise文章创建成功，ID: {response['id']}")
                 return response
             else:
@@ -164,6 +165,7 @@ class ReadwiseService:
             response = self._make_request("POST", "/save/", data=article_data)
 
             if response and response.get("id"):
+                response = self._ensure_reader_url(response)
                 logger.info(f"Readwise URL剪藏成功，ID: {response['id']}")
                 return response
 
@@ -191,7 +193,7 @@ class ReadwiseService:
                 return None
 
             video_info = subtitle_data.get("video_info", {})
-            subtitle_content = subtitle_data.get("subtitle_content", "")
+            subtitle_content = subtitle_data.get("subtitle_content") or ""
             failure_message = subtitle_data.get("failure_message")
             user_tags = subtitle_data.get("tags", [])
             readwise_mode = subtitle_data.get("readwise_mode")
@@ -213,9 +215,32 @@ class ReadwiseService:
             logger.info(f"字幕内容前200字符: {subtitle_content[:200]}...")
 
             # 构造URL - 支持自定义域名替换
-            original_url = video_info.get("webpage_url") or video_info.get("url")
+            original_url = (
+                video_info.get("webpage_url")
+                or video_info.get("url")
+                or subtitle_data.get("url")
+            )
 
-            # 检查是否配置了自定义域名，如果是YouTube链接则进行转换
+            # 获取作者信息
+            author = video_info.get("uploader") or video_info.get("channel")
+
+            if readwise_url_only:
+                title = video_info.get("title") or subtitle_data.get("page_title") or "未知视频标题"
+                logger.info(
+                    "Readwise URL剪藏模式启用，直接发送原始URL: reason=%s url=%s",
+                    readwise_reason or "unspecified",
+                    original_url,
+                )
+                return self.create_article_from_url(
+                    title=title,
+                    url=original_url,
+                    tags=user_tags,
+                    author=author,
+                    summary=subtitle_data.get("summary"),
+                )
+
+            # 检查是否配置了自定义域名，如果是YouTube链接则进行转换。URL-only
+            # 必须保留原始URL，让 Readwise Reader 自己抓取网页。
             video_domain = get_config_value("servers.video_domain")
 
             if video_domain and original_url:
@@ -227,9 +252,6 @@ class ReadwiseService:
                     url = original_url
             else:
                 url = original_url
-
-            # 获取作者信息
-            author = video_info.get("uploader") or video_info.get("channel")
 
             if failure_message:
                 failure_text = str(failure_message).strip()
@@ -244,20 +266,6 @@ class ReadwiseService:
                 return self.create_article(
                     title=title,
                     content=failure_text,
-                    url=url,
-                    tags=user_tags,
-                    author=author,
-                    summary=subtitle_data.get("summary"),
-                )
-
-            if readwise_url_only:
-                title = video_info.get("title", "未知视频标题")
-                logger.info(
-                    "Readwise URL剪藏模式启用，跳过字幕内容: reason=%s",
-                    readwise_reason or "unspecified",
-                )
-                return self.create_article_from_url(
-                    title=title,
                     url=url,
                     tags=user_tags,
                     author=author,
@@ -748,6 +756,13 @@ class ReadwiseService:
         except Exception as e:
             logger.error(f"Readwise API请求出错: {str(e)}")
             return None
+
+    @staticmethod
+    def _ensure_reader_url(response: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensure callers can link directly to the Reader item."""
+        if response and response.get("id") and not response.get("url"):
+            response["url"] = f"https://read.readwise.io/read/{response['id']}"
+        return response
 
     def get_article(self, article_id: str) -> Optional[Dict[str, Any]]:
         """获取文章信息"""

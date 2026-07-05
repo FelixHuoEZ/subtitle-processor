@@ -97,8 +97,16 @@ document.addEventListener('DOMContentLoaded', function() {
           }
 
           if (data && data.success) {
-            status.textContent = '成功发送到后台！';
+            if (data.readwise_url) {
+              showStatusLink(status, '已保存到 Readwise Reader', data.readwise_url, 'success');
+              return;
+            }
+
+            status.textContent = '已发送到后台，等待 Readwise 链接...';
             status.className = 'success';
+            if (data.process_id && data.poll_url) {
+              pollTaskStatus(data.process_id, data.poll_url, data.result_url);
+            }
           } else {
             status.textContent = '错误: ' + ((data && (data.error || data.message)) || '处理失败');
             status.className = 'error';
@@ -108,6 +116,81 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   });
 });
+
+async function pollTaskStatus(processId, pollUrl, fallbackUrl) {
+  const status = document.getElementById('status');
+  const maxAttempts = 120;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    await sleep(5000);
+
+    const response = await sendRuntimeMessage({
+      type: 'CHECK_SUBTITLE_TASK_STATUS',
+      payload: {
+        processId,
+        pollUrl
+      }
+    });
+
+    if (!response || !response.success) {
+      continue;
+    }
+
+    const normalizedStatus = String(response.status || '').toLowerCase();
+    if (normalizedStatus === 'completed') {
+      const linkUrl = response.readwise_url || response.reader_url || fallbackUrl;
+      showStatusLink(
+        status,
+        response.readwise_url ? '已保存到 Readwise Reader' : '后台处理完成',
+        linkUrl,
+        'success'
+      );
+      return;
+    }
+
+    if (normalizedStatus === 'failed') {
+      showStatusLink(status, response.error || '后台处理失败', fallbackUrl, 'error');
+      return;
+    }
+  }
+
+  showStatusLink(status, '后台仍在处理，可稍后查看任务详情', fallbackUrl, 'success');
+}
+
+function sendRuntimeMessage(message) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve({ success: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+function showStatusLink(status, message, linkUrl, className) {
+  status.textContent = '';
+  status.className = className || '';
+
+  const messageNode = document.createElement('span');
+  messageNode.textContent = message;
+  status.appendChild(messageNode);
+
+  if (linkUrl) {
+    status.appendChild(document.createTextNode(' '));
+    const link = document.createElement('a');
+    link.href = linkUrl;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = '查看';
+    status.appendChild(link);
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function extractVideoId(url) {
   try {

@@ -135,9 +135,13 @@
 
       activeProcessId = response.process_id || null;
       button.textContent = '已发送';
-      showToast('已发送到后台', 'success', response.result_url);
+      showToast(
+        response.readwise_url ? '已保存到 Readwise Reader' : '已发送到后台',
+        'success',
+        getPreferredResultUrl(response, response.result_url)
+      );
 
-      if (String(response.status || '').toLowerCase() === 'completed' || response.readwise_url_only) {
+      if (String(response.status || '').toLowerCase() === 'completed') {
         restoreSubmittedButton();
         return;
       }
@@ -175,7 +179,12 @@
 
         const normalizedStatus = String(status.status || '').toLowerCase();
         if (normalizedStatus === 'completed') {
-          showToast('后台处理完成', 'success', resultUrl);
+          const linkUrl = getPreferredResultUrl(status, resultUrl);
+          showToast(
+            status.readwise_url ? '已保存到 Readwise Reader' : '后台处理完成',
+            'success',
+            linkUrl
+          );
           restoreSubmittedButton();
           return;
         }
@@ -197,6 +206,10 @@
       button.disabled = false;
       button.textContent = '再次发送';
     }
+  }
+
+  function getPreferredResultUrl(response, fallbackUrl) {
+    return (response && (response.readwise_url || response.reader_url)) || fallbackUrl;
   }
 
   function sendMessage(message) {

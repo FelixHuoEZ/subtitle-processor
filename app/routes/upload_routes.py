@@ -469,8 +469,8 @@ def _process_video_task(task_info, auto_transcribe):
             if result.get("readwise_url_only") and result.get(
                 "skip_processing_for_url_only"
             ):
-                task_info["status"] = "completed"
-                task_info["progress"] = 100
+                task_info["status"] = "processing"
+                task_info["progress"] = 90
                 logger.info(
                     "第2步完成：命中原始中文字幕 URL 剪藏规则，跳过字幕下载与转录: %s",
                     process_id,
@@ -486,12 +486,24 @@ def _process_video_task(task_info, auto_transcribe):
                     if readwise_result:
                         task_info["readwise_article_id"] = readwise_result.get("id")
                         task_info["readwise_url"] = readwise_result.get("url")
+                        task_info["status"] = "completed"
+                        task_info["progress"] = 100
+                        task_info.pop("error", None)
+                        task_info.pop("readwise_error", None)
                         logger.info(
                             f"第3步完成：Readwise URL剪藏成功: {process_id} -> {readwise_result.get('id')}"
                         )
                     else:
+                        task_info["status"] = "failed"
+                        task_info["progress"] = 100
+                        task_info["error"] = "Readwise URL剪藏失败"
+                        task_info["readwise_error"] = "readwise_url_clip_failed"
                         logger.warning(f"第3步失败：Readwise URL剪藏失败: {process_id}")
                 except Exception as e:
+                    task_info["status"] = "failed"
+                    task_info["progress"] = 100
+                    task_info["error"] = f"Readwise URL剪藏失败: {str(e)}"
+                    task_info["readwise_error"] = str(e)
                     logger.error(
                         f"第3步错误：发送URL剪藏到Readwise失败: {process_id} - {str(e)}"
                     )
