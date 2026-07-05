@@ -39,7 +39,15 @@ def index():
         
         # 转换为列表并排序
         files_list = list(filtered_files.values())
-        files_list.sort(key=lambda x: x.get('upload_time', ''), reverse=True)
+        files_list.sort(
+            key=lambda x: (
+                x.get('updated_time')
+                or x.get('created_time')
+                or x.get('upload_time')
+                or ''
+            ),
+            reverse=True,
+        )
         
         # 分页处理
         total = len(files_list)
@@ -64,7 +72,8 @@ def index():
                                  'prev_num': page - 1 if has_prev else None,
                                  'next_num': page + 1 if has_next else None
                              },
-                             current_type=file_type)
+                             current_type=file_type,
+                             current_sort=request.args.get('sort', 'time_desc'))
         
     except Exception as e:
         logger.error(f"获取文件列表失败: {str(e)}")
@@ -82,7 +91,9 @@ def file_detail(file_id):
         
         # 获取文件内容（如果是文本文件）
         file_content = None
-        if file_info.get('file_type') == 'subtitle':
+        if file_info.get('subtitle_content'):
+            file_content = file_info.get('subtitle_content')
+        elif file_info.get('file_type') == 'subtitle':
             try:
                 file_path = file_info.get('file_path')
                 if file_path and os.path.exists(file_path):
@@ -350,13 +361,21 @@ def api_list_files():
         # 过滤文件类型
         if file_type:
             filtered_files = {k: v for k, v in all_files.items() 
-                            if v.get('file_type') == file_type}
+                            if v.get('file_type') == file_type or v.get('status') == file_type}
         else:
             filtered_files = all_files
         
         # 转换为列表并排序
         files_list = list(filtered_files.values())
-        files_list.sort(key=lambda x: x.get('upload_time', ''), reverse=True)
+        files_list.sort(
+            key=lambda x: (
+                x.get('updated_time')
+                or x.get('created_time')
+                or x.get('upload_time')
+                or ''
+            ),
+            reverse=True,
+        )
         
         # 分页
         total = len(files_list)

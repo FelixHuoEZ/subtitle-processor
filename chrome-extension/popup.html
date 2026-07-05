@@ -68,8 +68,8 @@
     <input type="text" id="serverUrl" placeholder="http://your-nas-ip:5000">
   </div>
   <div class="form-group">
-    <label for="readwiseToken">Readwise Token:</label>
-    <input type="text" id="readwiseToken" placeholder="输入你的Readwise Token">
+    <label for="readwiseToken">Readwise Token（可选）:</label>
+    <input type="text" id="readwiseToken" placeholder="默认使用后端配置">
   </div>
   <div class="form-group">
     <label for="saveLocation">保存位置:</label>
@@ -91,7 +91,7 @@
     <div class="help-text">示例：专有名词1,专有名词2</div>
   </div>
   <button id="saveSettings">保存设置</button>
-  <button id="extractUrl">提取当前页面</button>
+  <button id="extractUrl">发送当前页面到后台</button>
   <div id="status"></div>
   <script src="popup.js"></script>
 </body>

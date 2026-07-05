@@ -249,7 +249,7 @@ def test_refresh_language_state_from_final_subtitle_can_trigger_confirmation(
     monkeypatch.setattr(
         upload_routes.video_service,
         "_build_readwise_decision",
-        lambda track_catalog, language_details, content_locale_details: {
+        lambda track_catalog, language_details, content_locale_details, video_info=None: {
             "mode": "url_only",
             "reason": "zh_locale_mixed_spoken",
             "skip_processing": False,

@@ -625,6 +625,7 @@ class VideoService:
         track_catalog: List[Dict[str, Any]],
         language_details: Dict[str, Any],
         content_locale_details: Dict[str, Any],
+        video_info: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         spoken_language = self._normalize_language_code(language_details.get("language"))
         content_locale = self._normalize_language_code(
@@ -635,6 +636,15 @@ class VideoService:
             track.get("is_chinese_original_candidate") for track in track_catalog
         )
         spoken_pattern = self._derive_spoken_pattern(spoken_language, content_locale)
+        reader_url_accessible = self._is_readwise_reader_url_accessible(video_info)
+
+        if not reader_url_accessible:
+            return {
+                "mode": "full_text",
+                "reason": "restricted_url_requires_local_processing",
+                "skip_processing": False,
+                "spoken_pattern": spoken_pattern,
+            }
 
         if self.readwise_url_only_when_zh_subs and has_original_zh_track:
             return {
@@ -676,6 +686,31 @@ class VideoService:
         }
 
     @staticmethod
+    def _is_readwise_reader_url_accessible(info: Optional[Dict[str, Any]]) -> bool:
+        """Return False for videos that likely need this service's cookies."""
+        if not info:
+            return True
+
+        try:
+            age_limit = int(info.get("age_limit") or 0)
+        except (TypeError, ValueError):
+            age_limit = 0
+        if age_limit > 0:
+            return False
+
+        availability = " ".join(str(info.get("availability") or "").split()).lower()
+        restricted_signals = (
+            "private",
+            "premium",
+            "subscriber",
+            "member",
+            "needs_auth",
+            "login",
+            "authenticated",
+        )
+        return not any(signal in availability for signal in restricted_signals)
+
+    @staticmethod
     def _get_zh_language_priority() -> List[str]:
         return ["zh-CN", "zh", "zh-TW", "zh-Hans", "zh-Hant"]
 
@@ -699,6 +734,11 @@ class VideoService:
         track_catalog: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         if not self.readwise_url_only_when_zh_subs:
+            return False
+        if not self._is_readwise_reader_url_accessible(info):
+            logger.info(
+                "检测到受限YouTube URL，保留本地字幕/转录处理，不启用Readwise URL-only"
+            )
             return False
         resolved_track_catalog = track_catalog or self._build_track_catalog(info)
         return any(
@@ -1203,6 +1243,9 @@ class VideoService:
                 "webpage_url": info.get("webpage_url", url),
                 "thumbnail": info.get("thumbnail"),
                 "language": info.get("language"),
+                "availability": info.get("availability"),
+                "age_limit": info.get("age_limit"),
+                "is_live": info.get("is_live"),
                 "subtitles": list(info.get("subtitles", {}).keys())
                 if info.get("subtitles")
                 else [],
@@ -2586,7 +2629,7 @@ class VideoService:
             track_catalog=track_catalog,
         )
         readwise_decision = self._build_readwise_decision(
-            track_catalog, language_details, content_locale_details
+            track_catalog, language_details, content_locale_details, video_info
         )
 
         if self._should_clip_url_only(video_info, track_catalog=track_catalog):
@@ -2665,7 +2708,7 @@ class VideoService:
                         )
 
         readwise_decision = self._build_readwise_decision(
-            track_catalog, language_details, content_locale_details
+            track_catalog, language_details, content_locale_details, video_info
         )
 
         return {

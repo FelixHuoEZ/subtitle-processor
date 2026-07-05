@@ -191,7 +191,23 @@ def register_main_routes(app):
     @app.route('/')
     def index():
         """首页"""
-        return render_template('index.html')
+        try:
+            from .services.file_service import FileService
+
+            files = list(FileService().list_files().values())
+            files.sort(
+                key=lambda item: (
+                    item.get('updated_time')
+                    or item.get('created_time')
+                    or item.get('upload_time')
+                    or ''
+                ),
+                reverse=True,
+            )
+            return render_template('index.html', files=files[:50])
+        except Exception as exc:
+            logger.error("首页文件列表加载失败: %s", exc)
+            return render_template('index.html', files=[])
 
     @app.route('/health')
     def health_check():

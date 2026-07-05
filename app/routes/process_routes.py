@@ -72,12 +72,12 @@ def process_video(process_id):
             flash('处理任务不存在', 'error')
             return redirect(url_for('upload.upload_url'))
         
-        return render_template('process_video.html', task_info=task_info)
+        return redirect(url_for('view.file_detail', file_id=process_id))
         
     except Exception as e:
         logger.error(f"获取视频处理页面失败: {str(e)}")
         flash(f'获取处理页面失败: {str(e)}', 'error')
-        return redirect(url_for('upload.upload_url'))
+        return redirect(url_for('view.index'))
 
 
 @process_bp.route('/video/<process_id>/start', methods=['POST'])
@@ -477,10 +477,14 @@ def get_processing_status(task_id):
             'readwise_mode': task_info.get('readwise_mode'),
             'readwise_reason': task_info.get('readwise_reason'),
             'readwise_url_only': task_info.get('readwise_url_only'),
+            'skip_processing_for_url_only': task_info.get('skip_processing_for_url_only'),
+            'readwise_article_id': task_info.get('readwise_article_id'),
+            'readwise_url': task_info.get('readwise_url'),
             'spoken_pattern': task_info.get('spoken_pattern'),
             'language_confirmation': task_info.get('language_confirmation'),
             'language_override': task_info.get('language_override'),
             'filename': task_info.get('filename'),
+            'page_title': task_info.get('page_title'),
             'subtitle_path': task_info.get('subtitle_path') or task_info.get('path'),
             'view_url': task_info.get('url'),
             'created_at': task_info.get('upload_time'),

@@ -1,7 +1,9 @@
 document.addEventListener('DOMContentLoaded', function() {
+  const defaultServerUrl = 'http://localhost:5000';
+
   // 加载保存的设置
   chrome.storage.sync.get(['serverUrl', 'readwiseToken', 'saveLocation', 'tags', 'hotwords'], function(items) {
-    document.getElementById('serverUrl').value = items.serverUrl || '';
+    document.getElementById('serverUrl').value = items.serverUrl || defaultServerUrl;
     document.getElementById('readwiseToken').value = items.readwiseToken || '';
     document.getElementById('saveLocation').value = items.saveLocation || 'new';
     document.getElementById('tags').value = items.tags || '';
@@ -39,8 +41,13 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // 获取设置
     chrome.storage.sync.get(['serverUrl', 'readwiseToken', 'saveLocation', 'tags', 'hotwords'], function(items) {
-      if (!items.serverUrl || !items.readwiseToken) {
-        status.textContent = '请先设置服务器地址和Readwise Token！';
+      if (!items.serverUrl) {
+        chrome.storage.sync.set({ serverUrl: defaultServerUrl });
+        items.serverUrl = defaultServerUrl;
+      }
+
+      if (!items.serverUrl) {
+        status.textContent = '请先设置服务器地址！';
         status.className = 'error';
         return;
       }
@@ -73,34 +80,29 @@ document.addEventListener('DOMContentLoaded', function() {
           return;
         }
         
-        // 发送到服务器
-        fetch(`${items.serverUrl}/process`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
+        chrome.runtime.sendMessage({
+          type: 'SUBMIT_YOUTUBE_URL',
+          payload: {
             url: currentUrl,
-            platform: 'youtube',
-            video_id: videoId,
-            readwise_token: items.readwiseToken,
-            location: items.saveLocation || 'new',
+            videoId: videoId,
+            pageTitle: tabs[0].title || '',
             tags: tagsList,
             hotwords: hotwordsList
-          })
-        })
-        .then(response => response.json())
-        .then(data => {
-          if (data.success) {
-            status.textContent = '成功发送到服务器！';
+          }
+        }, function(data) {
+          if (chrome.runtime.lastError) {
+            status.textContent = '错误: ' + chrome.runtime.lastError.message;
+            status.className = 'error';
+            return;
+          }
+
+          if (data && data.success) {
+            status.textContent = '成功发送到后台！';
             status.className = 'success';
           } else {
-            throw new Error(data.message || '处理失败');
+            status.textContent = '错误: ' + ((data && (data.error || data.message)) || '处理失败');
+            status.className = 'error';
           }
-        })
-        .catch(error => {
-          status.textContent = '错误: ' + error.message;
-          status.className = 'error';
         });
       });
     });

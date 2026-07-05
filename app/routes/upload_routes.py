@@ -43,6 +43,31 @@ SRT_TIMING_LINE_RE = re.compile(
     r"^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}$",
     re.MULTILINE,
 )
+def _to_bool(value, default=False):
+    """Parse common JSON/form boolean values."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _clean_text(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _normalize_tags(value):
+    if not value:
+        return []
+    if isinstance(value, str):
+        values = re.split(r"[,，]", value)
+    else:
+        values = value
+    return [str(tag).strip() for tag in values if str(tag).strip()]
 
 
 def _count_srt_entries(srt_content):
@@ -126,26 +151,26 @@ def upload_url():
     try:
         # 获取URL (支持JSON和表单数据)
         if request.is_json:
-            data = request.get_json()
+            data = request.get_json(silent=True) or {}
             url = data.get("url", "").strip()
-            extract_audio = data.get("extract_audio", True)
-            auto_transcribe = data.get("auto_transcribe", False)
-            auto_start = data.get("auto_start", True)  # 默认自动开始处理
-            tags = data.get("tags", [])  # 获取用户指定的标签
+            extract_audio = _to_bool(data.get("extract_audio"), True)
+            auto_transcribe = _to_bool(data.get("auto_transcribe"), False)
+            auto_start = _to_bool(data.get("auto_start"), True)  # 默认自动开始处理
+            tags = _normalize_tags(data.get("tags", []))  # 获取用户指定的标签
             request_source = (data.get("request_source") or "").strip().lower()
+            page_title = _clean_text(data.get("page_title") or data.get("title"))
+            video_id = _clean_text(data.get("video_id"))
         else:
             url = request.form.get("url", "").strip()
-            extract_audio = request.form.get("extract_audio", "false").lower() == "true"
-            auto_transcribe = (
-                request.form.get("auto_transcribe", "false").lower() == "true"
-            )
-            auto_start = request.form.get("auto_start", "false").lower() == "true"
-            tags = (
-                request.form.get("tags", "").split(",")
-                if request.form.get("tags")
-                else []
-            )  # 表单数据中的标签
+            extract_audio = _to_bool(request.form.get("extract_audio"), False)
+            auto_transcribe = _to_bool(request.form.get("auto_transcribe"), False)
+            auto_start = _to_bool(request.form.get("auto_start"), False)
+            tags = _normalize_tags(request.form.get("tags", ""))  # 表单数据中的标签
             request_source = (request.form.get("request_source") or "").strip().lower()
+            page_title = _clean_text(
+                request.form.get("page_title") or request.form.get("title")
+            )
+            video_id = _clean_text(request.form.get("video_id"))
 
         if not url:
             if request.is_json:
@@ -164,9 +189,6 @@ def upload_url():
         # 生成处理ID
         process_id = str(uuid.uuid4())
 
-        # 清理标签（移除空标签）
-        tags = [tag.strip() for tag in tags if tag.strip()] if tags else []
-
         # 创建处理任务信息
         task_info = {
             "id": process_id,
@@ -180,6 +202,11 @@ def upload_url():
             "extract_audio": extract_audio,
             "request_source": request_source or None,
         }
+        if page_title:
+            task_info["page_title"] = page_title
+            task_info["filename"] = page_title
+        if video_id:
+            task_info["video_id"] = video_id
 
         # 保存任务信息
         file_service.add_file_info(process_id, task_info)
@@ -204,8 +231,16 @@ def upload_url():
             response_data = {
                 "success": True,
                 "process_id": process_id,
-                "status_url": f"/process/video/{process_id}",
+                "status_url": f"/process/status/{process_id}",
+                "process_url": f"/process/video/{process_id}",
+                "view_url": f"/view/{process_id}",
                 "platform": platform,
+                "status": task_info.get("status", "pending"),
+                "readwise_mode": task_info.get("readwise_mode"),
+                "readwise_reason": task_info.get("readwise_reason"),
+                "readwise_url_only": task_info.get("readwise_url_only", False),
+                "readwise_article_id": task_info.get("readwise_article_id"),
+                "readwise_url": task_info.get("readwise_url"),
             }
             if auto_start:
                 response_data.update(
@@ -1053,6 +1088,7 @@ def _refresh_language_state_from_final_subtitle(
         result.get("track_catalog") or [],
         refreshed_language_details,
         refreshed_content_locale_details,
+        video_info,
     )
     process_id = (
         task_info.get("id")
@@ -1146,6 +1182,7 @@ def _apply_language_confirmation(result, task_info, confirmation):
         result.get("track_catalog") or [],
         overridden_language_details,
         result.get("content_locale_details") or {},
+        result.get("video_info") or task_info.get("video_info") or {},
     )
     result["readwise_mode"] = readwise_decision.get("mode")
     result["readwise_reason"] = readwise_decision.get("reason")

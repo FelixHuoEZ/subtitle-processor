@@ -98,7 +98,7 @@ A comprehensive subtitle processing service that automatically downloads, transc
    ```
 
 ### ⚙️ Optional Configuration
-- `READWISE_URL_ONLY_WHEN_ZH_SUBS=true` to clip the original URL to Readwise when Chinese subtitles exist (skips subtitle download/transcription).
+- `READWISE_URL_ONLY_WHEN_ZH_SUBS=true` to clip public YouTube URLs to Readwise when original Chinese subtitles exist (skips subtitle download/transcription). Member-only, private, login-required, and age-restricted videos stay on the local subtitle/transcription path because Readwise Reader cannot use your YouTube cookies.
 - `DOWNLOAD_CONCURRENCY` (0/1 means serial), plus `DOWNLOAD_MAX_RETRIES`, `DOWNLOAD_RETRY_BASE_DELAY`, `DOWNLOAD_RETRY_BACKOFF`, `DOWNLOAD_RETRY_MAX_DELAY` for 403 backoff.
 - `TRANSCRIBE_CONCURRENCY` to cap concurrent transcriptions (0/1 means serial, empty means unlimited).
 - `YTDLP_COOKIE_FILE` to provide a Netscape-format cookie file instead of a Firefox profile.
@@ -293,7 +293,7 @@ Special thanks to:
    ```
 
 ### ⚙️ 可选配置
-- `READWISE_URL_ONLY_WHEN_ZH_SUBS=true`：检测到中文字幕时直接剪藏原始 URL 到 Readwise（跳过字幕下载/转录）。
+- `READWISE_URL_ONLY_WHEN_ZH_SUBS=true`：公开视频检测到原始中文字幕轨时直接剪藏原始 URL 到 Readwise（跳过字幕下载/转录）。会员、私有、需登录或年龄限制视频仍走本地字幕/转录路径，因为 Readwise Reader 不能复用你的 YouTube cookies。
 - `DOWNLOAD_CONCURRENCY`（0/1 视为串行）以及 `DOWNLOAD_MAX_RETRIES`、`DOWNLOAD_RETRY_BASE_DELAY`、`DOWNLOAD_RETRY_BACKOFF`、`DOWNLOAD_RETRY_MAX_DELAY` 用于 403 退避重试。
 - `TRANSCRIBE_CONCURRENCY`：限制转录并发（0/1 串行，留空为不限）。
 - `YTDLP_COOKIE_FILE`：使用 Netscape 格式 cookies 文件替代 Firefox profile。
