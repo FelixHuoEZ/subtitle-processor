@@ -164,6 +164,34 @@ class VideoService:
         return []
 
     @staticmethod
+    def _compact_subtitle_map(raw_value: Any) -> Dict[str, List[Dict[str, Any]]]:
+        """Keep the subtitle fields needed for language decisions and downloads."""
+        if not isinstance(raw_value, dict):
+            return {}
+
+        compact: Dict[str, List[Dict[str, Any]]] = {}
+        for language, subtitle_formats in raw_value.items():
+            if not isinstance(subtitle_formats, list):
+                continue
+
+            compact_formats = []
+            for subtitle_format in subtitle_formats:
+                if not isinstance(subtitle_format, dict):
+                    continue
+                item = {
+                    key: subtitle_format.get(key)
+                    for key in ("ext", "url", "name", "format_id")
+                    if subtitle_format.get(key) is not None
+                }
+                if item:
+                    compact_formats.append(item)
+
+            if compact_formats:
+                compact[str(language)] = compact_formats
+
+        return compact
+
+    @staticmethod
     def _language_available(target: str, candidates: List[str]) -> bool:
         if target in candidates:
             return True
@@ -232,9 +260,17 @@ class VideoService:
             if not isinstance(track_map, dict):
                 continue
 
+            if isinstance(track_map, list):
+                track_map = {str(language): [] for language in track_map}
+
+            if not isinstance(track_map, dict):
+                continue
+
             for provider_language, subtitle_formats in track_map.items():
+                if subtitle_formats is None:
+                    subtitle_formats = []
                 if not isinstance(subtitle_formats, list) or not subtitle_formats:
-                    continue
+                    subtitle_formats = []
 
                 translation_target = self._extract_translation_target(subtitle_formats)
                 normalized_language = self._normalize_language_code(provider_language)
@@ -1230,6 +1266,11 @@ class VideoService:
 
             logger.info(f"����ȷ���ķ�������: {published_date}")
 
+            subtitles = self._compact_subtitle_map(info.get("subtitles"))
+            automatic_captions = self._compact_subtitle_map(
+                info.get("automatic_captions")
+            )
+
             video_info = {
                 "id": info.get("id"),
                 "title": info.get("title"),
@@ -1246,12 +1287,10 @@ class VideoService:
                 "availability": info.get("availability"),
                 "age_limit": info.get("age_limit"),
                 "is_live": info.get("is_live"),
-                "subtitles": list(info.get("subtitles", {}).keys())
-                if info.get("subtitles")
-                else [],
-                "automatic_captions": list(info.get("automatic_captions", {}).keys())
-                if info.get("automatic_captions")
-                else [],
+                "subtitles": subtitles,
+                "automatic_captions": automatic_captions,
+                "subtitle_languages": list(subtitles.keys()),
+                "automatic_caption_languages": list(automatic_captions.keys()),
             }
 
             logger.info(f"��ȡYouTube��Ƶ��Ϣ�ɹ�: {video_info['title']}")

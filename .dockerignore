@@ -1,5 +1,6 @@
 .git
 .docker
+.image-cache/
 __pycache__/
 *.pyc
 *.pyo

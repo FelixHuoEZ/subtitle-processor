@@ -78,6 +78,43 @@ def test_should_clip_url_only_when_enabled():
     assert service._should_clip_url_only(info) is True
 
 
+def test_youtube_info_preserves_caption_maps_for_url_only(monkeypatch):
+    service = VideoService()
+    service.readwise_url_only_when_zh_subs = True
+
+    monkeypatch.setattr("app.services.video_service.time.sleep", lambda *_: None)
+    monkeypatch.setattr(
+        service,
+        "_extract_youtube_info",
+        lambda url: {
+            "id": "ywTGRxIOhI0",
+            "title": "NASA的400億美元計劃：拍清系外行星",
+            "webpage_url": url,
+            "availability": "public",
+            "age_limit": 0,
+            "subtitles": {},
+            "automatic_captions": {
+                "zh-Hans": [
+                    {
+                        "ext": "json3",
+                        "url": "https://www.youtube.com/api/timedtext?lang=zh-Hans&fmt=json3",
+                        "name": "Chinese (Simplified)",
+                    }
+                ]
+            },
+        },
+    )
+
+    info = service.get_youtube_info("https://www.youtube.com/watch?v=ywTGRxIOhI0")
+    track_catalog = service._build_track_catalog(info)
+
+    assert isinstance(info["automatic_captions"], dict)
+    assert info["automatic_caption_languages"] == ["zh-Hans"]
+    assert track_catalog[0]["track_type"] == "asr_original"
+    assert track_catalog[0]["is_chinese_original_candidate"] is True
+    assert service._should_clip_url_only(info, track_catalog=track_catalog) is True
+
+
 def test_extract_subtitle_content_prefers_srt(monkeypatch):
     service = VideoService()
     requested_urls = []
