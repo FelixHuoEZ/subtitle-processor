@@ -37,13 +37,15 @@ COPY requirements.txt .
 
 # 安装Python依赖
 RUN set -eux; \
-    pip install --no-cache-dir -r requirements.txt; \
-    ARCH="$(dpkg --print-architecture)"; \
+    grep -v -E '^(torch|torchaudio)([<=>~!].*)?$' requirements.txt > /tmp/base-requirements.txt; \
+    pip install --no-cache-dir -r /tmp/base-requirements.txt; \
+    ARCH="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     if [ "${ARCH}" = "amd64" ]; then \
         pip install --no-cache-dir torch==2.0.1+cu118 torchaudio==2.0.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118; \
     else \
         pip install --no-cache-dir torchaudio==2.0.2; \
     fi; \
+    rm -f /tmp/base-requirements.txt; \
     pip install --no-cache-dir onnx onnxconverter-common; \
     pip install --no-cache-dir "funasr @ git+https://github.com/alibaba-damo-academy/FunASR.git"
 
