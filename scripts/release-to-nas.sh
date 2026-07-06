@@ -212,9 +212,17 @@ run_local_build_push() {
 
   if has_services; then
     log "Limiting local build to services: ${SERVICES[*]}"
-    env "${env_args[@]}" ONLY_SERVICES="$(services_csv)" "${BUILD_SCRIPT}"
+    if [[ ${#env_args[@]} -gt 0 ]]; then
+      env "${env_args[@]}" ONLY_SERVICES="$(services_csv)" "${BUILD_SCRIPT}"
+    else
+      env ONLY_SERVICES="$(services_csv)" "${BUILD_SCRIPT}"
+    fi
   else
-    env "${env_args[@]}" "${BUILD_SCRIPT}"
+    if [[ ${#env_args[@]} -gt 0 ]]; then
+      env "${env_args[@]}" "${BUILD_SCRIPT}"
+    else
+      env "${BUILD_SCRIPT}"
+    fi
   fi
 }
 
