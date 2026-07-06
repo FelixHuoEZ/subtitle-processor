@@ -37,12 +37,40 @@ set -euo pipefail
 # IMAGE_PREFIX can include registry/namespace (e.g. registry.gitlab.com/org/project).
 # When omitted the images are tagged locally without a registry prefix.
 # Auto-load images.env if present and IMAGE_PREFIX not preset
+EXPLICIT_ENV_OVERRIDE_NAMES=()
+EXPLICIT_ENV_OVERRIDE_VALUES=()
+
+capture_env_override() {
+  local name="$1"
+  if [[ -n "${!name+x}" ]]; then
+    EXPLICIT_ENV_OVERRIDE_NAMES+=("${name}")
+    EXPLICIT_ENV_OVERRIDE_VALUES+=("${!name}")
+  fi
+}
+
+restore_env_overrides() {
+  local i name
+  for ((i = 0; i < ${#EXPLICIT_ENV_OVERRIDE_NAMES[@]}; i++)); do
+    name="${EXPLICIT_ENV_OVERRIDE_NAMES[$i]}"
+    printf -v "${name}" '%s' "${EXPLICIT_ENV_OVERRIDE_VALUES[$i]}"
+    export "${name}"
+  done
+}
+
 if [[ -z "${IMAGE_PREFIX:-}" && -f "${PWD}/images.env" ]]; then
   echo "INFO: Loading environment from images.env"
+  for name in \
+    IMAGE_TAG PUSH PLATFORMS LOAD LOAD_LOCAL_PLATFORM EXTRA_TAGS \
+    ONLY_SERVICES SKIP_SERVICES CACHE_MODE USE_CACHE \
+    BASE_IMAGE_REGISTRY REGISTRY_CA_FILE BUILDER_HTTP_PROXY BUILDER_HTTPS_PROXY BUILDX_IMAGE \
+    DOCKERFILE_SUBTITLE_PROCESSOR DOCKERFILE_TRANSCRIBE_AUDIO DOCKERFILE_TELEGRAM_BOT DOCKERFILE_BGUTIL_PROVIDER; do
+    capture_env_override "${name}"
+  done
   set -a
   # shellcheck disable=SC1091
   source "${PWD}/images.env"
   set +a
+  restore_env_overrides
 fi
 
 if [[ -z "${IMAGE_PREFIX:-}" ]]; then

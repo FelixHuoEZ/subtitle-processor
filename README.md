@@ -148,9 +148,16 @@ All defaults are listed in `.env.example`.
    - `./scripts/release-to-nas.sh --nas-only --service subtitle-processor`
    The wrapper runs local `build-and-push.sh`, then on the NAS executes
    `docker compose pull`, `docker compose up -d --force-recreate`, and `docker compose ps`
-   inside `/share/docker/subtitle`.
+   inside `${NAS_COMPOSE_DIR}`.
    When `--services` is provided, the same service filter now applies to both the local build step and the NAS deploy step.
    It uses direct `ssh nas` when available, otherwise falls back to `~/nas-remote`.
+   For local build+push, the wrapper defaults to a temporary Docker config built from
+   `${NAS_DOCKER_CONFIG}/config.json`, preserving the current local Docker context and
+   buildx state plus local registry CAs. This avoids macOS Keychain or `docker-tools`
+   credential prompts during release builds. Set `USE_NAS_DOCKER_CONFIG_FOR_BUILD=false`
+   to use the current local Docker config instead. On the NAS, the wrapper prepends
+   `${NAS_DOCKER_BIN_DIR}` to `PATH` so Container Station's Docker CLI is available to
+   non-interactive SSH.
 5. If the private base-image mirror is missing and `build-and-push.sh` fails on `${BASE_IMAGE_REGISTRY}/...: not found`, sync the mirror first:
    ```bash
    ./scripts/sync-base-images.sh
@@ -358,11 +365,16 @@ Special thanks to:
    - `./scripts/release-to-nas.sh --services subtitle-processor,telegram-bot`
    - `./scripts/release-to-nas.sh --nas-only --service subtitle-processor`
    这个脚本会先执行本地 `build-and-push.sh`，然后在 NAS 的
-   `/share/docker/subtitle`
-   目录里运行 `docker compose pull`、`docker compose up -d --force-recreate`
+   `${NAS_COMPOSE_DIR}` 目录里运行 `docker compose pull`、`docker compose up -d --force-recreate`
    和 `docker compose ps`。当前 shell 能直连 `ssh nas` 时会同步执行，
    不能直连时自动回退到 `~/nas-remote`。传入 `--services` 时，
    这个服务过滤会同时作用在本地 build 和 NAS deploy 两边。
+   本地 build+push 默认会从 `${NAS_DOCKER_CONFIG}/config.json` 生成临时 Docker config，
+   保留当前本机 Docker context、buildx 状态和本机 registry CA，避免 macOS Keychain 或
+   `docker-tools` 凭据弹窗；如需沿用本机当前 Docker config，可设
+   `USE_NAS_DOCKER_CONFIG_FOR_BUILD=false`。远端执行时会把
+   `${NAS_DOCKER_BIN_DIR}` 加到 `PATH`，避免非交互 SSH 找不到 Container Station 的
+   `docker`。
 5. 如果私有 base-image mirror 缺失，导致 `build-and-push.sh` 报 `${BASE_IMAGE_REGISTRY}/...: not found`，先执行：
    ```bash
    ./scripts/sync-base-images.sh

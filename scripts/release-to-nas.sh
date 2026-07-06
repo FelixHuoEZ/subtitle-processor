@@ -9,13 +9,16 @@ NAS_REMOTE_BRIDGE="${NAS_REMOTE_BRIDGE:-${HOME}/nas-remote}"
 NAS_REMOTE_STATE_DIR="${NAS_REMOTE_STATE_DIR:-${HOME}/.nas-remote}"
 NAS_COMPOSE_DIR="${NAS_COMPOSE_DIR:-/share/docker/subtitle}"
 NAS_DOCKER_CONFIG="${NAS_DOCKER_CONFIG:-/share/docker/.docker}"
+NAS_DOCKER_BIN_DIR="${NAS_DOCKER_BIN_DIR:-/usr/local/bin}"
 NAS_DISCOVERY_TIMEOUT="${NAS_DISCOVERY_TIMEOUT:-30}"
 NAS_WAIT_TIMEOUT="${NAS_WAIT_TIMEOUT:-900}"
+USE_NAS_DOCKER_CONFIG_FOR_BUILD="${USE_NAS_DOCKER_CONFIG_FOR_BUILD:-true}"
 
 SKIP_BUILD_PUSH=false
 SKIP_NAS_DEPLOY=false
 DRY_RUN=false
 SERVICES=()
+LOCAL_RELEASE_DOCKER_CONFIG=""
 
 usage() {
   cat <<'EOF'
@@ -38,6 +41,10 @@ Environment:
   NAS_REMOTE_STATE_DIR   Bridge state dir. Default: ~/.nas-remote
   NAS_COMPOSE_DIR        Remote compose dir for subtitle stack.
   NAS_DOCKER_CONFIG      Remote Docker auth config path.
+  NAS_DOCKER_BIN_DIR     Remote Docker CLI dir to prepend to PATH.
+  USE_NAS_DOCKER_CONFIG_FOR_BUILD
+                          Use a temporary local DOCKER_CONFIG with NAS registry auth.
+                          Default: true. Set false to use the current local config.
   NAS_DISCOVERY_TIMEOUT  Seconds to wait for a new bridge log to appear.
   NAS_WAIT_TIMEOUT       Seconds to wait for NAS command completion.
 
@@ -62,6 +69,19 @@ trim() {
   value="${value#"${value%%[![:space:]]*}"}"
   value="${value%"${value##*[![:space:]]}"}"
   printf '%s' "$value"
+}
+
+is_true() {
+  local value
+  value="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  case "${value}" in
+    1|true|yes|y|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 has_services() {
@@ -101,6 +121,101 @@ services_csv() {
   done
 
   printf '%s' "${joined}"
+}
+
+cleanup_release_docker_config() {
+  if [[ -n "${LOCAL_RELEASE_DOCKER_CONFIG}" && -d "${LOCAL_RELEASE_DOCKER_CONFIG}" ]]; then
+    rm -rf "${LOCAL_RELEASE_DOCKER_CONFIG}"
+  fi
+}
+
+trap cleanup_release_docker_config EXIT
+
+prepare_local_release_docker_config() {
+  local current_context config_dir remote_config_file remote_config_path
+  local remote_config_path_quoted
+
+  if ! is_true "${USE_NAS_DOCKER_CONFIG_FOR_BUILD}"; then
+    log "Using current local Docker config for build."
+    return 0
+  fi
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    error "python3 is required to prepare the temporary Docker config."
+    return 1
+  fi
+
+  current_context="$(docker context show 2>/dev/null || true)"
+  if [[ -z "${current_context}" ]]; then
+    error "Unable to determine current Docker context."
+    return 1
+  fi
+
+  config_dir="$(mktemp -d)"
+  chmod 700 "${config_dir}"
+  remote_config_file="${config_dir}/nas-config.json"
+  remote_config_path="${NAS_DOCKER_CONFIG%/}/config.json"
+  remote_config_path_quoted="$(printf '%q' "${remote_config_path}")"
+
+  if ! ssh -o BatchMode=yes -o ConnectTimeout=5 "${NAS_SSH_HOST}" "cat ${remote_config_path_quoted}" >"${remote_config_file}"; then
+    rm -rf "${config_dir}"
+    error "Unable to read NAS Docker config from ${NAS_SSH_HOST}:${remote_config_path}."
+    error "Set USE_NAS_DOCKER_CONFIG_FOR_BUILD=false to use the current local Docker config instead."
+    return 1
+  fi
+  chmod 600 "${remote_config_file}"
+
+  mkdir -p "${config_dir}/certs.d"
+  if [[ -d "${HOME}/.docker/contexts" ]]; then
+    cp -R "${HOME}/.docker/contexts" "${config_dir}/contexts"
+  fi
+  if [[ -d "${HOME}/.docker/buildx" ]]; then
+    cp -R "${HOME}/.docker/buildx" "${config_dir}/buildx"
+  fi
+  if [[ -d "${HOME}/.docker/certs.d" ]]; then
+    cp -R "${HOME}/.docker/certs.d/." "${config_dir}/certs.d/"
+  fi
+
+  if ! python3 - "${remote_config_file}" "${config_dir}/config.json" "${current_context}" <<'PY'
+import json
+import sys
+
+remote_config_path, output_path, current_context = sys.argv[1:4]
+with open(remote_config_path, encoding="utf-8") as handle:
+    remote_config = json.load(handle)
+
+auths = remote_config.get("auths") or {}
+if not isinstance(auths, dict) or not auths:
+    raise SystemExit("remote Docker config has no auths")
+
+with open(output_path, "w", encoding="utf-8") as handle:
+    json.dump({"auths": auths, "currentContext": current_context}, handle)
+PY
+  then
+    rm -rf "${config_dir}"
+    error "Unable to build temporary Docker config from NAS auths."
+    return 1
+  fi
+
+  chmod 600 "${config_dir}/config.json"
+  rm -f "${remote_config_file}"
+  LOCAL_RELEASE_DOCKER_CONFIG="${config_dir}"
+  log "Using temporary Docker config for local build; auths are copied from ${NAS_SSH_HOST}:${remote_config_path}."
+}
+
+run_local_build_push() {
+  local env_args=()
+
+  if [[ -n "${LOCAL_RELEASE_DOCKER_CONFIG}" ]]; then
+    env_args+=("DOCKER_CONFIG=${LOCAL_RELEASE_DOCKER_CONFIG}")
+  fi
+
+  if has_services; then
+    log "Limiting local build to services: ${SERVICES[*]}"
+    env "${env_args[@]}" ONLY_SERVICES="$(services_csv)" "${BUILD_SCRIPT}"
+  else
+    env "${env_args[@]}" "${BUILD_SCRIPT}"
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -171,15 +286,17 @@ if has_services; then
 fi
 
 build_remote_compose_command() {
-  local compose_dir_quoted docker_config_quoted service_suffix=""
+  local compose_dir_quoted docker_config_quoted docker_bin_dir_quoted service_suffix=""
   compose_dir_quoted="$(printf '%q' "${NAS_COMPOSE_DIR}")"
   docker_config_quoted="$(printf '%q' "${NAS_DOCKER_CONFIG}")"
+  docker_bin_dir_quoted="$(printf '%q' "${NAS_DOCKER_BIN_DIR}")"
 
   if has_services; then
     service_suffix=" $(shell_join "${SERVICES[@]}")"
   fi
 
-  printf 'cd %s && DOCKER_CONFIG=%s docker compose pull%s && DOCKER_CONFIG=%s docker compose up -d --force-recreate%s && DOCKER_CONFIG=%s docker compose ps%s' \
+  printf 'PATH=%s:$PATH; cd %s && DOCKER_CONFIG=%s docker compose pull%s && DOCKER_CONFIG=%s docker compose up -d --force-recreate%s && DOCKER_CONFIG=%s docker compose ps%s' \
+    "${docker_bin_dir_quoted}" \
     "${compose_dir_quoted}" \
     "${docker_config_quoted}" "${service_suffix}" \
     "${docker_config_quoted}" "${service_suffix}" \
@@ -287,6 +404,8 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   echo "Skip NAS deploy: ${SKIP_NAS_DEPLOY}"
   echo "Remote compose dir: ${NAS_COMPOSE_DIR}"
   echo "Remote Docker config: ${NAS_DOCKER_CONFIG}"
+  echo "Remote Docker bin dir: ${NAS_DOCKER_BIN_DIR}"
+  echo "Use NAS Docker config for local build: ${USE_NAS_DOCKER_CONFIG_FOR_BUILD}"
   if has_services; then
     echo "Services: ${SERVICES[*]}"
     echo "Local ONLY_SERVICES: $(services_csv)"
@@ -301,14 +420,10 @@ fi
 
 if [[ "${SKIP_BUILD_PUSH}" == "false" ]]; then
   log "Running local build+push via ${BUILD_SCRIPT}"
+  prepare_local_release_docker_config
   (
     cd "${ROOT_DIR}"
-    if has_services; then
-      log "Limiting local build to services: ${SERVICES[*]}"
-      ONLY_SERVICES="$(services_csv)" "${BUILD_SCRIPT}"
-    else
-      "${BUILD_SCRIPT}"
-    fi
+    run_local_build_push
   )
 fi
 
