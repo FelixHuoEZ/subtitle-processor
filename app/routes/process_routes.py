@@ -14,6 +14,7 @@ from ..services.subtitle_service import SubtitleService
 from ..services.translation_service import TranslationService
 from ..services.readwise_service import ReadwiseService
 from ..config.config_manager import get_config_value
+from ..services.runtime import service_proxy
 from ..utils.file_utils import build_task_filename
 
 logger = logging.getLogger(__name__)
@@ -22,12 +23,25 @@ logger = logging.getLogger(__name__)
 process_bp = Blueprint('process', __name__, url_prefix='/process')
 
 # 初始化服务
-file_service = FileService()
-video_service = VideoService()
-transcription_service = TranscriptionService()
-subtitle_service = SubtitleService()
-translation_service = TranslationService()
-readwise_service = ReadwiseService()
+file_service = service_proxy(FileService)
+video_service = service_proxy(VideoService)
+transcription_service = service_proxy(TranscriptionService)
+subtitle_service = service_proxy(SubtitleService)
+translation_service = service_proxy(TranslationService)
+readwise_service = service_proxy(ReadwiseService)
+
+
+def configure_services(services):
+    """Bind this module to the application service set."""
+    global file_service, video_service, transcription_service
+    global subtitle_service, translation_service, readwise_service
+
+    file_service = services.file_service
+    video_service = services.video_service
+    transcription_service = services.transcription_service
+    subtitle_service = services.subtitle_service
+    translation_service = services.translation_service
+    readwise_service = services.readwise_service
 
 
 def _normalize_language_confirmation_choice(language):

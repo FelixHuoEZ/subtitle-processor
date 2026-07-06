@@ -6,6 +6,7 @@ import logging
 from flask import Blueprint, render_template, jsonify, request, abort, send_file, flash, redirect, url_for
 from ..services.file_service import FileService
 from ..services.subtitle_service import SubtitleService
+from ..services.runtime import service_proxy
 from ..config.config_manager import get_config_value
 
 logger = logging.getLogger(__name__)
@@ -14,8 +15,16 @@ logger = logging.getLogger(__name__)
 view_bp = Blueprint('view', __name__, url_prefix='/view')
 
 # 初始化服务
-file_service = FileService()
-subtitle_service = SubtitleService()
+file_service = service_proxy(FileService)
+subtitle_service = service_proxy(SubtitleService)
+
+
+def configure_services(services):
+    """Bind this module to the application service set."""
+    global file_service, subtitle_service
+
+    file_service = services.file_service
+    subtitle_service = services.subtitle_service
 
 
 @view_bp.route('/')

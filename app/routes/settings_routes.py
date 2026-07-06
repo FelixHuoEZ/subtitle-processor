@@ -8,7 +8,10 @@ from ..services.hotword_settings import HotwordSettingsManager
 logger = logging.getLogger(__name__)
 
 settings_bp = Blueprint("settings", __name__, url_prefix="/process/settings")
-settings_manager = HotwordSettingsManager.get_instance()
+
+
+def _settings_manager():
+    return HotwordSettingsManager.get_instance()
 
 
 def _apply_cors_headers(response):
@@ -25,7 +28,7 @@ def manage_hotword_settings():
         return _apply_cors_headers(jsonify({"status": "ok"}))
 
     if request.method == "GET":
-        state = settings_manager.get_state()
+        state = _settings_manager().get_state()
         return _apply_cors_headers(jsonify({"success": True, "settings": state}))
 
     payload = request.get_json(silent=True) or {}
@@ -53,7 +56,6 @@ def manage_hotword_settings():
             jsonify({"success": False, "error": "No supported fields provided"})
         ), 400
 
-    new_state = settings_manager.update_state(**updates)
+    new_state = _settings_manager().update_state(**updates)
     logger.info("Hotword settings updated: %s", new_state)
     return _apply_cors_headers(jsonify({"success": True, "settings": new_state}))
-

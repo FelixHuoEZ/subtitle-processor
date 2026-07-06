@@ -10,7 +10,7 @@ import traceback
 import uuid
 from datetime import datetime
 
-from flask import Blueprint, flash, jsonify, redirect, render_template, request, url_for
+from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, url_for
 from werkzeug.utils import secure_filename
 
 from ..config.config_manager import get_config_value
@@ -20,6 +20,7 @@ from ..services.subtitle_service import SubtitleService
 from ..services.transcription_service import TranscriptionService
 from ..services.translation_service import TranslationService
 from ..services.video_service import VideoService
+from ..services.runtime import service_proxy
 from ..utils.file_utils import build_task_filename
 
 logger = logging.getLogger(__name__)
@@ -28,12 +29,12 @@ logger = logging.getLogger(__name__)
 upload_bp = Blueprint("upload", __name__, url_prefix="/upload")
 
 # 初始化服务
-file_service = FileService()
-video_service = VideoService()
-transcription_service = TranscriptionService()
-subtitle_service = SubtitleService()
-translation_service = TranslationService()
-readwise_service = ReadwiseService()
+file_service = service_proxy(FileService)
+video_service = service_proxy(VideoService)
+transcription_service = service_proxy(TranscriptionService)
+subtitle_service = service_proxy(SubtitleService)
+translation_service = service_proxy(TranslationService)
+readwise_service = service_proxy(ReadwiseService)
 
 LANGUAGE_CONFIRMATION_TIMEOUT_SECONDS = 180
 LANGUAGE_CONFIRMATION_POLL_INTERVAL_SECONDS = 1.0
@@ -43,6 +44,26 @@ SRT_TIMING_LINE_RE = re.compile(
     r"^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}$",
     re.MULTILINE,
 )
+
+
+def configure_services(services):
+    """Bind this module to the application service set."""
+    global file_service, video_service, transcription_service
+    global subtitle_service, translation_service, readwise_service
+
+    file_service = services.file_service
+    video_service = services.video_service
+    transcription_service = services.transcription_service
+    subtitle_service = services.subtitle_service
+    translation_service = services.translation_service
+    readwise_service = services.readwise_service
+
+
+def _run_video_task_with_app_context(app, task_info, auto_transcribe):
+    with app.app_context():
+        _process_video_task(task_info, auto_transcribe)
+
+
 def _to_bool(value, default=False):
     """Parse common JSON/form boolean values."""
     if value is None:
@@ -218,9 +239,10 @@ def upload_url():
         print(f"DEBUG: user_tags = {tags}")
 
         if auto_start:
+            app = current_app._get_current_object()
             thread = threading.Thread(
-                target=_process_video_task,
-                args=(dict(task_info), auto_transcribe),
+                target=_run_video_task_with_app_context,
+                args=(app, dict(task_info), auto_transcribe),
                 daemon=True,
                 name=f"video-task-{process_id}",
             )

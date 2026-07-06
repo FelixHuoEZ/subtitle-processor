@@ -5,13 +5,9 @@ import logging
 from flask import Flask, render_template, jsonify, request, redirect
 from .config.config_manager import ConfigManager, get_config_value, set_config_manager
 from .services.logging_service import LoggingService
-from .services.file_service import FileService
-from .services.video_service import VideoService
-from .services.transcription_service import TranscriptionService
-from .services.subtitle_service import SubtitleService
-from .services.translation_service import TranslationService
-from .services.readwise_service import ReadwiseService
+from .services.runtime import attach_services, create_services
 from .routes import upload_bp, view_bp, process_bp, settings_bp
+from .routes import upload_routes, view_routes, process_routes
 
 logger = logging.getLogger(__name__)
 
@@ -109,13 +105,11 @@ def _configure_app(app, config_manager):
 def _initialize_services(app):
     """初始化所有服务"""
     try:
-        # 初始化服务实例
-        app.file_service = FileService()
-        app.video_service = VideoService()
-        app.transcription_service = TranscriptionService()
-        app.subtitle_service = SubtitleService()
-        app.translation_service = TranslationService()
-        app.readwise_service = ReadwiseService()
+        services = create_services()
+        attach_services(app, services)
+        upload_routes.configure_services(services)
+        view_routes.configure_services(services)
+        process_routes.configure_services(services)
         
         logger.info("所有服务初始化完成")
         
