@@ -1,6 +1,7 @@
 """Logging service for the subtitle processing application."""
 
 import logging
+import os
 import sys
 
 
@@ -49,9 +50,12 @@ class LoggingService:
     
     def _setup_logger(self):
         """设置logger"""
+        log_level_name = os.getenv("LOG_LEVEL", "INFO").strip().upper()
+        log_level = getattr(logging, log_level_name, logging.INFO)
+
         # 创建logger
         self.logger = logging.getLogger(self.logger_name)
-        self.logger.setLevel(logging.DEBUG)  # 设置为DEBUG级别以捕获所有日志
+        self.logger.setLevel(log_level)
         self.logger.propagate = True  # 确保日志可以传播
         
         # 先移除所有已存在的处理器
@@ -60,7 +64,7 @@ class LoggingService:
         
         # 创建控制台处理器
         console_handler = logging.StreamHandler(sys.stdout)  # 明确指定输出到 stdout
-        console_handler.setLevel(logging.DEBUG)  # 控制台显示所有级别
+        console_handler.setLevel(log_level)
         console_handler.setFormatter(ColoredFormatter())
         
         # 创建文件处理器

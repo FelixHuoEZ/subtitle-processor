@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 from typing import List, Dict, Any, Optional
 from ..utils.time_utils import format_time, parse_time, generate_srt_timestamps
 from ..utils.file_utils import split_into_sentences
+from ..utils.logging_utils import summarize_payload, summarize_text
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ class SubtitleService:
             logger.info(f"输入结果类型: {type(result)}")
             logger.info(f"输入结果是否为None: {result is None}")
             if result is not None:
-                logger.info(f"输入结果内容: {json.dumps(result, ensure_ascii=False, indent=2) if isinstance(result, dict) else str(result)}")
+                logger.info("输入结果摘要: %s", summarize_payload(result))
             
             text_content = None
             timestamps = None
@@ -61,18 +62,18 @@ class SubtitleService:
                 # 获取文本内容
                 if 'text' in result:
                     logger.info(f"找到text字段，类型: {type(result['text'])}")
-                    logger.info(f"text字段原始值: {repr(result['text'])}")
+                    logger.info("text字段摘要: %s", summarize_text(result['text']))
                     if isinstance(result['text'], str):
                         text_content = result['text']
                         logger.info(f"成功提取文本内容，长度: {len(text_content)}")
-                        logger.info(f"文本内容前200字符: {text_content[:200]}")
+                        logger.info("文本内容摘要: %s", summarize_text(text_content))
                     else:
                         logger.error(f"text字段不是字符串类型: {type(result['text'])}")
                         logger.error(f"text字段值: {result['text']}")
                         return None
                 else:
                     logger.error(f"结果中没有text字段，可用字段: {list(result.keys())}")
-                    logger.error(f"完整结果内容: {result}")
+                    logger.error("结果内容摘要: %s", summarize_payload(result))
                     return None
                 
                 # 获取时间戳
@@ -225,7 +226,7 @@ class SubtitleService:
         
         # 记录原始内容
         logger.info(f"开始解析字幕内容，长度：{len(srt_content)}")
-        logger.debug(f"字幕内容前100个字符: {srt_content[:100]}")
+        logger.debug("字幕内容摘要: %s", summarize_text(srt_content, 100))
         
         # 检查是否是转录结果（没有时间戳）
         if not re.search(r'\\d+:\\d+:\\d+', srt_content):

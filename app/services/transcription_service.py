@@ -18,6 +18,7 @@ from ..utils.language_detection import (
     detect_text_primary_language,
     normalize_primary_language,
 )
+from ..utils.logging_utils import summarize_payload
 from .hotword_post_processor import HotwordPostProcessor
 from .hotword_service import HotwordService
 from .hotword_settings import HotwordSettingsManager
@@ -420,7 +421,7 @@ class TranscriptionService:
                 result = response.json()
                 logger.info(f"FunASR响应状态: 200")
                 logger.info(f"FunASR响应类型: {type(result)}")
-                logger.info(f"FunASR响应内容: {str(result)}")
+                logger.info("FunASR响应摘要: %s", summarize_payload(result))
 
                 # 解析结果
                 return self._parse_funasr_result(result, audio_file)

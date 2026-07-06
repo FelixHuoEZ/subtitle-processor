@@ -709,10 +709,26 @@ def _convert_timestamp_value(value):
     return None
 
 
+def _summarize_recognition_result(result, limit=200):
+    if isinstance(result, list):
+        text_parts = []
+        for item in result[:3]:
+            if isinstance(item, dict):
+                text_parts.append(str(item.get("text") or item.get("result") or "")[:limit])
+            else:
+                text_parts.append(str(item)[:limit])
+        return f"type=list items={len(result)} preview={text_parts}"
+    if isinstance(result, dict):
+        text = str(result.get("text") or result.get("result") or "")
+        return f"type=dict keys={list(result.keys())} text_len={len(text)} preview={text[:limit]!r}"
+    text = "" if result is None else str(result)
+    return f"type={type(result).__name__} len={len(text)} preview={text[:limit]!r}"
+
+
 def process_recognition_result(result):
     """处理识别结果，返回统一结构"""
     try:
-        logger.debug(f"处理识别结果: {type(result)} - {result}")
+        logger.debug("处理识别结果摘要: %s", _summarize_recognition_result(result))
 
         combined_text_parts = []
         sentence_info = []
@@ -796,7 +812,10 @@ def process_recognition_result(result):
         elif result is None:
             combined_text_parts.append("")
         else:
-            logger.warning(f"未知的识别结果格式: {type(result)} - {result}")
+            logger.warning(
+                "未知的识别结果格式: %s",
+                _summarize_recognition_result(result),
+            )
             if result:
                 combined_text_parts.append(str(result))
 

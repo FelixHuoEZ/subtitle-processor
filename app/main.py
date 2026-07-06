@@ -12,6 +12,13 @@ from .routes import upload_routes, view_routes, process_routes
 logger = logging.getLogger(__name__)
 
 
+def _resolve_log_level(default=logging.INFO):
+    raw_level = os.getenv("LOG_LEVEL", "").strip().upper()
+    if not raw_level:
+        return default
+    return getattr(logging, raw_level, default)
+
+
 def create_app(config_path=None):
     """创建Flask应用实例
     
@@ -30,13 +37,14 @@ def create_app(config_path=None):
     # 初始化日志服务
     logging_service = LoggingService()
     
-    # 设置根日志级别为DEBUG，确保所有模块的日志都能输出
+    # 设置根日志级别，确保所有模块使用一致的输出策略
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
+    log_level = _resolve_log_level()
+    root_logger.setLevel(log_level)
     
     # 创建控制台处理器确保所有日志都输出到控制台
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.DEBUG)
+    console_handler.setLevel(log_level)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)

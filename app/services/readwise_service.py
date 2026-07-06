@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from ..config.config_manager import get_config_value
+from ..utils.logging_utils import content_logging_enabled, summarize_text
 from ..utils.video_utils import extract_youtube_video_id
 from .subtitle_service import SubtitleService
 
@@ -66,28 +67,19 @@ class ReadwiseService:
                 "html": html_content,
             }
 
-            # 详细调试：记录即将发送的完整内容
-            logger.info("=" * 80)
-            logger.info("🔍 即将发送到Readwise Reader的完整内容：")
-            logger.info("=" * 80)
-            logger.info(f"HTML内容长度: {len(html_content)} 字符")
-            logger.info(f"纯文本内容长度: {len(content)} 字符")
-            logger.info("")
-            logger.info("📝 完整的纯文本内容:")
-            logger.info("-" * 40)
-            logger.info(content)
-            logger.info("-" * 40)
-            logger.info("")
-            logger.info("🌐 完整的HTML内容:")
-            logger.info("-" * 40)
-            logger.info(html_content)
-            logger.info("-" * 40)
-            logger.info("=" * 80)
+            logger.info(
+                "Readwise payload prepared: html_len=%s text_len=%s",
+                len(html_content),
+                len(content),
+            )
+            if content_logging_enabled():
+                logger.debug("Readwise plain content: %s", content)
+                logger.debug("Readwise HTML content: %s", html_content)
 
             # 最后检查：确保内容不包含时间戳
             if "-->" in content:
                 logger.error("🚨 纯文本内容仍包含时间戳！")
-                logger.error(f"包含时间戳的内容: {content}")
+                logger.error("包含时间戳的内容摘要: %s", summarize_text(content))
             else:
                 logger.info("✅ 纯文本内容不含时间戳")
 
@@ -210,9 +202,8 @@ class ReadwiseService:
             logger.info("=== 开始创建Readwise文章 ===")
             logger.info(f"Readwise服务启用状态: {self.enabled}")
             logger.info(f"视频信息存在: {bool(video_info)}")
-            logger.info(f"字幕内容存在: {bool(subtitle_content)}")
-            logger.info(f"字幕内容长度: {len(subtitle_content)} 字符")
-            logger.info(f"字幕内容前200字符: {subtitle_content[:200]}...")
+            logger.info("字幕内容存在: %s", bool(subtitle_content))
+            logger.info("字幕内容摘要: %s", summarize_text(subtitle_content))
 
             # 构造URL - 支持自定义域名替换
             original_url = (
@@ -292,8 +283,7 @@ class ReadwiseService:
             # 构造文章内容
             logger.info("开始格式化文章内容")
             content = self._format_subtitle_content(video_info, subtitle_content)
-            logger.info(f"格式化完成，内容长度: {len(content)} 字符")
-            logger.info(f"格式化后内容前200字符: {content[:200]}...")
+            logger.info("格式化完成: %s", summarize_text(content))
 
             # 检查格式化后的内容是否还包含时间戳
             if "-->" in content:
@@ -363,27 +353,28 @@ class ReadwiseService:
                 content_parts.extend([description, ""])
 
             # 添加字幕内容
-            logger.info("=" * 60)
-            logger.info("🧹 开始字幕清理过程")
-            logger.info("=" * 60)
-            logger.info(f"清理前字幕内容长度: {len(subtitle_content)} 字符")
-            logger.info("清理前字幕内容前300字符:")
-            logger.info(f"'{subtitle_content[:300]}...'")
-            logger.info("-" * 60)
+            logger.info(
+                "开始字幕清理过程: before=%s",
+                summarize_text(subtitle_content, limit=300),
+            )
 
             cleaned_subtitle = self._clean_subtitle_for_readwise(subtitle_content)
 
-            logger.info("-" * 60)
-            logger.info(f"清理后字幕内容长度: {len(cleaned_subtitle)} 字符")
-            logger.info("清理后字幕内容:")
-            logger.info(f"'{cleaned_subtitle}'")
-            logger.info("=" * 60)
+            logger.info(
+                "字幕清理完成: after=%s",
+                summarize_text(cleaned_subtitle, limit=300),
+            )
+            if content_logging_enabled():
+                logger.debug("清理前字幕完整内容: %s", subtitle_content)
+                logger.debug("清理后字幕完整内容: %s", cleaned_subtitle)
 
             # 检查清理结果
             if "-->" in cleaned_subtitle:
                 logger.error("🚨 字幕清理函数返回的内容仍包含时间戳！")
-                logger.error("包含时间戳的内容:")
-                logger.error(f"'{cleaned_subtitle}'")
+                logger.error(
+                    "包含时间戳的内容摘要: %s",
+                    summarize_text(cleaned_subtitle),
+                )
             else:
                 logger.info("✅ 字幕清理函数返回的内容不含时间戳")
 
@@ -447,8 +438,7 @@ class ReadwiseService:
                     subtitle_content = converted_content
 
             logger.info("开始清理字幕内容用于Readwise")
-            logger.info(f"原始内容长度: {len(subtitle_content)} 字符")
-            logger.info(f"原始内容前200字符: {subtitle_content[:200]}...")
+            logger.info("原始内容摘要: %s", summarize_text(subtitle_content))
 
             if not subtitle_content or not subtitle_content.strip():
                 logger.warning("字幕内容为空")
@@ -470,10 +460,10 @@ class ReadwiseService:
                 )
                 lines = content_normalized.split("\n")
 
-                logger.info(f"原始内容字符: {repr(subtitle_content[:100])}")
-                logger.info(f"转义处理后的内容: {repr(content_normalized[:100])}")
-                logger.info(f"标准化后总行数: {len(lines)}")
-                logger.info(f"前5行内容: {lines[:5]}")
+                logger.info("原始内容摘要: %s", summarize_text(subtitle_content, 100))
+                logger.info("转义处理后摘要: %s", summarize_text(content_normalized, 100))
+                logger.info("标准化后总行数: %s", len(lines))
+                logger.info("前5行数量: %s", len(lines[:5]))
 
                 i = 0
                 while i < len(lines):
@@ -500,7 +490,10 @@ class ReadwiseService:
                                 text_content = lines[i].strip()
                                 if text_content:
                                     text_lines.append(text_content)
-                                    logger.info(f"收集文本: {text_content[:30]}...")
+                                    logger.debug(
+                                        "收集文本片段: %s",
+                                        summarize_text(text_content, 30),
+                                    )
                                 i += 1
 
                             # 合并这个字幕块的文本
@@ -539,7 +532,7 @@ class ReadwiseService:
                     f"SRT解析完成，提取文本段数: {len(text_parts)} -> 处理后: {len(processed_parts)}"
                 )
                 logger.info(f"提取的原始文本长度: {len(raw_text)}")
-                logger.info(f"提取的原始文本前200字符: {raw_text[:200]}...")
+                logger.info("提取的原始文本摘要: %s", summarize_text(raw_text))
             else:
                 # 不包含时间戳，直接使用原始内容
                 raw_text = subtitle_content
@@ -629,13 +622,13 @@ class ReadwiseService:
             final_result = final_result.strip()
 
             # 记录处理结果
-            logger.info(f"字幕清理完成")
+            logger.info("字幕清理完成")
             logger.info(
                 f"原始长度: {len(subtitle_content)} -> 清理后长度: {len(final_result)}"
             )
             if paragraphs:
                 logger.info(f"段落数量: {len(paragraphs)}")
-            logger.info(f"清理后内容前200字符: {final_result[:200]}...")
+            logger.info("清理后内容摘要: %s", summarize_text(final_result))
 
             # 最后检查：确保结果中不包含时间戳
             if "-->" in final_result:

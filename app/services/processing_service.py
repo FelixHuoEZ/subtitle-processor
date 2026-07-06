@@ -7,6 +7,7 @@ import time
 import traceback
 from datetime import datetime
 
+from ..utils.logging_utils import summarize_text
 from ..utils.file_utils import build_task_filename
 
 logger = logging.getLogger(__name__)
@@ -327,13 +328,11 @@ class ProcessingService:
                     if transcription_result["text"]
                     else 0
                 )
-                text_preview = (
-                    transcription_result["text"][:100] + "..."
-                    if text_length > 100
-                    else transcription_result["text"]
-                )
                 logger.info("转录文本长度: %s", text_length)
-                logger.info("转录文本预览: '%s'", text_preview)
+                logger.info(
+                    "转录文本摘要: %s",
+                    summarize_text(transcription_result["text"], 100),
+                )
 
             logger.info("第2.2步：开始转换为SRT格式")
             srt_content = self.subtitle_service.parse_srt(transcription_result, [])

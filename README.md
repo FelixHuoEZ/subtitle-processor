@@ -102,6 +102,7 @@ A comprehensive subtitle processing service that automatically downloads, transc
 - `DOWNLOAD_CONCURRENCY` (0/1 means serial), plus `DOWNLOAD_MAX_RETRIES`, `DOWNLOAD_RETRY_BASE_DELAY`, `DOWNLOAD_RETRY_BACKOFF`, `DOWNLOAD_RETRY_MAX_DELAY` for 403 backoff.
 - `TRANSCRIBE_CONCURRENCY` to cap concurrent transcriptions (0/1 means serial, empty means unlimited).
 - `YTDLP_COOKIE_FILE` to provide a Netscape-format cookie file instead of a Firefox profile.
+- `LOG_LEVEL` controls application log verbosity (default `INFO`), and `DEBUG_CONTENT_LOGGING=true` enables full transcript/subtitle payload logging for local debugging.
 All defaults are listed in `.env.example`.
 
 ### 🧩 Distribute Docker Images to Multiple Hosts
