@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from .file_service import FileService
+from .processing_service import ProcessingService
 from .readwise_service import ReadwiseService
 from .subtitle_service import SubtitleService
 from .transcription_service import TranscriptionService
@@ -41,17 +42,33 @@ class AppServices:
     subtitle_service: SubtitleService
     translation_service: TranslationService
     readwise_service: ReadwiseService
+    processing_service: ProcessingService
 
 
 def create_services() -> AppServices:
     """Create the application service set."""
+    file_service = FileService()
+    video_service = VideoService()
+    transcription_service = TranscriptionService()
+    subtitle_service = SubtitleService()
+    translation_service = TranslationService()
+    readwise_service = ReadwiseService()
+    processing_service = ProcessingService(
+        file_service=file_service,
+        video_service=video_service,
+        transcription_service=transcription_service,
+        subtitle_service=subtitle_service,
+        readwise_service=readwise_service,
+    )
+
     return AppServices(
-        file_service=FileService(),
-        video_service=VideoService(),
-        transcription_service=TranscriptionService(),
-        subtitle_service=SubtitleService(),
-        translation_service=TranslationService(),
-        readwise_service=ReadwiseService(),
+        file_service=file_service,
+        video_service=video_service,
+        transcription_service=transcription_service,
+        subtitle_service=subtitle_service,
+        translation_service=translation_service,
+        readwise_service=readwise_service,
+        processing_service=processing_service,
     )
 
 
@@ -64,3 +81,4 @@ def attach_services(app, services: AppServices) -> None:
     app.subtitle_service = services.subtitle_service
     app.translation_service = services.translation_service
     app.readwise_service = services.readwise_service
+    app.processing_service = services.processing_service

@@ -30,3 +30,4 @@ def test_create_app_binds_route_modules_to_app_services(tmp_path, monkeypatch):
     assert view_routes.file_service is app.file_service
     assert upload_routes.video_service is app.video_service
     assert process_routes.video_service is app.video_service
+    assert upload_routes.processing_service is app.processing_service
