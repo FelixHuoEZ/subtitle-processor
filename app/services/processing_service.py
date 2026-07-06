@@ -342,10 +342,16 @@ class ProcessingService:
         task_info.update(
             {
                 "status": "processing",
-                "progress": 5,
-                "readwise_parse_status": "retrying_local",
+                "progress": 3,
+                "readwise_parse_status": (
+                    "deleting_url_only" if original_article_id else "retrying_local"
+                ),
                 "readwise_parse_reason": "force_local_requested",
-                "readwise_parse_message": "正在本地获取字幕/转录并重发 Readwise。",
+                "readwise_parse_message": (
+                    "正在删除原 URL-only Reader 文档。"
+                    if original_article_id
+                    else "正在本地获取字幕/转录并重发 Readwise。"
+                ),
                 "force_local_readwise_available": False,
                 "force_local_readwise_requested_at": datetime.now().isoformat(),
                 "updated_time": datetime.now().isoformat(),
@@ -356,6 +362,38 @@ class ProcessingService:
         self.file_service.update_file_info(process_id, task_info)
 
         try:
+            if original_article_id:
+                if not self.readwise_service.delete_article(original_article_id):
+                    task_info["readwise_url_only_delete_status"] = "failed"
+                    self._fail_force_local_readwise(
+                        task_info,
+                        "readwise_url_only_delete_failed",
+                        "删除原 URL-only Reader 文档失败，未开始本地全文重发。",
+                    )
+                    return {
+                        "success": False,
+                        "status": task_info.get("status"),
+                        "error": task_info.get("error"),
+                    }
+
+                task_info["readwise_url_only_delete_status"] = "deleted"
+                task_info["readwise_url_only_deleted_at"] = datetime.now().isoformat()
+                task_info["readwise_deleted_article_id"] = original_article_id
+                task_info["readwise_article_id"] = None
+                task_info["readwise_url"] = None
+            else:
+                task_info["readwise_url_only_delete_status"] = "skipped"
+
+            task_info.update(
+                {
+                    "progress": 5,
+                    "readwise_parse_status": "retrying_local",
+                    "readwise_parse_message": "正在本地获取字幕/转录并重发 Readwise。",
+                    "updated_time": datetime.now().isoformat(),
+                }
+            )
+            self.file_service.update_file_info(process_id, task_info)
+
             result = self.video_service.process_video_for_transcription(
                 url=url,
                 platform=platform,

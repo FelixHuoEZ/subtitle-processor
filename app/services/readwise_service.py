@@ -876,7 +876,7 @@ class ReadwiseService:
                 logger.error(f"不支持的HTTP方法: {method}")
                 return None
 
-            if response.status_code in [200, 201, 202]:
+            if response.status_code in [200, 201, 202, 204]:
                 return response.json() if response.content else {}
             else:
                 logger.error(
@@ -927,7 +927,7 @@ class ReadwiseService:
             if not self.enabled:
                 return False
 
-            result = self._make_request("DELETE", f"/documents/{article_id}/")
+            result = self._make_request("DELETE", f"/delete/{article_id}/")
             return result is not None
 
         except Exception as e:

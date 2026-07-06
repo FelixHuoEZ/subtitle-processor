@@ -359,6 +359,7 @@ def test_status_endpoint_returns_readwise_parse_fields(monkeypatch):
         "readwise_parse_reason": "youtube_subtitles_unavailable",
         "readwise_parse_message": "Readwise Reader 未能从 YouTube 抓到字幕。",
         "force_local_readwise_available": True,
+        "readwise_url_only_delete_status": "failed",
     }
 
     monkeypatch.setattr(
@@ -376,6 +377,7 @@ def test_status_endpoint_returns_readwise_parse_fields(monkeypatch):
     assert payload["readwise_parse_reason"] == "youtube_subtitles_unavailable"
     assert payload["force_local_readwise_available"] is True
     assert payload["readwise_url_only_article_id"] == "url-only-id"
+    assert payload["readwise_url_only_delete_status"] == "failed"
 
 
 def test_force_local_readwise_endpoint_starts_background_retry(monkeypatch):

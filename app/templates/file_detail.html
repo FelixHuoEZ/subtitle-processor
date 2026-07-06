@@ -35,6 +35,10 @@
         {% if file_info.get('readwise_url_only_url') %}
         <strong>URL-only链接：</strong><a href="{{ file_info.get('readwise_url_only_url') }}" target="_blank" rel="noopener noreferrer">{{ file_info.get('readwise_url_only_url') }}</a><br>
         {% endif %}
+        {% if file_info.get('readwise_url_only_delete_status') %}
+        <strong>URL-only删除：</strong>{{ file_info.get('readwise_url_only_delete_status') }}
+        {% if file_info.get('readwise_url_only_deleted_at') %}（{{ file_info.get('readwise_url_only_deleted_at') }}）{% endif %}<br>
+        {% endif %}
         {% if file_info.get('readwise_fallback_url') %}
         <strong>全文重发链接：</strong><a href="{{ file_info.get('readwise_fallback_url') }}" target="_blank" rel="noopener noreferrer">{{ file_info.get('readwise_fallback_url') }}</a><br>
         {% endif %}

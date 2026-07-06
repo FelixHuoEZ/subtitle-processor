@@ -111,3 +111,20 @@ def test_reader_parse_check_treats_missing_document_as_pending(monkeypatch):
 
     assert result["status"] == "pending"
     assert result["reason"] == "document_not_ready"
+
+
+def test_delete_article_uses_reader_delete_endpoint(monkeypatch):
+    service = ReadwiseService()
+    service.enabled = True
+    captured = {}
+
+    def fake_make_request(method, endpoint, data=None, params=None):
+        captured["method"] = method
+        captured["endpoint"] = endpoint
+        return {}
+
+    monkeypatch.setattr(service, "_make_request", fake_make_request)
+
+    assert service.delete_article("reader-id") is True
+    assert captured["method"] == "DELETE"
+    assert captured["endpoint"] == "/delete/reader-id/"

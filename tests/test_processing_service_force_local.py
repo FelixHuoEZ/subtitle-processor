@@ -21,11 +21,13 @@ class FakeFileService:
 
 
 class FakeVideoService:
-    def __init__(self):
+    def __init__(self, events=None):
         self.calls = []
         self.cleaned = []
+        self.events = events if events is not None else []
 
     def process_video_for_transcription(self, url, platform, force_local_processing=False):
+        self.events.append("video")
         self.calls.append(
             {
                 "url": url,
@@ -64,18 +66,28 @@ class FakeVideoService:
 
 
 class FakeReadwiseService:
-    def __init__(self):
+    def __init__(self, events=None, delete_result=True):
         self.payloads = []
+        self.deleted = []
+        self.events = events if events is not None else []
+        self.delete_result = delete_result
+
+    def delete_article(self, article_id):
+        self.events.append("delete")
+        self.deleted.append(article_id)
+        return self.delete_result
 
     def create_article_from_subtitle(self, payload):
+        self.events.append("create")
         self.payloads.append(dict(payload))
         return {"id": "full-text-id", "url": "https://read.readwise.io/read/full-text-id"}
 
 
 def test_force_local_retry_preserves_url_only_item_and_sends_full_text(tmp_path):
     file_service = FakeFileService(tmp_path)
-    video_service = FakeVideoService()
-    readwise_service = FakeReadwiseService()
+    events = []
+    video_service = FakeVideoService(events)
+    readwise_service = FakeReadwiseService(events)
     service = ProcessingService(
         file_service=file_service,
         video_service=video_service,
@@ -99,6 +111,8 @@ def test_force_local_retry_preserves_url_only_item_and_sends_full_text(tmp_path)
     stored = file_service.files["task-1"]
 
     assert result["success"] is True
+    assert events == ["delete", "video", "create"]
+    assert readwise_service.deleted == ["url-only-id"]
     assert video_service.calls[0]["force_local_processing"] is True
     assert video_service.cleaned == ["/tmp/subtitle-force-local-test"]
     assert readwise_service.payloads[0]["readwise_mode"] == "full_text"
@@ -107,6 +121,43 @@ def test_force_local_retry_preserves_url_only_item_and_sends_full_text(tmp_path)
     assert stored["status"] == "completed"
     assert stored["readwise_url_only_article_id"] == "url-only-id"
     assert stored["readwise_url_only_url"] == "https://read.readwise.io/read/url-only-id"
+    assert stored["readwise_url_only_delete_status"] == "deleted"
+    assert stored["readwise_deleted_article_id"] == "url-only-id"
     assert stored["readwise_fallback_from_article_id"] == "url-only-id"
     assert stored["readwise_fallback_article_id"] == "full-text-id"
     assert stored["readwise_parse_status"] == "recovered"
+
+
+def test_force_local_retry_stops_when_url_only_delete_fails(tmp_path):
+    file_service = FakeFileService(tmp_path)
+    events = []
+    video_service = FakeVideoService(events)
+    readwise_service = FakeReadwiseService(events, delete_result=False)
+    service = ProcessingService(
+        file_service=file_service,
+        video_service=video_service,
+        transcription_service=None,
+        subtitle_service=SubtitleService(),
+        readwise_service=readwise_service,
+    )
+    file_service.files["task-1"] = {
+        "id": "task-1",
+        "url": "https://www.youtube.com/watch?v=demo",
+        "platform": "youtube",
+        "status": "readwise_parse_failed",
+        "readwise_article_id": "url-only-id",
+        "readwise_url": "https://read.readwise.io/read/url-only-id",
+        "readwise_url_only": True,
+        "skip_processing_for_url_only": True,
+    }
+
+    result = service.retry_readwise_with_local_content("task-1")
+    stored = file_service.files["task-1"]
+
+    assert result["success"] is False
+    assert events == ["delete"]
+    assert video_service.calls == []
+    assert readwise_service.payloads == []
+    assert stored["status"] == "failed"
+    assert stored["readwise_error"] == "readwise_url_only_delete_failed"
+    assert stored["readwise_url_only_delete_status"] == "failed"
