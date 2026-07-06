@@ -32,6 +32,9 @@
         {% if file_info.get('readwise_parse_message') %}
         <strong>解析说明：</strong>{{ file_info.get('readwise_parse_message') }}<br>
         {% endif %}
+        {% if file_info.get('readwise_auto_fallback_requested_at') %}
+        <strong>自动全文重发：</strong>{{ file_info.get('readwise_auto_fallback_requested_at') }}<br>
+        {% endif %}
         {% if file_info.get('readwise_url_only_url') %}
         <strong>URL-only链接：</strong><a href="{{ file_info.get('readwise_url_only_url') }}" target="_blank" rel="noopener noreferrer">{{ file_info.get('readwise_url_only_url') }}</a><br>
         {% endif %}

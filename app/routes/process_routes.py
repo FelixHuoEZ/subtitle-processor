@@ -522,6 +522,8 @@ def get_processing_status(task_id):
             'readwise_parse_message': task_info.get('readwise_parse_message'),
             'readwise_parse_checked_at': task_info.get('readwise_parse_checked_at'),
             'readwise_parse_attempts': task_info.get('readwise_parse_attempts'),
+            'readwise_auto_fallback_enabled': task_info.get('readwise_auto_fallback_enabled'),
+            'readwise_auto_fallback_requested_at': task_info.get('readwise_auto_fallback_requested_at'),
             'force_local_readwise_available': task_info.get('force_local_readwise_available'),
             'force_local_readwise_requested_at': task_info.get('force_local_readwise_requested_at'),
             'readwise_url_only_delete_status': task_info.get('readwise_url_only_delete_status'),

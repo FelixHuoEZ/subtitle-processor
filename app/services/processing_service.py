@@ -18,6 +18,10 @@ LANGUAGE_CONFIRMATION_CHOICES = {"zh", "en", "auto"}
 LANGUAGE_CONFIRMATION_MISMATCH_MAX_CONFIDENCE = 0.9
 READWISE_PARSE_CHECK_ATTEMPTS = 6
 READWISE_PARSE_CHECK_INTERVAL_SECONDS = 5.0
+READWISE_AUTO_FALLBACK_REASONS = {
+    "youtube_subtitles_unavailable",
+    "video_subtitles_unavailable",
+}
 SRT_TIMING_LINE_RE = re.compile(
     r"^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}$",
     re.MULTILINE,
@@ -40,6 +44,13 @@ class ProcessingService:
         self.transcription_service = transcription_service
         self.subtitle_service = subtitle_service
         self.readwise_service = readwise_service
+        self.readwise_auto_fallback_on_parse_failed = self._parse_bool_env(
+            "READWISE_AUTO_FALLBACK_ON_PARSE_FAILED", False
+        )
+        logger.info(
+            "Readwise解析失败自动本地重发: %s",
+            self.readwise_auto_fallback_on_parse_failed,
+        )
 
     def process_video_task(self, task_info, auto_transcribe):
         """后台执行视频下载、转录及推送流程"""
@@ -197,6 +208,31 @@ class ProcessingService:
                     readwise_result.get("id")
                 )
                 self._apply_url_only_parse_result(task_info, parse_result)
+                if self.should_auto_fallback_readwise(parse_result):
+                    task_info["readwise_auto_fallback_enabled"] = True
+                    task_info["readwise_auto_fallback_requested_at"] = (
+                        datetime.now().isoformat()
+                    )
+                    task_info["readwise_parse_message"] = (
+                        "Readwise Reader 未能解析字幕，正在自动删除 URL-only 文档并本地全文重发。"
+                    )
+                    task_info["updated_time"] = datetime.now().isoformat()
+                    self.file_service.update_file_info(process_id, task_info)
+                    retry_result = self.retry_readwise_with_local_content(process_id)
+                    latest_task_info = self.file_service.get_file_info(process_id)
+                    if latest_task_info:
+                        task_info.clear()
+                        task_info.update(latest_task_info)
+                    logger.info(
+                        "Readwise解析失败自动fallback完成: process=%s success=%s status=%s",
+                        process_id,
+                        retry_result.get("success"),
+                        retry_result.get("status"),
+                    )
+                    return
+                task_info["readwise_auto_fallback_enabled"] = (
+                    self.readwise_auto_fallback_on_parse_failed
+                )
                 logger.info(
                     "第3步完成：Readwise URL剪藏成功: %s -> %s",
                     process_id,
@@ -221,7 +257,17 @@ class ProcessingService:
             logger.error("异常堆栈(URL剪藏): %s", traceback.format_exc())
 
         task_info["updated_time"] = datetime.now().isoformat()
+        self.file_service.update_file_info(process_id, task_info)
         logger.info("=== 视频处理流程完成 === %s", process_id)
+
+    def should_auto_fallback_readwise(self, parse_result):
+        if not self.readwise_auto_fallback_on_parse_failed:
+            return False
+        parse_result = parse_result or {}
+        return (
+            parse_result.get("status") == "failed"
+            and parse_result.get("reason") in READWISE_AUTO_FALLBACK_REASONS
+        )
 
     def _wait_for_readwise_parse_result(self, article_id):
         last_result = None
@@ -532,6 +578,13 @@ class ProcessingService:
         task_info["readwise_parse_reason"] = reason
         task_info["readwise_parse_message"] = message
         task_info["force_local_readwise_available"] = True
+
+    @staticmethod
+    def _parse_bool_env(key, default=False):
+        raw = os.getenv(key)
+        if raw is None:
+            return default
+        return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
     def _handle_existing_subtitle(
         self, process_id, task_info, result, force_full_text=False

@@ -83,6 +83,43 @@ class FakeReadwiseService:
         return {"id": "full-text-id", "url": "https://read.readwise.io/read/full-text-id"}
 
 
+class AutoFallbackReadwiseService:
+    def __init__(self, events):
+        self.events = events
+        self.payloads = []
+        self.deleted = []
+        self.create_count = 0
+
+    def create_article_from_subtitle(self, payload):
+        self.create_count += 1
+        self.payloads.append(dict(payload))
+        if self.create_count == 1:
+            self.events.append("create_url")
+            return {
+                "id": "url-only-id",
+                "url": "https://read.readwise.io/read/url-only-id",
+            }
+        self.events.append("create_full")
+        return {
+            "id": "full-text-id",
+            "url": "https://read.readwise.io/read/full-text-id",
+        }
+
+    def check_reader_parse_result(self, article_id):
+        self.events.append("check")
+        return {
+            "status": "failed",
+            "reason": "youtube_subtitles_unavailable",
+            "message": "Readwise Reader 未能从 YouTube 抓到字幕。",
+            "checked_at": "2026-07-06T23:00:00",
+        }
+
+    def delete_article(self, article_id):
+        self.events.append("delete")
+        self.deleted.append(article_id)
+        return True
+
+
 def test_force_local_retry_preserves_url_only_item_and_sends_full_text(tmp_path):
     file_service = FakeFileService(tmp_path)
     events = []
@@ -126,6 +163,84 @@ def test_force_local_retry_preserves_url_only_item_and_sends_full_text(tmp_path)
     assert stored["readwise_fallback_from_article_id"] == "url-only-id"
     assert stored["readwise_fallback_article_id"] == "full-text-id"
     assert stored["readwise_parse_status"] == "recovered"
+
+
+def test_url_only_parse_failure_auto_fallbacks_when_enabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("READWISE_AUTO_FALLBACK_ON_PARSE_FAILED", "true")
+    file_service = FakeFileService(tmp_path)
+    events = []
+    video_service = FakeVideoService(events)
+    readwise_service = AutoFallbackReadwiseService(events)
+    service = ProcessingService(
+        file_service=file_service,
+        video_service=video_service,
+        transcription_service=None,
+        subtitle_service=SubtitleService(),
+        readwise_service=readwise_service,
+    )
+    task_info = {
+        "id": "task-1",
+        "url": "https://www.youtube.com/watch?v=demo",
+        "platform": "youtube",
+        "readwise_mode": "url_only",
+        "readwise_url_only": True,
+        "skip_processing_for_url_only": True,
+        "video_info": {
+            "title": "Demo Video",
+            "webpage_url": "https://www.youtube.com/watch?v=demo",
+        },
+    }
+    file_service.files["task-1"] = dict(task_info)
+
+    service._handle_url_only_readwise("task-1", task_info)
+    stored = file_service.files["task-1"]
+
+    assert events == ["create_url", "check", "delete", "video", "create_full"]
+    assert readwise_service.deleted == ["url-only-id"]
+    assert stored["status"] == "completed"
+    assert stored["readwise_auto_fallback_enabled"] is True
+    assert stored["readwise_auto_fallback_requested_at"]
+    assert stored["readwise_url_only_delete_status"] == "deleted"
+    assert stored["readwise_fallback_from_article_id"] == "url-only-id"
+    assert stored["readwise_fallback_article_id"] == "full-text-id"
+    assert task_info["readwise_article_id"] == "full-text-id"
+
+
+def test_url_only_parse_failure_waits_for_manual_fallback_by_default(tmp_path):
+    file_service = FakeFileService(tmp_path)
+    events = []
+    video_service = FakeVideoService(events)
+    readwise_service = AutoFallbackReadwiseService(events)
+    service = ProcessingService(
+        file_service=file_service,
+        video_service=video_service,
+        transcription_service=None,
+        subtitle_service=SubtitleService(),
+        readwise_service=readwise_service,
+    )
+    task_info = {
+        "id": "task-1",
+        "url": "https://www.youtube.com/watch?v=demo",
+        "platform": "youtube",
+        "readwise_mode": "url_only",
+        "readwise_url_only": True,
+        "skip_processing_for_url_only": True,
+        "video_info": {
+            "title": "Demo Video",
+            "webpage_url": "https://www.youtube.com/watch?v=demo",
+        },
+    }
+    file_service.files["task-1"] = dict(task_info)
+
+    service._handle_url_only_readwise("task-1", task_info)
+    stored = file_service.files["task-1"]
+
+    assert events == ["create_url", "check"]
+    assert video_service.calls == []
+    assert readwise_service.deleted == []
+    assert stored["status"] == "readwise_parse_failed"
+    assert stored["readwise_auto_fallback_enabled"] is False
+    assert stored["force_local_readwise_available"] is True
 
 
 def test_force_local_retry_stops_when_url_only_delete_fails(tmp_path):
