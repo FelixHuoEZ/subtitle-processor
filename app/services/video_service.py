@@ -292,6 +292,11 @@ class VideoService:
                     if sample_url and sample_name:
                         break
 
+                has_usable_formats = sample_url is not None
+                is_original_candidate = (
+                    has_usable_formats and track_type in {"human", "asr_original"}
+                )
+
                 catalog.append(
                     {
                         "provider_bucket": provider_bucket,
@@ -299,10 +304,11 @@ class VideoService:
                         "language": normalized_language,
                         "track_type": track_type,
                         "translation_target": translation_target,
-                        "is_original_candidate": track_type in {"human", "asr_original"},
+                        "has_usable_formats": has_usable_formats,
+                        "is_original_candidate": is_original_candidate,
                         "is_chinese_original_candidate": (
                             normalized_language == "zh"
-                            and track_type in {"human", "asr_original"}
+                            and is_original_candidate
                         ),
                         "name": sample_name,
                         "url": sample_url,
@@ -673,6 +679,9 @@ class VideoService:
         )
         spoken_pattern = self._derive_spoken_pattern(spoken_language, content_locale)
         reader_url_accessible = self._is_readwise_reader_url_accessible(video_info)
+        reader_transcript_available = self._has_reader_transcript_track(
+            track_catalog, spoken_language
+        )
 
         if not reader_url_accessible:
             return {
@@ -690,29 +699,30 @@ class VideoService:
                 "spoken_pattern": spoken_pattern,
             }
 
-        if content_locale == "zh" and spoken_pattern == "zh_framed_foreign_body":
+        def url_only_if_reader_transcript_available(reason: str) -> Dict[str, Any]:
+            if reader_transcript_available:
+                return {
+                    "mode": "url_only",
+                    "reason": reason,
+                    "skip_processing": False,
+                    "spoken_pattern": spoken_pattern,
+                }
+
             return {
-                "mode": "url_only",
-                "reason": "zh_locale_foreign_spoken",
+                "mode": "full_text",
+                "reason": "reader_subtitle_unavailable_requires_local_text",
                 "skip_processing": False,
                 "spoken_pattern": spoken_pattern,
             }
+
+        if content_locale == "zh" and spoken_pattern == "zh_framed_foreign_body":
+            return url_only_if_reader_transcript_available("zh_locale_foreign_spoken")
 
         if content_locale == "zh" and spoken_language == "mixed":
-            return {
-                "mode": "url_only",
-                "reason": "zh_locale_mixed_spoken",
-                "skip_processing": False,
-                "spoken_pattern": spoken_pattern,
-            }
+            return url_only_if_reader_transcript_available("zh_locale_mixed_spoken")
 
         if content_locale == "zh" and spoken_confidence < 0.5:
-            return {
-                "mode": "url_only",
-                "reason": "low_confidence_conflict",
-                "skip_processing": False,
-                "spoken_pattern": spoken_pattern,
-            }
+            return url_only_if_reader_transcript_available("low_confidence_conflict")
 
         return {
             "mode": "full_text",
@@ -720,6 +730,23 @@ class VideoService:
             "skip_processing": False,
             "spoken_pattern": spoken_pattern,
         }
+
+    def _has_reader_transcript_track(
+        self,
+        track_catalog: List[Dict[str, Any]],
+        spoken_language: Optional[str],
+    ) -> bool:
+        normalized_spoken = self._normalize_language_code(spoken_language)
+        original_tracks = [
+            track for track in track_catalog if track.get("is_original_candidate")
+        ]
+
+        if normalized_spoken in {"zh", "en"}:
+            return any(
+                track.get("language") == normalized_spoken for track in original_tracks
+            )
+
+        return bool(original_tracks)
 
     @staticmethod
     def _is_readwise_reader_url_accessible(info: Optional[Dict[str, Any]]) -> bool:

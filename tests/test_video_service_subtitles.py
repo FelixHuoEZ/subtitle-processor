@@ -78,6 +78,23 @@ def test_should_clip_url_only_when_enabled():
     assert service._should_clip_url_only(info) is True
 
 
+def test_empty_caption_entries_do_not_trigger_url_only():
+    service = VideoService()
+    service.readwise_url_only_when_zh_subs = True
+    info = {
+        "subtitles": {},
+        "automatic_captions": {
+            "zh-Hans": [],
+        },
+    }
+
+    track_catalog = service._build_track_catalog(info)
+
+    assert track_catalog[0]["has_usable_formats"] is False
+    assert track_catalog[0]["is_chinese_original_candidate"] is False
+    assert service._should_clip_url_only(info, track_catalog=track_catalog) is False
+
+
 def test_youtube_info_preserves_caption_maps_for_url_only(monkeypatch):
     service = VideoService()
     service.readwise_url_only_when_zh_subs = True
