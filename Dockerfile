@@ -55,7 +55,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # 复制应用文件 - 新模块化架构
 COPY app/ ./app/
 COPY run_app.py .
-COPY test_app_startup.py .
 
 # 创建必要的目录（保留注释方便恢复图形环境）
 RUN mkdir -p uploads videos

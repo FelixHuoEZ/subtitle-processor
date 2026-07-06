@@ -3,6 +3,40 @@ import logging
 from app.config.config_manager import ConfigManager
 
 
+def _write_config(path, app_name):
+    path.write_text(
+        "\n".join(
+            [
+                "app:",
+                f"  name: {app_name}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_config_manager_uses_explicit_config_path(tmp_path, monkeypatch):
+    monkeypatch.delenv("CONFIG_PATH", raising=False)
+    config_path = tmp_path / "explicit.yml"
+    _write_config(config_path, "explicit-app")
+
+    manager = ConfigManager(str(config_path))
+
+    assert manager.config_path == str(config_path)
+    assert manager.get_config_value("app.name") == "explicit-app"
+
+
+def test_config_manager_uses_config_path_env(tmp_path, monkeypatch):
+    config_path = tmp_path / "env.yml"
+    _write_config(config_path, "env-app")
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+
+    manager = ConfigManager()
+
+    assert manager.config_path == str(config_path)
+    assert manager.get_config_value("app.name") == "env-app"
+
+
 def test_config_manager_redacts_sensitive_values_in_logs(tmp_path, monkeypatch, caplog):
     config_path = tmp_path / "config.yml"
     config_path.write_text(

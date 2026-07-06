@@ -3,7 +3,7 @@
 import os
 import logging
 from flask import Flask, render_template, jsonify, request, redirect
-from .config.config_manager import ConfigManager, get_config_value
+from .config.config_manager import ConfigManager, get_config_value, set_config_manager
 from .services.logging_service import LoggingService
 from .services.file_service import FileService
 from .services.video_service import VideoService
@@ -28,7 +28,8 @@ def create_app(config_path=None):
     app = Flask(__name__)
     
     # 初始化配置管理器
-    config_manager = ConfigManager()
+    config_manager = ConfigManager(config_path)
+    set_config_manager(config_manager)
     
     # 初始化日志服务
     logging_service = LoggingService()
@@ -72,12 +73,18 @@ def _configure_app(app, config_manager):
     """配置Flask应用"""
     try:
         # 基本配置
-        app.config['SECRET_KEY'] = get_config_value('app.secret_key', 'dev-secret-key-change-in-production')
-        app.config['MAX_CONTENT_LENGTH'] = get_config_value('app.max_file_size', 500 * 1024 * 1024)  # 500MB
+        app.config['SECRET_KEY'] = config_manager.get_config_value(
+            'app.secret_key',
+            'dev-secret-key-change-in-production',
+        )
+        app.config['MAX_CONTENT_LENGTH'] = config_manager.get_config_value(
+            'app.max_file_size',
+            500 * 1024 * 1024,
+        )  # 500MB
         
         # 文件上传配置
-        upload_folder = get_config_value('app.upload_folder', '/app/uploads')
-        output_folder = get_config_value('app.output_folder', '/app/outputs')
+        upload_folder = config_manager.get_config_value('app.upload_folder', '/app/uploads')
+        output_folder = config_manager.get_config_value('app.output_folder', '/app/outputs')
         
         # 确保目录存在
         os.makedirs(upload_folder, exist_ok=True)
@@ -87,7 +94,7 @@ def _configure_app(app, config_manager):
         app.config['OUTPUT_FOLDER'] = output_folder
         
         # 模板配置
-        app.config['TEMPLATES_AUTO_RELOAD'] = get_config_value('app.debug', False)
+        app.config['TEMPLATES_AUTO_RELOAD'] = config_manager.get_config_value('app.debug', False)
         
         # 存储配置管理器实例
         app.config_manager = config_manager

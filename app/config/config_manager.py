@@ -20,9 +20,10 @@ class ConfigManager:
         "authorization",
     )
     
-    def __init__(self):
+    def __init__(self, config_path=None):
         """Initialize the configuration manager."""
         self.config = {}
+        self.explicit_config_path = config_path or os.getenv("CONFIG_PATH")
         self._setup_config_paths()
         self.load_config()
     
@@ -30,13 +31,17 @@ class ConfigManager:
         """Setup configuration file paths."""
         # 配置文件路径
         self.container_config_path = '/app/config/config.yml'
-        local_config_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config')
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        local_config_dir = os.path.join(repo_root, 'config')
         self.local_config_path = os.path.join(local_config_dir, 'config.yml')
         
-        # 优先使用容器内配置路径
-        self.config_path = (self.container_config_path 
-                           if os.path.exists(self.container_config_path) 
-                           else self.local_config_path)
+        # 优先级：显式路径/环境变量 -> 容器路径 -> 本地仓库配置
+        if self.explicit_config_path:
+            self.config_path = os.path.abspath(os.path.expanduser(self.explicit_config_path))
+        else:
+            self.config_path = (self.container_config_path
+                               if os.path.exists(self.container_config_path)
+                               else self.local_config_path)
         self.config_dir = os.path.dirname(self.config_path)
         
         # 确保配置目录存在
@@ -251,11 +256,20 @@ def get_config_manager():
     return _config_manager
 
 
+def set_config_manager(config_manager):
+    """设置全局配置管理器实例，确保应用和服务使用同一配置源。"""
+    global _config_manager
+    _config_manager = config_manager
+
+
 def get_config_value(key_path, default=None):
     """便捷函数：获取配置值"""
     return get_config_manager().get_config_value(key_path, default)
 
 
-def load_config():
+def load_config(config_path=None):
     """便捷函数：重新加载配置"""
+    if config_path:
+        set_config_manager(ConfigManager(config_path))
+        return get_config_manager().get_config()
     return get_config_manager().reload_config()
