@@ -25,10 +25,29 @@
         {% if file_info.get('readwise_url') %}
         <strong>Readwise链接：</strong><a href="{{ file_info.get('readwise_url') }}" target="_blank" rel="noopener noreferrer">{{ file_info.get('readwise_url') }}</a><br>
         {% endif %}
+        {% if file_info.get('readwise_parse_status') %}
+        <strong>Readwise解析：</strong>{{ file_info.get('readwise_parse_status') }}
+        {% if file_info.get('readwise_parse_reason') %}（{{ file_info.get('readwise_parse_reason') }}）{% endif %}<br>
+        {% endif %}
+        {% if file_info.get('readwise_parse_message') %}
+        <strong>解析说明：</strong>{{ file_info.get('readwise_parse_message') }}<br>
+        {% endif %}
+        {% if file_info.get('readwise_url_only_url') %}
+        <strong>URL-only链接：</strong><a href="{{ file_info.get('readwise_url_only_url') }}" target="_blank" rel="noopener noreferrer">{{ file_info.get('readwise_url_only_url') }}</a><br>
+        {% endif %}
+        {% if file_info.get('readwise_fallback_url') %}
+        <strong>全文重发链接：</strong><a href="{{ file_info.get('readwise_fallback_url') }}" target="_blank" rel="noopener noreferrer">{{ file_info.get('readwise_fallback_url') }}</a><br>
+        {% endif %}
     </p>
 
     {% if file_info.get('error') %}
     <div class="error-message" style="display: block">{{ file_info.get('error') }}</div>
+    {% endif %}
+
+    {% if file_info.get('force_local_readwise_available') %}
+    <form method="post" action="{{ url_for('process.force_local_readwise', task_id=file_info.get('id')) }}" style="margin: 12px 0">
+        <button type="submit">强制本地字幕/全文重发到 Readwise</button>
+    </form>
     {% endif %}
 
     <p>

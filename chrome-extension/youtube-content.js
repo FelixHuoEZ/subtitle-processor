@@ -178,6 +178,16 @@
         }
 
         const normalizedStatus = String(status.status || '').toLowerCase();
+        if (isReadwiseParseFailed(status)) {
+          showToast(
+            status.readwise_parse_message || status.error || 'Readwise 未抓到字幕，请在后台强制本地全文重发',
+            'error',
+            getPreferredResultUrl(status, resultUrl)
+          );
+          restoreSubmittedButton();
+          return;
+        }
+
         if (normalizedStatus === 'completed') {
           const linkUrl = getPreferredResultUrl(status, resultUrl);
           showToast(
@@ -210,6 +220,12 @@
 
   function getPreferredResultUrl(response, fallbackUrl) {
     return (response && (response.readwise_url || response.reader_url)) || fallbackUrl;
+  }
+
+  function isReadwiseParseFailed(status) {
+    const normalizedStatus = String((status && status.status) || '').toLowerCase();
+    const parseStatus = String((status && status.readwise_parse_status) || '').toLowerCase();
+    return normalizedStatus === 'readwise_parse_failed' || parseStatus === 'failed';
   }
 
   function sendMessage(message) {

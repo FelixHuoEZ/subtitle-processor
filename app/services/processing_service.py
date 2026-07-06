@@ -16,6 +16,8 @@ LANGUAGE_CONFIRMATION_TIMEOUT_SECONDS = 180
 LANGUAGE_CONFIRMATION_POLL_INTERVAL_SECONDS = 1.0
 LANGUAGE_CONFIRMATION_CHOICES = {"zh", "en", "auto"}
 LANGUAGE_CONFIRMATION_MISMATCH_MAX_CONFIDENCE = 0.9
+READWISE_PARSE_CHECK_ATTEMPTS = 6
+READWISE_PARSE_CHECK_INTERVAL_SECONDS = 5.0
 SRT_TIMING_LINE_RE = re.compile(
     r"^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}$",
     re.MULTILINE,
@@ -180,10 +182,21 @@ class ProcessingService:
             if readwise_result:
                 task_info["readwise_article_id"] = readwise_result.get("id")
                 task_info["readwise_url"] = readwise_result.get("url")
-                task_info["status"] = "completed"
-                task_info["progress"] = 100
+                task_info["readwise_url_only_article_id"] = readwise_result.get("id")
+                task_info["readwise_url_only_url"] = readwise_result.get("url")
+                task_info["readwise_parse_status"] = "checking"
+                task_info["readwise_parse_reason"] = None
+                task_info["readwise_parse_message"] = "正在确认 Readwise Reader 是否解析到字幕。"
+                task_info["force_local_readwise_available"] = False
+                task_info["updated_time"] = datetime.now().isoformat()
                 task_info.pop("error", None)
                 task_info.pop("readwise_error", None)
+                self.file_service.update_file_info(process_id, task_info)
+
+                parse_result = self._wait_for_readwise_parse_result(
+                    readwise_result.get("id")
+                )
+                self._apply_url_only_parse_result(task_info, parse_result)
                 logger.info(
                     "第3步完成：Readwise URL剪藏成功: %s -> %s",
                     process_id,
@@ -210,7 +223,284 @@ class ProcessingService:
         task_info["updated_time"] = datetime.now().isoformat()
         logger.info("=== 视频处理流程完成 === %s", process_id)
 
-    def _handle_existing_subtitle(self, process_id, task_info, result):
+    def _wait_for_readwise_parse_result(self, article_id):
+        last_result = None
+        for attempt in range(1, READWISE_PARSE_CHECK_ATTEMPTS + 1):
+            try:
+                parse_result = self.readwise_service.check_reader_parse_result(article_id)
+            except Exception as e:
+                logger.warning("Readwise解析确认失败: article=%s error=%s", article_id, e)
+                parse_result = {
+                    "status": "unknown",
+                    "reason": "parse_check_error",
+                    "message": "确认 Readwise Reader 解析结果时出错。",
+                    "document_id": article_id,
+                    "checked_at": datetime.now().isoformat(),
+                }
+
+            parse_result["attempts"] = attempt
+            last_result = parse_result
+            logger.info(
+                "Readwise解析确认: article=%s attempt=%s status=%s reason=%s",
+                article_id,
+                attempt,
+                parse_result.get("status"),
+                parse_result.get("reason"),
+            )
+
+            if parse_result.get("status") in {"ok", "failed", "unknown"}:
+                return parse_result
+
+            if attempt < READWISE_PARSE_CHECK_ATTEMPTS:
+                time.sleep(READWISE_PARSE_CHECK_INTERVAL_SECONDS)
+
+        if last_result:
+            last_result = dict(last_result)
+            last_result["status"] = "pending_timeout"
+            last_result["reason"] = last_result.get("reason") or "parse_check_timeout"
+            last_result["message"] = "Readwise Reader 解析仍在等待中，保留URL剪藏结果。"
+            return last_result
+
+        return {
+            "status": "unknown",
+            "reason": "parse_check_unavailable",
+            "message": "未能确认 Readwise Reader 解析结果。",
+            "document_id": article_id,
+            "checked_at": datetime.now().isoformat(),
+            "attempts": 0,
+        }
+
+    def _apply_url_only_parse_result(self, task_info, parse_result):
+        parse_status = (parse_result or {}).get("status") or "unknown"
+        task_info["readwise_parse_status"] = parse_status
+        task_info["readwise_parse_reason"] = (parse_result or {}).get("reason")
+        task_info["readwise_parse_message"] = (parse_result or {}).get("message")
+        task_info["readwise_parse_checked_at"] = (parse_result or {}).get("checked_at")
+        task_info["readwise_parse_attempts"] = (parse_result or {}).get("attempts")
+
+        if parse_status == "failed":
+            task_info["status"] = "readwise_parse_failed"
+            task_info["progress"] = 100
+            task_info["error"] = (
+                task_info.get("readwise_parse_message")
+                or "Readwise Reader 未能解析该视频字幕，可强制本地字幕/全文重发。"
+            )
+            task_info["readwise_error"] = task_info.get("readwise_parse_reason")
+            task_info["force_local_readwise_available"] = True
+            logger.warning(
+                "Readwise URL剪藏解析失败: article=%s reason=%s",
+                task_info.get("readwise_article_id"),
+                task_info.get("readwise_parse_reason"),
+            )
+            return
+
+        task_info["status"] = "completed"
+        task_info["progress"] = 100
+        task_info["force_local_readwise_available"] = False
+        task_info.pop("error", None)
+        task_info.pop("readwise_error", None)
+
+    def retry_readwise_with_local_content(self, process_id):
+        """Re-run one URL-only task locally and send a full-text Reader item."""
+        task_info = self.file_service.get_file_info(process_id)
+        if not task_info:
+            return {
+                "success": False,
+                "status": "not_found",
+                "error": "处理任务不存在",
+            }
+
+        task_info = dict(task_info)
+        url = task_info.get("url")
+        platform = task_info.get("platform")
+        if not url or not platform:
+            self._fail_force_local_readwise(
+                task_info,
+                "invalid_task",
+                "任务缺少原始链接或平台，无法本地重发 Readwise。",
+            )
+            self.file_service.update_file_info(process_id, task_info)
+            return {
+                "success": False,
+                "status": task_info.get("status"),
+                "error": task_info.get("error"),
+            }
+
+        original_article_id = (
+            task_info.get("readwise_url_only_article_id")
+            or task_info.get("readwise_article_id")
+        )
+        original_reader_url = (
+            task_info.get("readwise_url_only_url") or task_info.get("readwise_url")
+        )
+        if original_article_id:
+            task_info["readwise_url_only_article_id"] = original_article_id
+        if original_reader_url:
+            task_info["readwise_url_only_url"] = original_reader_url
+
+        task_temp_dir = None
+        task_info.update(
+            {
+                "status": "processing",
+                "progress": 5,
+                "readwise_parse_status": "retrying_local",
+                "readwise_parse_reason": "force_local_requested",
+                "readwise_parse_message": "正在本地获取字幕/转录并重发 Readwise。",
+                "force_local_readwise_available": False,
+                "force_local_readwise_requested_at": datetime.now().isoformat(),
+                "updated_time": datetime.now().isoformat(),
+            }
+        )
+        task_info.pop("error", None)
+        task_info.pop("readwise_error", None)
+        self.file_service.update_file_info(process_id, task_info)
+
+        try:
+            result = self.video_service.process_video_for_transcription(
+                url=url,
+                platform=platform,
+                force_local_processing=True,
+            )
+            if result:
+                task_temp_dir = result.get("temp_dir")
+
+            if not result:
+                self._fail_force_local_readwise(
+                    task_info,
+                    "local_processing_failed",
+                    "本地获取字幕/音频失败，未能重发 Readwise。",
+                )
+                return {
+                    "success": False,
+                    "status": task_info.get("status"),
+                    "error": task_info.get("error"),
+                }
+
+            self._apply_video_result_fields(task_info, result)
+            self._force_full_text_readwise_fields(task_info)
+            task_info["readwise_article_id"] = None
+            task_info["readwise_url"] = None
+            task_info["updated_time"] = datetime.now().isoformat()
+            self.file_service.update_file_info(process_id, task_info)
+
+            if result.get("subtitle_content"):
+                self._handle_existing_subtitle(
+                    process_id,
+                    task_info,
+                    result,
+                    force_full_text=True,
+                )
+            elif result.get("needs_transcription") and result.get("audio_file"):
+                self._handle_audio_transcription(
+                    process_id,
+                    task_info,
+                    result,
+                    tags=task_info.get("tags", []) or [],
+                    platform=platform,
+                    force_full_text=True,
+                )
+            else:
+                download_error = result.get("download_error")
+                self._fail_force_local_readwise(
+                    task_info,
+                    "local_content_unavailable",
+                    download_error or "本地处理没有得到可用字幕或音频。",
+                )
+                return {
+                    "success": False,
+                    "status": task_info.get("status"),
+                    "error": task_info.get("error"),
+                }
+
+            fallback_article_id = task_info.get("readwise_article_id")
+            if task_info.get("status") == "completed" and fallback_article_id:
+                task_info["readwise_fallback_from_article_id"] = original_article_id
+                task_info["readwise_fallback_article_id"] = fallback_article_id
+                task_info["readwise_fallback_url"] = task_info.get("readwise_url")
+                task_info["readwise_parse_status"] = "recovered"
+                task_info["readwise_parse_reason"] = "force_local_full_text_sent"
+                task_info["readwise_parse_message"] = "已使用本地字幕/全文重发到 Readwise。"
+                task_info["force_local_readwise_available"] = False
+                task_info.pop("error", None)
+                task_info.pop("readwise_error", None)
+            else:
+                self._fail_force_local_readwise(
+                    task_info,
+                    "readwise_full_text_failed",
+                    "本地全文已生成，但重发 Readwise 失败。",
+                )
+
+            return {
+                "success": task_info.get("status") == "completed",
+                "status": task_info.get("status"),
+                "readwise_article_id": task_info.get("readwise_article_id"),
+                "readwise_url": task_info.get("readwise_url"),
+                "error": task_info.get("error"),
+            }
+
+        except Exception as e:
+            logger.error("强制本地重发Readwise失败: %s - %s", process_id, str(e))
+            logger.error("异常堆栈(强制本地重发): %s", traceback.format_exc())
+            self._fail_force_local_readwise(
+                task_info,
+                "force_local_exception",
+                f"强制本地重发 Readwise 出错: {str(e)}",
+            )
+            return {
+                "success": False,
+                "status": task_info.get("status"),
+                "error": task_info.get("error"),
+            }
+        finally:
+            if task_temp_dir:
+                self.video_service.cleanup_task_artifacts(task_temp_dir)
+                task_info["audio_file"] = None
+            task_info["updated_time"] = datetime.now().isoformat()
+            self.file_service.update_file_info(process_id, task_info)
+
+    def _apply_video_result_fields(self, task_info, result):
+        task_info["video_info"] = result.get("video_info", {})
+        task_info["language"] = result.get("language")
+        task_info["language_details"] = result.get("language_details")
+        task_info["content_locale"] = result.get("content_locale")
+        task_info["content_locale_details"] = result.get("content_locale_details")
+        task_info["subtitle_content"] = result.get("subtitle_content")
+        task_info["subtitle_metadata"] = result.get("subtitle_metadata")
+        task_info["audio_file"] = result.get("audio_file")
+        task_info["needs_transcription"] = result.get("needs_transcription", False)
+        task_info["readwise_mode"] = result.get("readwise_mode")
+        task_info["readwise_reason"] = result.get("readwise_reason")
+        task_info["readwise_url_only"] = result.get("readwise_url_only", False)
+        task_info["skip_processing_for_url_only"] = result.get(
+            "skip_processing_for_url_only", False
+        )
+        task_info["spoken_pattern"] = result.get("spoken_pattern")
+
+    @staticmethod
+    def _force_full_text_readwise_fields(task_info):
+        task_info["readwise_mode"] = "full_text"
+        task_info["readwise_reason"] = "forced_local_after_reader_parse_failed"
+        task_info["readwise_url_only"] = False
+        task_info["skip_processing_for_url_only"] = False
+        task_info["readwise_force_local"] = True
+
+    @staticmethod
+    def _fail_force_local_readwise(task_info, reason, message):
+        task_info["status"] = "failed"
+        task_info["progress"] = 100
+        task_info["error"] = message
+        task_info["readwise_error"] = reason
+        task_info["readwise_parse_status"] = "force_local_failed"
+        task_info["readwise_parse_reason"] = reason
+        task_info["readwise_parse_message"] = message
+        task_info["force_local_readwise_available"] = True
+
+    def _handle_existing_subtitle(
+        self, process_id, task_info, result, force_full_text=False
+    ):
+        if force_full_text:
+            self._force_full_text_readwise_fields(task_info)
+
         raw_subtitle_content = result.get("subtitle_content")
         source_subtitle_format = self.subtitle_service.detect_subtitle_format(
             raw_subtitle_content
@@ -297,7 +587,15 @@ class ProcessingService:
 
         logger.info("=== 视频处理流程完成 === %s", process_id)
 
-    def _handle_audio_transcription(self, process_id, task_info, result, tags, platform):
+    def _handle_audio_transcription(
+        self,
+        process_id,
+        task_info,
+        result,
+        tags,
+        platform,
+        force_full_text=False,
+    ):
         logger.info("第2步：开始音频转录流程: %s", process_id)
         logger.info("needs_transcription: %s", result.get("needs_transcription"))
         logger.info("audio_file: %s", result.get("audio_file"))
@@ -344,6 +642,7 @@ class ProcessingService:
                     result,
                     transcription_result,
                     srt_content,
+                    force_full_text=force_full_text,
                 )
             else:
                 task_info["status"] = "failed"
@@ -396,6 +695,7 @@ class ProcessingService:
         result,
         transcription_result,
         srt_content,
+        force_full_text=False,
     ):
         srt_length = len(srt_content)
         logger.info("SRT内容长度: %s", srt_length)
@@ -462,6 +762,9 @@ class ProcessingService:
                 task_info.get("readwise_reason"),
                 task_info.get("language_override") or "auto",
             )
+
+        if force_full_text:
+            self._force_full_text_readwise_fields(task_info)
 
         logger.info("第3步：开始发送内容到Readwise Reader: %s", process_id)
         logger.debug("调试信息 - task_info关键字段:")

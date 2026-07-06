@@ -78,6 +78,65 @@ def test_should_clip_url_only_when_enabled():
     assert service._should_clip_url_only(info) is True
 
 
+def test_force_local_processing_bypasses_url_only_short_circuit(monkeypatch):
+    service = VideoService()
+    service.readwise_url_only_when_zh_subs = True
+    video_info = {
+        "id": "demo",
+        "title": "中文视频",
+        "webpage_url": "https://www.youtube.com/watch?v=demo",
+        "subtitles": {},
+        "automatic_captions": {
+            "zh-Hans": [
+                {
+                    "ext": "json3",
+                    "url": "https://example.com/subtitle.json3",
+                    "name": "Chinese (Simplified)",
+                }
+            ]
+        },
+    }
+
+    monkeypatch.setattr(service, "get_video_info", lambda url, platform: video_info)
+    monkeypatch.setattr(
+        service,
+        "get_video_language_details",
+        lambda *args, **kwargs: {"language": "zh", "confidence": 0.95},
+    )
+    monkeypatch.setattr(
+        service,
+        "get_content_locale_details",
+        lambda *args, **kwargs: {"language": "zh", "confidence": 0.95},
+    )
+    monkeypatch.setattr(
+        service,
+        "get_subtitle_strategy",
+        lambda *args, **kwargs: (True, ["zh-Hans"]),
+    )
+    monkeypatch.setattr(
+        service,
+        "download_subtitles",
+        lambda *args, **kwargs: {"content": "本地字幕内容", "track_type": "asr_original"},
+    )
+    monkeypatch.setattr(
+        service,
+        "download_video",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("force-local should use subtitles instead of audio download")
+        ),
+    )
+
+    result = service._process_video_for_transcription_with_url(
+        "https://www.youtube.com/watch?v=demo",
+        "youtube",
+        force_local_processing=True,
+    )
+
+    assert result["subtitle_content"] == "本地字幕内容"
+    assert result["needs_transcription"] is False
+    assert result["readwise_url_only"] is True
+
+
 def test_youtube_info_preserves_caption_maps_for_url_only(monkeypatch):
     service = VideoService()
     service.readwise_url_only_when_zh_subs = True

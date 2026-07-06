@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -14,6 +15,11 @@ from .subtitle_service import SubtitleService
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)  # 确保DEBUG级别日志可以输出
+
+READER_PARSE_FAILURE_MARKERS = (
+    "youtube does not provide subtitles for this video",
+    "does not provide subtitles for this video",
+)
 
 
 class ReadwiseService:
@@ -306,6 +312,134 @@ class ReadwiseService:
         except Exception as e:
             logger.error(f"从字幕创建Readwise文章失败: {str(e)}")
             return None
+
+    def get_reader_document(
+        self, document_id: str, with_html_content: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch a Reader document through the list endpoint."""
+        try:
+            if not self.enabled or not document_id:
+                return None
+
+            params: Dict[str, Any] = {"id": document_id}
+            if with_html_content:
+                params["withHtmlContent"] = "true"
+
+            response = self._make_request("GET", "/list/", params=params)
+            if not isinstance(response, dict):
+                return None
+
+            results = response.get("results") or []
+            if not results:
+                return None
+
+            document = dict(results[0])
+            if document.get("id"):
+                document = self._ensure_reader_url(document)
+            return document
+
+        except Exception as e:
+            logger.error("获取Readwise Reader文档失败: %s", str(e))
+            return None
+
+    def check_reader_parse_result(self, document_id: str) -> Dict[str, Any]:
+        """Classify whether Reader successfully parsed a saved URL."""
+        checked_at = datetime.now().isoformat()
+        result = {
+            "status": "unknown",
+            "reason": "not_checked",
+            "document_id": document_id,
+            "checked_at": checked_at,
+        }
+
+        if not document_id:
+            result.update(
+                {
+                    "status": "unknown",
+                    "reason": "missing_document_id",
+                    "message": "缺少 Readwise Reader 文档ID，无法确认解析结果。",
+                }
+            )
+            return result
+
+        document = self.get_reader_document(document_id, with_html_content=True)
+        if not document:
+            result.update(
+                {
+                    "status": "pending",
+                    "reason": "document_not_ready",
+                    "message": "Readwise Reader 文档尚未出现在列表接口中。",
+                }
+            )
+            return result
+
+        html_content = document.get("html_content") or document.get("html") or ""
+        text_content = self._html_to_text(html_content)
+        normalized_text = text_content.lower()
+        word_count = document.get("word_count")
+        category = document.get("category")
+        result.update(
+            {
+                "reason": "checked",
+                "word_count": word_count,
+                "category": category,
+                "html_text_length": len(text_content),
+                "reader_url": document.get("url"),
+            }
+        )
+
+        if any(marker in normalized_text for marker in READER_PARSE_FAILURE_MARKERS):
+            result.update(
+                {
+                    "status": "failed",
+                    "reason": "youtube_subtitles_unavailable",
+                    "message": "Readwise Reader 未能从 YouTube 抓到字幕。",
+                }
+            )
+            return result
+
+        if (
+            category == "video"
+            and not word_count
+            and len(normalized_text) <= 240
+            and "subtitle" in normalized_text
+            and ("youtube" in normalized_text or "unfortunately" in normalized_text)
+        ):
+            result.update(
+                {
+                    "status": "failed",
+                    "reason": "video_subtitles_unavailable",
+                    "message": "Readwise Reader 返回了视频字幕不可用提示。",
+                }
+            )
+            return result
+
+        if word_count or len(text_content) >= 80:
+            result.update(
+                {
+                    "status": "ok",
+                    "reason": "reader_content_available",
+                    "message": "Readwise Reader 已返回正文内容。",
+                }
+            )
+            return result
+
+        result.update(
+            {
+                "status": "pending",
+                "reason": "reader_content_pending",
+                "message": "Readwise Reader 文档存在，但正文仍在等待解析。",
+            }
+        )
+        return result
+
+    @staticmethod
+    def _html_to_text(html_content: str) -> str:
+        """Convert a small HTML fragment into normalized text for status checks."""
+        if not html_content:
+            return ""
+        text_content = re.sub(r"<[^>]+>", " ", str(html_content))
+        return re.sub(r"\s+", " ", text_content).strip()
 
     @staticmethod
     def _normalize_summary(summary: Optional[str]) -> str:
@@ -716,7 +850,11 @@ class ReadwiseService:
             return date_str or "未知"
 
     def _make_request(
-        self, method: str, endpoint: str, data: Dict[str, Any] = None
+        self,
+        method: str,
+        endpoint: str,
+        data: Dict[str, Any] = None,
+        params: Dict[str, Any] = None,
     ) -> Optional[Dict[str, Any]]:
         """发送API请求"""
         try:
@@ -727,7 +865,7 @@ class ReadwiseService:
             }
 
             if method.upper() == "GET":
-                response = requests.get(url, headers=headers, timeout=30)
+                response = requests.get(url, headers=headers, params=params, timeout=30)
             elif method.upper() == "POST":
                 response = requests.post(url, headers=headers, json=data, timeout=30)
             elif method.upper() == "PUT":

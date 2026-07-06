@@ -3,11 +3,13 @@
 import json
 import logging
 import os
+import threading
 from datetime import datetime
 
-from flask import Blueprint, request, jsonify, render_template, redirect, url_for, flash, Response
+from flask import Blueprint, request, jsonify, render_template, redirect, url_for, flash, Response, current_app
 
 from ..services.file_service import FileService
+from ..services.processing_service import ProcessingService
 from ..services.video_service import VideoService
 from ..services.transcription_service import TranscriptionService
 from ..services.subtitle_service import SubtitleService
@@ -29,12 +31,21 @@ transcription_service = service_proxy(TranscriptionService)
 subtitle_service = service_proxy(SubtitleService)
 translation_service = service_proxy(TranslationService)
 readwise_service = service_proxy(ReadwiseService)
+processing_service = service_proxy(
+    lambda: ProcessingService(
+        file_service=file_service,
+        video_service=video_service,
+        transcription_service=transcription_service,
+        subtitle_service=subtitle_service,
+        readwise_service=readwise_service,
+    )
+)
 
 
 def configure_services(services):
     """Bind this module to the application service set."""
     global file_service, video_service, transcription_service
-    global subtitle_service, translation_service, readwise_service
+    global subtitle_service, translation_service, readwise_service, processing_service
 
     file_service = services.file_service
     video_service = services.video_service
@@ -42,6 +53,16 @@ def configure_services(services):
     subtitle_service = services.subtitle_service
     translation_service = services.translation_service
     readwise_service = services.readwise_service
+    processing_service = services.processing_service
+
+
+def _run_force_local_readwise_with_app_context(app, task_id):
+    with app.app_context():
+        processing_service.retry_readwise_with_local_content(task_id)
+
+
+def _wants_json_response():
+    return request.is_json or request.accept_mimetypes.best == 'application/json'
 
 
 def _normalize_language_confirmation_choice(language):
@@ -494,6 +515,18 @@ def get_processing_status(task_id):
             'skip_processing_for_url_only': task_info.get('skip_processing_for_url_only'),
             'readwise_article_id': task_info.get('readwise_article_id'),
             'readwise_url': task_info.get('readwise_url'),
+            'readwise_url_only_article_id': task_info.get('readwise_url_only_article_id'),
+            'readwise_url_only_url': task_info.get('readwise_url_only_url'),
+            'readwise_parse_status': task_info.get('readwise_parse_status'),
+            'readwise_parse_reason': task_info.get('readwise_parse_reason'),
+            'readwise_parse_message': task_info.get('readwise_parse_message'),
+            'readwise_parse_checked_at': task_info.get('readwise_parse_checked_at'),
+            'readwise_parse_attempts': task_info.get('readwise_parse_attempts'),
+            'force_local_readwise_available': task_info.get('force_local_readwise_available'),
+            'force_local_readwise_requested_at': task_info.get('force_local_readwise_requested_at'),
+            'readwise_fallback_from_article_id': task_info.get('readwise_fallback_from_article_id'),
+            'readwise_fallback_article_id': task_info.get('readwise_fallback_article_id'),
+            'readwise_fallback_url': task_info.get('readwise_fallback_url'),
             'spoken_pattern': task_info.get('spoken_pattern'),
             'language_confirmation': task_info.get('language_confirmation'),
             'language_override': task_info.get('language_override'),
@@ -530,6 +563,52 @@ def get_processing_status(task_id):
     except Exception as e:
         logger.error(f"获取处理状态失败: {str(e)}")
         return jsonify({'success': False, 'status': 'error', 'error': str(e)}), 500
+
+
+@process_bp.route('/status/<task_id>/force-local-readwise', methods=['POST'])
+def force_local_readwise(task_id):
+    """Force one URL-only task through local subtitles/transcription and full-text Readwise."""
+    try:
+        task_info = file_service.get_file_info(task_id)
+        if not task_info:
+            if _wants_json_response():
+                return jsonify({'success': False, 'status': 'not_found'}), 404
+            flash('处理任务不存在', 'error')
+            return redirect(url_for('view.index'))
+
+        if not task_info.get('url') or not task_info.get('platform'):
+            message = '任务缺少原始链接或平台，无法本地重发 Readwise。'
+            if _wants_json_response():
+                return jsonify({'success': False, 'status': 'invalid_task', 'error': message}), 400
+            flash(message, 'error')
+            return redirect(url_for('view.file_detail', file_id=task_id))
+
+        app = current_app._get_current_object()
+        thread = threading.Thread(
+            target=_run_force_local_readwise_with_app_context,
+            args=(app, task_id),
+            daemon=True,
+            name=f"readwise-force-local-{task_id}",
+        )
+        thread.start()
+
+        if _wants_json_response():
+            return jsonify({
+                'success': True,
+                'status': 'processing',
+                'process_id': task_id,
+                'status_url': f"/process/status/{task_id}",
+            }), 202
+
+        flash('已开始本地获取字幕/转录并重发 Readwise', 'success')
+        return redirect(url_for('view.file_detail', file_id=task_id))
+
+    except Exception as e:
+        logger.error(f"启动强制本地Readwise重发失败: {str(e)}")
+        if _wants_json_response():
+            return jsonify({'success': False, 'status': 'error', 'error': str(e)}), 500
+        flash(f'启动强制本地Readwise重发失败: {str(e)}', 'error')
+        return redirect(url_for('view.file_detail', file_id=task_id))
 
 
 @process_bp.route('/status/<task_id>/language', methods=['POST'])

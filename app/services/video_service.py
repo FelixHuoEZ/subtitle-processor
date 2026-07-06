@@ -2643,7 +2643,7 @@ class VideoService:
         }
 
     def _process_video_for_transcription_with_url(
-        self, url: str, platform: str
+        self, url: str, platform: str, force_local_processing: bool = False
     ) -> Optional[Dict[str, Any]]:
         """使用指定URL完成转录前置处理。"""
         logger.info(f"处理{platform}视频用于转录: {url}")
@@ -2671,7 +2671,10 @@ class VideoService:
             track_catalog, language_details, content_locale_details, video_info
         )
 
-        if self._should_clip_url_only(video_info, track_catalog=track_catalog):
+        if (
+            not force_local_processing
+            and self._should_clip_url_only(video_info, track_catalog=track_catalog)
+        ):
             logger.info("检测到原始中文字幕且启用URL剪藏，跳过字幕下载与转录")
             return {
                 "video_info": video_info,
@@ -2772,7 +2775,7 @@ class VideoService:
         }
 
     def process_video_for_transcription(
-        self, url: str, platform: str
+        self, url: str, platform: str, force_local_processing: bool = False
     ) -> Optional[Dict[str, Any]]:
         """处理视频用于转录
 
@@ -2791,7 +2794,9 @@ class VideoService:
                         "检测到YouTube非标准链接，先尝试标准URL: %s", normalized_url
                     )
                     primary_result = self._process_video_for_transcription_with_url(
-                        normalized_url, platform
+                        normalized_url,
+                        platform,
+                        force_local_processing=force_local_processing,
                     )
                     primary_error = (
                         primary_result.get("download_error")
@@ -2808,7 +2813,9 @@ class VideoService:
                         logger.warning("标准URL处理失败，回退使用原始URL: %s", url)
                         fallback_result = (
                             self._process_video_for_transcription_with_url(
-                                url, platform
+                                url,
+                                platform,
+                                force_local_processing=force_local_processing,
                             )
                         )
                         if fallback_result is not None:
@@ -2820,7 +2827,11 @@ class VideoService:
                         )
                     return primary_result
 
-            return self._process_video_for_transcription_with_url(url, platform)
+            return self._process_video_for_transcription_with_url(
+                url,
+                platform,
+                force_local_processing=force_local_processing,
+            )
 
         except Exception as e:
             logger.error(f"处理视频用于转录失败: {str(e)}")

@@ -199,7 +199,11 @@ content %}
                 }
                 var data = await response.json();
                 var status = (data.status || "").toLowerCase();
-                if (status === "completed" || status === "failed") {
+                if (
+                    status === "completed" ||
+                    status === "failed" ||
+                    status === "readwise_parse_failed"
+                ) {
                     return data;
                 }
             } catch (error) {
@@ -296,7 +300,9 @@ content %}
                 .then(function (result) {
                     if (
                         result.status &&
-                        result.status.toLowerCase() === "failed"
+                        ["failed", "readwise_parse_failed"].includes(
+                            result.status.toLowerCase()
+                        )
                     ) {
                         failures.push({
                             url: currentUrl,

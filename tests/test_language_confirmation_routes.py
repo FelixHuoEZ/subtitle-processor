@@ -346,6 +346,82 @@ def test_status_endpoint_returns_language_confirmation(monkeypatch):
     assert payload["content_locale"] == "zh"
 
 
+def test_status_endpoint_returns_readwise_parse_fields(monkeypatch):
+    client = _build_process_test_client()
+    task_info = {
+        "status": "readwise_parse_failed",
+        "url": "https://www.youtube.com/watch?v=demo123",
+        "readwise_article_id": "url-only-id",
+        "readwise_url": "https://read.readwise.io/read/url-only-id",
+        "readwise_url_only_article_id": "url-only-id",
+        "readwise_url_only_url": "https://read.readwise.io/read/url-only-id",
+        "readwise_parse_status": "failed",
+        "readwise_parse_reason": "youtube_subtitles_unavailable",
+        "readwise_parse_message": "Readwise Reader 未能从 YouTube 抓到字幕。",
+        "force_local_readwise_available": True,
+    }
+
+    monkeypatch.setattr(
+        process_routes.file_service,
+        "get_file_info",
+        lambda task_id: task_info if task_id == "task-1" else None,
+    )
+
+    response = client.get("/process/status/task-1")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["status"] == "readwise_parse_failed"
+    assert payload["readwise_parse_status"] == "failed"
+    assert payload["readwise_parse_reason"] == "youtube_subtitles_unavailable"
+    assert payload["force_local_readwise_available"] is True
+    assert payload["readwise_url_only_article_id"] == "url-only-id"
+
+
+def test_force_local_readwise_endpoint_starts_background_retry(monkeypatch):
+    client = _build_process_test_client()
+    task_info = {
+        "id": "task-1",
+        "status": "readwise_parse_failed",
+        "url": "https://www.youtube.com/watch?v=demo123",
+        "platform": "youtube",
+    }
+    called = {}
+
+    class ImmediateThread:
+        def __init__(self, target, args=(), daemon=None, name=None):
+            self.target = target
+            self.args = args
+            self.daemon = daemon
+            self.name = name
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(
+        process_routes.file_service,
+        "get_file_info",
+        lambda task_id: task_info if task_id == "task-1" else None,
+    )
+    monkeypatch.setattr(process_routes.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        process_routes.processing_service,
+        "retry_readwise_with_local_content",
+        lambda task_id: called.setdefault("task_id", task_id),
+    )
+
+    response = client.post(
+        "/process/status/task-1/force-local-readwise",
+        headers={"Accept": "application/json"},
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 202
+    assert payload["success"] is True
+    assert payload["status"] == "processing"
+    assert called["task_id"] == "task-1"
+
+
 def test_confirm_language_endpoint_updates_pending_task(monkeypatch):
     client = _build_process_test_client()
     task_info = {
