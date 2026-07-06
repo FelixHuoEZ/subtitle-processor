@@ -141,42 +141,6 @@ def test_zh_locale_foreign_spoken_prefers_url_only_for_readwise(monkeypatch):
     assert decision["skip_processing"] is False
 
 
-def test_zh_locale_foreign_spoken_uses_full_text_without_reader_subtitles(monkeypatch):
-    service = build_service(monkeypatch)
-    info = {
-        "title": "再次改良英语：这能行吗？",
-        "channel": "英语兔",
-        "uploader": "英语兔",
-        "subtitles": {},
-        "automatic_captions": {},
-    }
-    track_catalog = service._build_track_catalog(info)
-    language_details = service.get_video_language_details(
-        info,
-        subtitle_result={
-            "content": (
-                "The European Commission has just announced an agreement whereby "
-                "English will be the official language of the EU. "
-            )
-            * 5,
-            "track_type": "asr_original",
-        },
-    )
-    content_locale_details = service.get_content_locale_details(
-        info, language_details=language_details
-    )
-
-    decision = service._build_readwise_decision(
-        track_catalog, language_details, content_locale_details
-    )
-
-    assert content_locale_details["language"] == "zh"
-    assert language_details["language"] == "en"
-    assert decision["mode"] == "full_text"
-    assert decision["reason"] == "reader_subtitle_unavailable_requires_local_text"
-    assert decision["skip_processing"] is False
-
-
 def test_regression_case_manifest_contains_approved_youtube_url():
     regression_cases = load_regression_cases()
     case = next(

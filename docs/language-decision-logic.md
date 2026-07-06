@@ -282,15 +282,12 @@ flowchart TD
 
 ### 8.1 强开关
 
-`READWISE_URL_ONLY_WHEN_ZH_SUBS` 默认关闭。显式设置为 `true` 后，如果存在“原始中文字幕轨”，且视频 URL 对 Readwise Reader 可公开访问：
+如果 `READWISE_URL_ONLY_WHEN_ZH_SUBS=true`，并且存在“原始中文字幕轨”，且视频 URL 对 Readwise Reader 可公开访问：
 
 - 直接判为 `url_only`
 - `_should_clip_url_only()` 还会让流程在更早阶段直接跳过字幕下载和转录
 
-默认关闭这个强开关，是因为 Readwise Reader 有时会在 yt-dlp 能看到字幕时仍无法提取 YouTube 字幕；
-更稳妥的默认行为是下载字幕或本地转录后发送正文。如果视频元数据表明它是会员、私有、需登录或年龄限制内容，
-即使存在中文字幕轨，也不会走 URL-only；因为 Readwise Reader 不能复用本服务配置的 YouTube cookies，
-这类视频需要保留在本地字幕/转录路径里处理。
+如果视频元数据表明它是会员、私有、需登录或年龄限制内容，即使存在中文字幕轨，也不会走 URL-only；因为 Readwise Reader 不能复用本服务配置的 YouTube cookies，这类视频需要保留在本地字幕/转录路径里处理。
 
 ### 8.2 其他 `url_only` 条件
 
@@ -305,10 +302,6 @@ flowchart TD
 - `zh_locale_foreign_spoken`
 - `zh_locale_mixed_spoken`
 - `low_confidence_conflict`
-
-这些“内容语境”触发的 URL-only 还要求 YouTube 元数据里存在可用的原始字幕轨。若没有可用字幕轨，
-系统会保留本地转录/字幕正文并使用 `full_text`，避免 Readwise Reader 只拿到原始 YouTube URL 后显示
-“Youtube does not provide subtitles”。
 
 ### 8.3 Telegram 低置信度人工确认
 
