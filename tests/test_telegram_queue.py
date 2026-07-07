@@ -1,4 +1,5 @@
 import importlib.util
+import time
 from pathlib import Path
 
 
@@ -122,3 +123,39 @@ def test_register_active_task_records_metadata():
     assert tasks[0]["location"] == "archive"
     assert tasks[0]["tags"] == ["t1"]
     assert tasks[0]["hotwords"] == ["h1", "h2"]
+
+
+def test_healthcheck_tolerates_single_heartbeat_failure(monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(telegram_app, "last_activity", now)
+    monkeypatch.setattr(telegram_app, "is_bot_healthy", True)
+    monkeypatch.setattr(telegram_app, "last_heartbeat_ok", False)
+    monkeypatch.setattr(telegram_app, "last_heartbeat_at", now - 90)
+    monkeypatch.setattr(telegram_app, "consecutive_heartbeat_failures", 1)
+    monkeypatch.setattr(telegram_app, "heartbeat_unhealthy_since", 0.0)
+
+    response = telegram_app.health_app.test_client().get("/health?deep=1")
+
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "healthy"
+
+
+def test_healthcheck_reports_sustained_heartbeat_failure(monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(telegram_app, "last_activity", now)
+    monkeypatch.setattr(telegram_app, "is_bot_healthy", False)
+    monkeypatch.setattr(telegram_app, "last_heartbeat_ok", False)
+    monkeypatch.setattr(telegram_app, "last_heartbeat_at", now - 90)
+    monkeypatch.setattr(
+        telegram_app,
+        "consecutive_heartbeat_failures",
+        telegram_app.TELEGRAM_HEARTBEAT_FAILURE_THRESHOLD,
+    )
+    monkeypatch.setattr(telegram_app, "heartbeat_unhealthy_since", now - 30)
+
+    response = telegram_app.health_app.test_client().get("/health?deep=1")
+
+    payload = response.get_json()
+    assert response.status_code == 503
+    assert payload["status"] == "unhealthy"
+    assert "heartbeat_failed" in payload["reasons"]

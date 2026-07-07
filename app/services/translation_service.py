@@ -7,6 +7,7 @@ import random
 import requests
 from typing import Dict, Any, Optional, List
 from ..config.config_manager import get_config_value
+from ..utils.logging_utils import summarize_text
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,7 @@ class TranslationService:
                 return None
             
             logger.info(f"翻译文本: {source_lang} -> {target_lang}")
-            logger.debug(f"原文: {text[:100]}...")
+            logger.debug("原文摘要: %s", summarize_text(text, 100))
             
             # 检查文本长度，决定是否分块翻译
             if len(text) > self.max_chunk_length:
@@ -227,7 +228,7 @@ class TranslationService:
                 result = response.json()
                 if 'data' in result and result['data']:
                     translated_text = result['data']
-                    logger.debug(f"DeepLX翻译结果: {translated_text[:100]}...")
+                    logger.debug("DeepLX翻译结果摘要: %s", summarize_text(translated_text, 100))
                     return translated_text
                 else:
                     logger.warning("DeepLX返回结果为空")
@@ -270,7 +271,7 @@ class TranslationService:
                 result = response.json()
                 if 'translations' in result and result['translations']:
                     translated_text = result['translations'][0]['text']
-                    logger.debug(f"DeepL API翻译结果: {translated_text[:100]}...")
+                    logger.debug("DeepL API翻译结果摘要: %s", summarize_text(translated_text, 100))
                     return translated_text
                 else:
                     logger.warning("DeepL API返回结果为空")
@@ -323,7 +324,7 @@ class TranslationService:
             
             if response.choices and response.choices[0].message:
                 translated_text = response.choices[0].message.content.strip()
-                logger.debug(f"OpenAI翻译结果: {translated_text[:100]}...")
+                logger.debug("OpenAI翻译结果摘要: %s", summarize_text(translated_text, 100))
                 return translated_text
             else:
                 logger.warning("OpenAI返回结果为空")

@@ -1,5 +1,6 @@
 """Video processing service for handling multiple video platforms."""
 
+import hashlib
 import json
 import logging
 import os
@@ -89,6 +90,19 @@ class VideoService:
         self.readwise_url_only_when_zh_subs = self._parse_bool_env(
             "READWISE_URL_ONLY_WHEN_ZH_SUBS", False
         )
+        self.asset_cache_enabled = self._parse_bool_env(
+            "DOWNLOAD_ASSET_CACHE_ENABLED", False
+        )
+        self.asset_cache_dir = os.getenv("DOWNLOAD_ASSET_CACHE_DIR") or os.path.join(
+            get_config_value("app.upload_folder", "/app/uploads"), "cache", "media"
+        )
+        self.asset_cache_ttl_days = self._parse_int_env(
+            "DOWNLOAD_ASSET_CACHE_TTL_DAYS", 30, minimum=0
+        )
+        self.asset_cache_store_source = self._parse_bool_env(
+            "DOWNLOAD_ASSET_CACHE_STORE_SOURCE", True
+        )
+        self._asset_cache_lock = threading.RLock()
         logger.info("下载并发限制: %s", self.download_concurrency)
         logger.info(
             "下载403重试参数: max=%s, base=%.1fs, backoff=%.2f, max_delay=%.1fs",
@@ -102,6 +116,13 @@ class VideoService:
         )
         logger.info(
             "Readwise URL剪藏开关(中文字幕): %s", self.readwise_url_only_when_zh_subs
+        )
+        logger.info(
+            "下载资产缓存: enabled=%s dir=%s ttl_days=%s store_source=%s",
+            self.asset_cache_enabled,
+            self.asset_cache_dir,
+            self.asset_cache_ttl_days,
+            self.asset_cache_store_source,
         )
         self._log_js_runtime_status()
 
@@ -154,6 +175,21 @@ class VideoService:
         if raw is None:
             return default
         return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    @staticmethod
+    def _parse_int_env(key: str, default: int, minimum: Optional[int] = None) -> int:
+        raw = os.getenv(key)
+        if raw is None or not str(raw).strip():
+            value = default
+        else:
+            try:
+                value = int(raw)
+            except ValueError:
+                logger.warning("%s 设置 %s 无效，使用默认值 %s", key, raw, default)
+                value = default
+        if minimum is not None:
+            value = max(minimum, value)
+        return value
 
     @staticmethod
     def _extract_languages(raw_value: Any) -> List[str]:
@@ -1527,6 +1563,230 @@ class VideoService:
 
         self._cleanup_task_temp_dir(temp_dir)
 
+    def _asset_cache_index_path(self) -> str:
+        return os.path.join(self.asset_cache_dir, "index.json")
+
+    def _load_asset_cache_index(self) -> Dict[str, Any]:
+        index_path = self._asset_cache_index_path()
+        if not os.path.exists(index_path):
+            return {}
+        try:
+            with open(index_path, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            if isinstance(data, dict):
+                return data
+            logger.warning("下载资产缓存索引格式无效，将忽略: %s", index_path)
+        except Exception as exc:
+            logger.warning("读取下载资产缓存索引失败，将忽略: %s", exc)
+        return {}
+
+    def _save_asset_cache_index(self, index: Dict[str, Any]) -> None:
+        os.makedirs(self.asset_cache_dir, exist_ok=True)
+        index_path = self._asset_cache_index_path()
+        fd, temp_path = tempfile.mkstemp(
+            dir=self.asset_cache_dir, prefix="index_", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fp:
+                json.dump(index, fp, ensure_ascii=False, indent=2, sort_keys=True)
+                fp.flush()
+                os.fsync(fp.fileno())
+            os.replace(temp_path, index_path)
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _extract_platform_video_id(url: str, platform: Optional[str]) -> Optional[str]:
+        resolved_platform = platform or "youtube"
+        if resolved_platform == "youtube":
+            return extract_youtube_video_id(url)
+        if resolved_platform == "bilibili":
+            match = re.search(r"/video/(BV[a-zA-Z0-9]+|av\d+)", url)
+            return match.group(1) if match else None
+        if resolved_platform == "acfun":
+            match = re.search(r"/v/ac(\d+)", url)
+            return f"ac{match.group(1)}" if match else None
+        return None
+
+    def _build_asset_cache_identity(
+        self,
+        url: str,
+        platform: Optional[str],
+        video_id: Optional[str] = None,
+    ) -> Dict[str, str]:
+        resolved_platform = platform or "youtube"
+        normalized_url = url
+        resolved_video_id = video_id
+        if resolved_platform == "youtube":
+            normalized_url = self._normalize_youtube_watch_url(url) or url
+            resolved_video_id = (
+                resolved_video_id
+                or extract_youtube_video_id(normalized_url)
+                or extract_youtube_video_id(url)
+            )
+        else:
+            resolved_video_id = resolved_video_id or self._extract_platform_video_id(
+                url, resolved_platform
+            )
+
+        key_source = f"{resolved_platform}:{resolved_video_id or normalized_url}"
+        cache_key = hashlib.sha256(key_source.encode("utf-8")).hexdigest()[:24]
+        return {
+            "cache_key": cache_key,
+            "platform": resolved_platform,
+            "video_id": resolved_video_id or "",
+            "normalized_url": normalized_url,
+        }
+
+    def _is_asset_cache_entry_expired(self, entry: Dict[str, Any]) -> bool:
+        if self.asset_cache_ttl_days <= 0:
+            return False
+        created_at = entry.get("created_at_epoch")
+        if not isinstance(created_at, (int, float)):
+            return False
+        return (time.time() - float(created_at)) > (
+            self.asset_cache_ttl_days * 24 * 60 * 60
+        )
+
+    def _is_safe_asset_cache_path(self, path: str) -> bool:
+        try:
+            cache_root = os.path.realpath(self.asset_cache_dir)
+            target = os.path.realpath(path)
+            return os.path.commonpath([cache_root, target]) == cache_root
+        except Exception:
+            return False
+
+    def _validate_cached_audio_path(self, audio_path: Optional[str]) -> bool:
+        if not audio_path or not self._is_safe_asset_cache_path(audio_path):
+            return False
+        try:
+            return os.path.isfile(audio_path) and os.path.getsize(audio_path) > 0
+        except OSError:
+            return False
+
+    def _get_cached_download_asset(
+        self,
+        url: str,
+        platform: Optional[str],
+        video_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not self.asset_cache_enabled:
+            return None
+
+        identity = self._build_asset_cache_identity(url, platform, video_id)
+        cache_key = identity["cache_key"]
+        with self._asset_cache_lock:
+            index = self._load_asset_cache_index()
+            entry = index.get(cache_key)
+            if not isinstance(entry, dict):
+                logger.debug("下载资产缓存未命中: %s", cache_key)
+                return None
+            if self._is_asset_cache_entry_expired(entry):
+                logger.info("下载资产缓存已过期，将重新下载: %s", cache_key)
+                return None
+
+            audio_path = entry.get("audio_path")
+            if not self._validate_cached_audio_path(audio_path):
+                logger.warning("下载资产缓存无效，将重新下载: %s", cache_key)
+                return None
+
+            entry["last_used_at"] = datetime.now().isoformat()
+            entry["last_used_at_epoch"] = time.time()
+            entry["hit_count"] = int(entry.get("hit_count") or 0) + 1
+            index[cache_key] = entry
+            self._save_asset_cache_index(index)
+
+        logger.info("下载资产缓存命中: %s -> %s", cache_key, audio_path)
+        return {
+            "audio_file": audio_path,
+            "temp_dir": None,
+            "error": None,
+            "cache_hit": True,
+            "cache_key": cache_key,
+            "download_asset_cache": entry,
+        }
+
+    @staticmethod
+    def _copy_asset_file(src: str, dst: str) -> None:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        temp_dst = f"{dst}.tmp-{os.getpid()}-{threading.get_ident()}"
+        try:
+            shutil.copy2(src, temp_dst)
+            os.replace(temp_dst, dst)
+        finally:
+            if os.path.exists(temp_dst):
+                try:
+                    os.unlink(temp_dst)
+                except OSError:
+                    pass
+
+    def _store_download_asset(
+        self,
+        url: str,
+        platform: Optional[str],
+        audio_file: str,
+        source_media_file: Optional[str],
+        video_id: Optional[str] = None,
+        used_cookie_auth: bool = False,
+    ) -> Optional[str]:
+        if not self.asset_cache_enabled or not audio_file:
+            return None
+        if not os.path.isfile(audio_file) or os.path.getsize(audio_file) <= 0:
+            return None
+
+        identity = self._build_asset_cache_identity(url, platform, video_id)
+        cache_key = identity["cache_key"]
+        cache_dir = os.path.join(self.asset_cache_dir, cache_key)
+        safe_stem = sanitize_filename(identity.get("video_id") or cache_key) or cache_key
+        audio_ext = os.path.splitext(audio_file)[1] or ".wav"
+        cached_audio_path = os.path.join(cache_dir, f"{safe_stem}.audio{audio_ext}")
+
+        try:
+            self._copy_asset_file(audio_file, cached_audio_path)
+            cached_source_path = None
+            if (
+                self.asset_cache_store_source
+                and source_media_file
+                and os.path.isfile(source_media_file)
+                and os.path.realpath(source_media_file) != os.path.realpath(audio_file)
+            ):
+                source_ext = os.path.splitext(source_media_file)[1] or ".media"
+                cached_source_path = os.path.join(
+                    cache_dir, f"{safe_stem}.source{source_ext}"
+                )
+                self._copy_asset_file(source_media_file, cached_source_path)
+
+            now = time.time()
+            entry = {
+                **identity,
+                "audio_path": cached_audio_path,
+                "source_media_path": cached_source_path,
+                "audio_size": os.path.getsize(cached_audio_path),
+                "source_media_size": (
+                    os.path.getsize(cached_source_path) if cached_source_path else None
+                ),
+                "created_at": datetime.now().isoformat(),
+                "created_at_epoch": now,
+                "last_used_at": datetime.now().isoformat(),
+                "last_used_at_epoch": now,
+                "hit_count": 0,
+                "ttl_days": self.asset_cache_ttl_days,
+                "cookie_required": bool(used_cookie_auth),
+            }
+            with self._asset_cache_lock:
+                index = self._load_asset_cache_index()
+                index[cache_key] = entry
+                self._save_asset_cache_index(index)
+            logger.info("下载资产已写入缓存: %s -> %s", cache_key, cached_audio_path)
+            return cached_audio_path
+        except Exception as exc:
+            logger.warning("写入下载资产缓存失败，将继续使用临时文件: %s", exc)
+            return None
+
     @staticmethod
     def _safe_float(value: Any) -> float:
         try:
@@ -1681,7 +1941,7 @@ class VideoService:
         url: str,
         output_folder: Optional[str] = None,
         platform: Optional[str] = None,
-    ) -> Optional[Dict[str, str]]:
+    ) -> Optional[Dict[str, Any]]:
         """下载视频并提取音频
 
         Args:
@@ -1692,6 +1952,11 @@ class VideoService:
         Returns:
             dict: 成功时返回音频文件路径和临时目录，失败返回None
         """
+        resolved_platform = platform or "youtube"
+        cached_asset = self._get_cached_download_asset(url, resolved_platform)
+        if cached_asset:
+            return cached_asset
+
         semaphore = self._download_semaphore
         if semaphore:
             logger.info(
@@ -1703,7 +1968,6 @@ class VideoService:
         try:
             temp_dir = self._prepare_task_temp_dir(output_folder)
             logger.info(f"开始下载视频: {url}")
-            resolved_platform = platform or "youtube"
             download_profiles = self._build_download_option_profiles(
                 temp_dir, resolved_platform, url
             )
@@ -1916,11 +2180,23 @@ class VideoService:
                     "error": "音频格式转换失败，无法生成可转录的 WAV 文件",
                 }
 
+            cached_audio_file = self._store_download_asset(
+                url=url,
+                platform=resolved_platform,
+                audio_file=audio_file,
+                source_media_file=downloaded_file,
+                video_id=expected_video_id,
+                used_cookie_auth=used_cookie_auth,
+            )
+            if cached_audio_file:
+                audio_file = cached_audio_file
+
             should_cleanup_temp_dir = False
             return {
                 "audio_file": audio_file,
                 "temp_dir": temp_dir,
                 "error": None,
+                "cache_hit": False,
             }
 
         except Exception as e:
@@ -2720,6 +2996,8 @@ class VideoService:
         audio_file = None
         temp_dir = None
         download_error = None
+        download_cache_hit = False
+        download_cache_key = None
         audio_probe = None
         if not subtitle_content:
             logger.info("未找到字幕，开始下载音频用于转录")
@@ -2728,6 +3006,8 @@ class VideoService:
                 audio_file = download_result.get("audio_file")
                 temp_dir = download_result.get("temp_dir")
                 download_error = download_result.get("error")
+                download_cache_hit = bool(download_result.get("cache_hit"))
+                download_cache_key = download_result.get("cache_key")
             else:
                 audio_file = download_result
                 temp_dir = os.path.dirname(audio_file) if audio_file else None
@@ -2765,6 +3045,8 @@ class VideoService:
             "audio_probe": audio_probe,
             "temp_dir": temp_dir,
             "download_error": download_error,
+            "download_asset_cache_hit": download_cache_hit,
+            "download_asset_cache_key": download_cache_key,
             "needs_transcription": subtitle_content is None,
             "readwise_mode": readwise_decision.get("mode"),
             "readwise_reason": readwise_decision.get("reason"),

@@ -94,6 +94,12 @@ class ProcessingService:
                 task_info["subtitle_content"] = result.get("subtitle_content")
                 task_info["subtitle_metadata"] = result.get("subtitle_metadata")
                 task_info["audio_file"] = result.get("audio_file")
+                task_info["download_asset_cache_hit"] = result.get(
+                    "download_asset_cache_hit", False
+                )
+                task_info["download_asset_cache_key"] = result.get(
+                    "download_asset_cache_key"
+                )
                 task_temp_dir = result.get("temp_dir")
                 task_info["needs_transcription"] = result.get(
                     "needs_transcription", False
@@ -551,6 +557,10 @@ class ProcessingService:
         task_info["subtitle_content"] = result.get("subtitle_content")
         task_info["subtitle_metadata"] = result.get("subtitle_metadata")
         task_info["audio_file"] = result.get("audio_file")
+        task_info["download_asset_cache_hit"] = result.get(
+            "download_asset_cache_hit", False
+        )
+        task_info["download_asset_cache_key"] = result.get("download_asset_cache_key")
         task_info["needs_transcription"] = result.get("needs_transcription", False)
         task_info["readwise_mode"] = result.get("readwise_mode")
         task_info["readwise_reason"] = result.get("readwise_reason")

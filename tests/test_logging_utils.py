@@ -11,9 +11,14 @@ def test_summarize_text_truncates_long_content(monkeypatch):
 
     summary = summarize_text(text, limit=20)
 
-    assert "len=250" in summary
-    assert "x" * 20 in summary
-    assert "x" * 40 not in summary
+    assert summary == "len=250"
+
+    monkeypatch.setenv("DEBUG_CONTENT_LOGGING", "true")
+    debug_summary = summarize_text(text, limit=20)
+
+    assert "len=250" in debug_summary
+    assert "x" * 20 in debug_summary
+    assert "x" * 40 not in debug_summary
 
 
 def test_summarize_payload_uses_full_content_only_when_enabled(monkeypatch):
@@ -23,7 +28,7 @@ def test_summarize_payload_uses_full_content_only_when_enabled(monkeypatch):
     summary = summarize_payload(payload, limit=12)
 
     assert "type=dict" in summary
-    assert "abcdefabcdef" in summary
+    assert "text=len=300" in summary
     assert "abcdef" * 10 not in summary
 
     monkeypatch.setenv("DEBUG_CONTENT_LOGGING", "true")

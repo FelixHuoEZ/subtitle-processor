@@ -277,7 +277,7 @@ class ReadwiseService:
 
             if not subtitle_content:
                 logger.error("❌ 数据验证失败：subtitle_content为空或None")
-                logger.error(f"subtitle_content值: {repr(subtitle_content)}")
+                logger.error("subtitle_content摘要: %s", summarize_text(subtitle_content))
                 logger.error(f"subtitle_data.keys(): {list(subtitle_data.keys())}")
                 return None
 
@@ -523,7 +523,11 @@ class ReadwiseService:
                 # 找出哪一部分包含时间戳
                 for i, part in enumerate(content_parts):
                     if "-->" in part:
-                        logger.error(f"时间戳来源于content_parts[{i}]: {part[:100]}...")
+                        logger.error(
+                            "时间戳来源于content_parts[%s]: %s",
+                            i,
+                            summarize_text(part, 100),
+                        )
             else:
                 logger.info("✅ 最终格式化内容不含时间戳")
 

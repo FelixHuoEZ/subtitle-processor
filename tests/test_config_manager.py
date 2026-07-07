@@ -71,3 +71,31 @@ def test_config_manager_redacts_sensitive_values_in_logs(tmp_path, monkeypatch, 
     assert "sk-real-secret-value" not in logs
     assert "<redacted len=20>" in logs
     assert "https://api.openai.com/v1" in logs
+
+
+def test_config_manager_downgrades_defaulted_missing_paths(tmp_path, caplog):
+    config_path = tmp_path / "config.yml"
+    config_path.write_text("app:\n  name: subtitle-processor\n", encoding="utf-8")
+
+    manager = ConfigManager(str(config_path))
+
+    with caplog.at_level(logging.WARNING):
+        assert manager.get_config_value("translation.min_chunk_size", 1600) == 1600
+        assert manager.get_config_value("cookies") is None
+
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "translation.min_chunk_size" not in logs
+    assert "cookies" not in logs
+
+
+def test_config_manager_warns_for_required_missing_path(tmp_path, caplog):
+    config_path = tmp_path / "config.yml"
+    config_path.write_text("app:\n  name: subtitle-processor\n", encoding="utf-8")
+
+    manager = ConfigManager(str(config_path))
+
+    with caplog.at_level(logging.WARNING):
+        assert manager.get_config_value("tokens.telegram") is None
+
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "tokens" in logs

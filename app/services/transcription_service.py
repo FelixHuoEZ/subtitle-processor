@@ -332,16 +332,14 @@ class TranscriptionService:
                 final_hotwords = list(dict.fromkeys(final_hotwords))[:max_hotword_count]
 
                 logger.info(
-                    "智能生成热词模式=%s，候选数量=%d，最终使用=%s",
+                    "智能生成热词模式=%s，候选数量=%d，最终热词数量=%d",
                     effective_mode,
                     len(generated_candidates),
-                    final_hotwords,
+                    len(final_hotwords),
                 )
 
-            # 【关键日志】记录最终使用的热词
-            logger.warning(
-                f"🔥 TranscriptionService最终使用热词 ({len(final_hotwords)}个): {final_hotwords}"
-            )
+            logger.info("TranscriptionService最终使用热词数量: %s", len(final_hotwords))
+            logger.debug("TranscriptionService最终热词已准备完成")
 
             # 首先尝试FunASR转录
             result = self._transcribe_with_funasr(audio_file, final_hotwords)
@@ -399,18 +397,14 @@ class TranscriptionService:
                     "hotwords": hotword_str,
                 }
 
-                # 【关键日志】记录发送给FunASR的热词
                 if hotwords:
-                    logger.warning(
-                        f"🔥 发送给FunASR的热词 ({len(hotwords)}个): {hotwords}"
-                    )
-                    logger.warning(f"🔥 热词字符串格式: '{hotword_str}'")
+                    logger.info("发送给FunASR的热词数量: %s", len(hotwords))
                 else:
-                    logger.warning("🔥 没有热词发送给FunASR")
+                    logger.debug("没有热词发送给FunASR")
 
                 # 发送转录请求
                 url = f"{server_url.rstrip('/')}/recognize"
-                logger.warning(f"🔥 发送FunASR请求到: {url}")
+                logger.info("发送FunASR请求到: %s", url)
                 request_timeout = max(1, int(timeout or self.transcribe_timeout_min))
                 logger.info(f"FunASR请求超时设置: {request_timeout}s")
                 response = requests.post(
@@ -1086,7 +1080,7 @@ class TranscriptionService:
             if "text" in result:
                 text_content = result.get("text", "")
                 timestamp_info = result.get("timestamp", [])
-                logger.info(f"从直接text字段获取文本: {text_content[:100]}...")
+                logger.info("从直接text字段获取文本，长度: %s", len(text_content or ""))
             elif "result" in result:
                 # 标准FunASR结果格式（旧格式）
                 asr_result = result["result"]
@@ -1104,7 +1098,7 @@ class TranscriptionService:
                         timestamp_info = first_result.get("timestamp", [])
                     else:
                         text_content = str(first_result)
-                logger.info(f"从result字段获取文本: {text_content[:100]}...")
+                logger.info("从result字段获取文本，长度: %s", len(text_content or ""))
             else:
                 logger.warning(
                     f"未找到text或result字段，可用字段: {list(result.keys())}"
@@ -1132,7 +1126,7 @@ class TranscriptionService:
                 "source": "funasr",
             }
 
-            logger.debug(f"解析后的结果: {parsed_result}")
+            logger.debug("解析后的结果摘要: %s", summarize_payload(parsed_result))
             return parsed_result
 
         except Exception as e:

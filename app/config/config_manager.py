@@ -19,6 +19,10 @@ class ConfigManager:
         "cookie",
         "authorization",
     )
+    _OPTIONAL_MISSING_PATHS = {
+        "cookies",
+        "servers.video_domain",
+    }
     
     def __init__(self, config_path=None):
         """Initialize the configuration manager."""
@@ -114,7 +118,10 @@ class ConfigManager:
         """从配置中获取值，支持点号分隔的路径，如 'tokens.openai.api_key'"""
         try:
             if not self.config:
-                logger.warning("配置对象为空")
+                if default is None:
+                    logger.warning("配置对象为空")
+                else:
+                    logger.debug("配置对象为空，使用默认值: %s", key_path)
                 return default
                 
             value = self.config
@@ -140,8 +147,13 @@ class ConfigManager:
                     return default
                 if key not in value:
                     missing_path = ".".join(keys[: i + 1])
-                    logger.warning(
-                        "配置文件 %s 中未找到路径 '%s'，请确认 config.yml 是否包含该字段或更新环境变量。",
+                    log_method = (
+                        logger.debug
+                        if default is not None or self._is_optional_missing_path(key_path)
+                        else logger.warning
+                    )
+                    log_method(
+                        "配置文件 %s 中未找到路径 '%s'，使用默认值。",
                         self.config_path,
                         missing_path,
                     )
@@ -184,6 +196,11 @@ class ConfigManager:
             return False
         segments = str(key_path).replace("-", ".").split(".")
         return any(cls._is_sensitive_segment(segment) for segment in segments)
+
+    @classmethod
+    def _is_optional_missing_path(cls, key_path):
+        normalized = str(key_path or "").strip()
+        return normalized in cls._OPTIONAL_MISSING_PATHS
 
     @classmethod
     def _redact_value(cls, value):

@@ -34,7 +34,8 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - FLASK_APP=run_app.py
-      - FLASK_ENV=development
+      - FLASK_ENV=production
+      - FLASK_DEBUG=${FLASK_DEBUG:-false}
       - STORAGE_BACKEND=redis
       - REDIS_URL=redis://redis:6379/0
       - REDIS_KEY_PREFIX=subtitle_processor
@@ -65,6 +66,10 @@ services:
       - DOWNLOAD_RETRY_BASE_DELAY=${DOWNLOAD_RETRY_BASE_DELAY:-2}
       - DOWNLOAD_RETRY_BACKOFF=${DOWNLOAD_RETRY_BACKOFF:-2}
       - DOWNLOAD_RETRY_MAX_DELAY=${DOWNLOAD_RETRY_MAX_DELAY:-30}
+      - DOWNLOAD_ASSET_CACHE_ENABLED=${DOWNLOAD_ASSET_CACHE_ENABLED:-false}
+      - DOWNLOAD_ASSET_CACHE_DIR=${DOWNLOAD_ASSET_CACHE_DIR:-/app/uploads/cache/media}
+      - DOWNLOAD_ASSET_CACHE_TTL_DAYS=${DOWNLOAD_ASSET_CACHE_TTL_DAYS:-30}
+      - DOWNLOAD_ASSET_CACHE_STORE_SOURCE=${DOWNLOAD_ASSET_CACHE_STORE_SOURCE:-true}
       - READWISE_URL_ONLY_WHEN_ZH_SUBS=${READWISE_URL_ONLY_WHEN_ZH_SUBS:-true}
       - READWISE_AUTO_FALLBACK_ON_PARSE_FAILED=${READWISE_AUTO_FALLBACK_ON_PARSE_FAILED:-true}
 
@@ -108,7 +113,7 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - FLASK_APP=app.py
-      - FLASK_ENV=development
+      - FLASK_ENV=production
       - MODEL_DIR=/app/runtime-models
       - MODELSCOPE_CACHE=/app/runtime-models
       - HF_HOME=/app/runtime-models
@@ -169,7 +174,7 @@ services:
       dockerfile: Dockerfile
     image: ${TELEGRAM_BOT_IMAGE:-telegram-bot:latest}
     container_name: telegram-bot
-    restart: always # 改为always，确保任何情况下都重启
+    restart: unless-stopped
     ports:
       - "8082:8082" # Webhook 监听端口（启用 Webhook 时需要）
     environment:

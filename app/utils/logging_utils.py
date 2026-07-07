@@ -20,7 +20,9 @@ def preview_text(value: Any, limit: int = 200) -> str:
 
 def summarize_text(value: Any, limit: int = 200) -> str:
     text = "" if value is None else str(value)
-    return f"len={len(text)} preview={preview_text(text, limit)!r}"
+    if content_logging_enabled():
+        return f"len={len(text)} preview={preview_text(text, limit)!r}"
+    return f"len={len(text)}"
 
 
 def summarize_payload(value: Any, limit: int = 200) -> str:

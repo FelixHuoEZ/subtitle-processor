@@ -42,12 +42,13 @@ def create_app(config_path=None):
     log_level = _resolve_log_level()
     root_logger.setLevel(log_level)
     
-    # 创建控制台处理器确保所有日志都输出到控制台
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(log_level)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    console_handler.setFormatter(formatter)
-    root_logger.addHandler(console_handler)
+    if not any(getattr(handler, "_subtitle_console_handler", False) for handler in root_logger.handlers):
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(log_level)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        console_handler.setFormatter(formatter)
+        console_handler._subtitle_console_handler = True
+        root_logger.addHandler(console_handler)
     
     logger.info("启动字幕处理服务应用")
     

@@ -69,7 +69,7 @@ class SubtitleService:
                         logger.info("文本内容摘要: %s", summarize_text(text_content))
                     else:
                         logger.error(f"text字段不是字符串类型: {type(result['text'])}")
-                        logger.error(f"text字段值: {result['text']}")
+                        logger.error("text字段摘要: %s", summarize_text(result['text']))
                         return None
                 else:
                     logger.error(f"结果中没有text字段，可用字段: {list(result.keys())}")
@@ -94,9 +94,9 @@ class SubtitleService:
             # 如果没有文本内容，无法生成字幕
             if not text_content:
                 logger.error("无法获取有效的文本内容")
-                logger.error(f"text_content值: {repr(text_content)}")
+                logger.error("text_content摘要: %s", summarize_text(text_content))
                 logger.error(f"原始result类型: {type(result)}")
-                logger.error(f"原始result内容: {result}")
+                logger.error("原始result摘要: %s", summarize_payload(result))
                 return None
             
             # 清理文本内容
@@ -105,7 +105,7 @@ class SubtitleService:
             logger.info(f"清理后文本内容长度: {len(text_content)}")
             if not text_content:
                 logger.error("清理后文本内容为空")
-                logger.error(f"清理后text_content值: {repr(text_content)}")
+                logger.error("清理后text_content摘要: %s", summarize_text(text_content))
                 return None
             
             # 生成SRT格式

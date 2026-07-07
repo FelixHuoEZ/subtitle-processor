@@ -15,6 +15,7 @@ from pathlib import Path
 import shutil
 from datetime import datetime
 import errno
+from logging.handlers import RotatingFileHandler
 
 # FunASR 模型列表
 FUNASR_MODELS = [
@@ -48,9 +49,27 @@ MODEL_MAPPINGS = {
     },
 }
 
+def _env_bool(name, default=False):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _resolve_log_level(name, default):
+    raw = os.getenv(name, "").strip().upper()
+    return getattr(logging, raw, default) if raw else default
+
+
+def _content_logging_enabled():
+    return _env_bool("DEBUG_CONTENT_LOGGING") or _env_bool("LOG_FULL_CONTENT")
+
+
 # 配置日志
+LOG_LEVEL = _resolve_log_level("LOG_LEVEL", logging.INFO)
+FILE_LOG_LEVEL = _resolve_log_level("LOG_FILE_LEVEL", LOG_LEVEL)
 logging.basicConfig(
-    level=logging.INFO,
+    level=LOG_LEVEL,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
     handlers=[
@@ -60,22 +79,29 @@ logging.basicConfig(
 
 # 创建logger
 logger = logging.getLogger("transcribe-audio")
-logger.setLevel(logging.DEBUG)
+logger.setLevel(LOG_LEVEL)
 
 # 日志文件输出
 log_dir = Path(os.getenv("LOG_DIR", "/app/logs"))
 log_dir.mkdir(parents=True, exist_ok=True)
 log_file = log_dir / os.getenv("LOG_FILE", "transcribe-audio.log")
-file_handler = logging.FileHandler(log_file, encoding="utf-8")
-file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(
-    logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+root_logger = logging.getLogger()
+if not any(getattr(handler, "_subtitle_log_file", None) == str(log_file) for handler in root_logger.handlers):
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=int(os.getenv("LOG_FILE_MAX_BYTES", str(10 * 1024 * 1024))),
+        backupCount=int(os.getenv("LOG_FILE_BACKUP_COUNT", "3")),
+        encoding="utf-8",
     )
-)
-logger.addHandler(file_handler)
-logging.getLogger().addHandler(file_handler)
+    file_handler.setLevel(FILE_LOG_LEVEL)
+    file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    file_handler._subtitle_log_file = str(log_file)
+    root_logger.addHandler(file_handler)
 logger.info("日志文件输出到 %s", log_file)
 
 # 确保其他库的日志级别不会太详细
@@ -710,19 +736,33 @@ def _convert_timestamp_value(value):
 
 
 def _summarize_recognition_result(result, limit=200):
+    include_content = _content_logging_enabled()
     if isinstance(result, list):
-        text_parts = []
+        text_lengths = []
+        previews = []
         for item in result[:3]:
             if isinstance(item, dict):
-                text_parts.append(str(item.get("text") or item.get("result") or "")[:limit])
+                text = str(item.get("text") or item.get("result") or "")
             else:
-                text_parts.append(str(item)[:limit])
-        return f"type=list items={len(result)} preview={text_parts}"
+                text = str(item)
+            text_lengths.append(len(text))
+            if include_content:
+                previews.append(text[:limit])
+        summary = f"type=list items={len(result)} text_lengths={text_lengths}"
+        if include_content:
+            summary = f"{summary} preview={previews}"
+        return summary
     if isinstance(result, dict):
         text = str(result.get("text") or result.get("result") or "")
-        return f"type=dict keys={list(result.keys())} text_len={len(text)} preview={text[:limit]!r}"
+        summary = f"type=dict keys={list(result.keys())} text_len={len(text)}"
+        if include_content:
+            summary = f"{summary} preview={text[:limit]!r}"
+        return summary
     text = "" if result is None else str(result)
-    return f"type={type(result).__name__} len={len(text)} preview={text[:limit]!r}"
+    summary = f"type={type(result).__name__} len={len(text)}"
+    if include_content:
+        summary = f"{summary} preview={text[:limit]!r}"
+    return summary
 
 
 def process_recognition_result(result):
@@ -859,13 +899,14 @@ def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000, hotwords=N
                     if hotwords:
                         # FunASR官方格式：直接使用hotword参数，空格分隔多个热词
                         hotword_string = ' '.join(hotwords)
-                        logger.warning(f"🔥 短音频使用热词: '{hotword_string}'")
+                        logger.info("短音频使用热词数量: %s", len(hotwords))
+                        logger.debug("短音频热词已传递给模型")
                         result = model.generate(
                             input=audio_data,
                             hotword=hotword_string
                         )
                     else:
-                        logger.warning("🔥 短音频调用 model.generate，无热词")
+                        logger.debug("短音频调用 model.generate，无热词")
                         result = model.generate(
                             input=audio_data
                         )
@@ -914,7 +955,11 @@ def process_audio_chunk(audio_data, sample_rate, chunk_size=30*16000, hotwords=N
                         kwargs = {}
                         if hotwords:
                             hotword_string = ' '.join(hotwords)
-                            logger.warning(f"🔥 长音频块{chunk_num}使用热词: '{hotword_string}'")
+                            logger.info(
+                                "长音频块%s使用热词数量: %s",
+                                chunk_num,
+                                len(hotwords),
+                            )
                             kwargs['hotword'] = hotword_string
                         if not MODEL_SUPPORTS_TIMESTAMP:
                             kwargs['sentence_timestamp'] = False
@@ -972,14 +1017,14 @@ def recognize_audio():
         
         # 获取热词参数
         hotwords_raw = request.form.get('hotwords', '')
-        logger.warning(f"🔥 FunASR接收到原始热词字符串: '{hotwords_raw}'")
+        logger.debug("FunASR接收到热词参数长度: %s", len(hotwords_raw))
         
         if hotwords_raw:
             hotwords = [word.strip() for word in hotwords_raw.split(',') if word.strip()]
-            logger.warning(f"🔥 FunASR解析后的热词列表 ({len(hotwords)}个): {hotwords}")
+            logger.info("FunASR解析后的热词数量: %s", len(hotwords))
         else:
             hotwords = []
-            logger.warning("🔥 FunASR没有接收到热词参数")
+            logger.debug("FunASR没有接收到热词参数")
         
         # 保存上传的音频文件
         orig_audio_path = os.path.join(app.config['UPLOAD_FOLDER'], 'temp_audio_orig')
@@ -1037,7 +1082,7 @@ def recognize_audio():
                 logger.info("当前模型不支持时间戳，跳过整体识别，直接进入分块流程")
 
             if not parsed_result or not parsed_result.get('text'):
-                logger.warning("整体识别结果为空，尝试分块处理")
+                logger.info("整体识别结果为空，尝试分块处理")
                 chunk_text = process_audio_chunk(
                     audio_data,
                     sample_rate,
@@ -1050,7 +1095,7 @@ def recognize_audio():
                         'raw_segments': []
                     }
                 elif MODEL_SUPPORTS_TIMESTAMP:
-                    logger.warning("分块识别仍为空，尝试无时间戳的整体识别")
+                    logger.info("分块识别仍为空，尝试无时间戳的整体识别")
                     try:
                         fallback_kwargs = generation_kwargs.copy()
                         fallback_kwargs.pop('sentence_timestamp', None)
@@ -1073,7 +1118,7 @@ def recognize_audio():
                             'raw_segments': []
                         }
                 else:
-                    logger.warning("分块识别仍为空，模型不支持时间戳，将返回空结果")
+                    logger.info("分块识别仍为空，模型不支持时间戳，将返回空结果")
                     parsed_result = {
                         'text': '',
                         'sentence_info': [],

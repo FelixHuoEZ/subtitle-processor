@@ -1,5 +1,7 @@
 import os
 import sys
+import json
+import time
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -414,6 +416,107 @@ def test_download_video_skips_youtube_probe_by_default(monkeypatch, tmp_path):
     assert result["audio_file"].endswith("test-video.m4a")
     assert extract_calls == []
     assert attempted_formats[:3] == [None, "bestaudio/best", "140"]
+
+
+def test_download_video_caches_audio_and_reuses(monkeypatch, tmp_path):
+    monkeypatch.setenv("DOWNLOAD_ASSET_CACHE_ENABLED", "true")
+    monkeypatch.setenv("DOWNLOAD_ASSET_CACHE_DIR", str(tmp_path / "asset-cache"))
+    monkeypatch.setenv("DOWNLOAD_ASSET_CACHE_TTL_DAYS", "30")
+    monkeypatch.setenv("DOWNLOAD_ASSET_CACHE_STORE_SOURCE", "true")
+
+    service = VideoService()
+    download_calls = []
+
+    class DummyYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            download_calls.append(list(urls))
+            if self.opts.get("format") not in {None, "140"}:
+                raise DownloadError("requested format is not available")
+            output_path = self.opts["outtmpl"].replace("%(id)s", "test-video")
+            output_path = output_path.replace("%(ext)s", "m4a")
+            Path(output_path).write_bytes(b"source audio")
+
+    def fake_convert(path, output_dir):
+        audio_path = Path(output_dir) / "test-video.wav"
+        audio_path.write_bytes(b"converted audio")
+        return str(audio_path)
+
+    monkeypatch.setattr("app.services.video_service.time.sleep", lambda *_: None)
+    monkeypatch.setattr("app.services.video_service.yt_dlp.YoutubeDL", DummyYDL)
+    monkeypatch.setattr(service, "_convert_to_audio", fake_convert)
+
+    first = service.download_video(
+        "https://youtu.be/test-video",
+        output_folder=str(tmp_path / "tmp"),
+        platform="youtube",
+    )
+
+    assert first is not None
+    assert first["cache_hit"] is False
+    assert first["audio_file"].startswith(str(tmp_path / "asset-cache"))
+    assert Path(first["audio_file"]).read_bytes() == b"converted audio"
+    assert len(download_calls) == 1
+
+    index = json.loads((tmp_path / "asset-cache" / "index.json").read_text())
+    entry = next(iter(index.values()))
+    assert Path(entry["audio_path"]).exists()
+    assert Path(entry["source_media_path"]).exists()
+
+    second = service.download_video(
+        "https://www.youtube.com/watch?v=test-video&feature=share",
+        output_folder=str(tmp_path / "tmp2"),
+        platform="youtube",
+    )
+
+    assert second is not None
+    assert second["cache_hit"] is True
+    assert second["audio_file"] == first["audio_file"]
+    assert len(download_calls) == 1
+
+
+def test_download_asset_cache_ignores_expired_entry(monkeypatch, tmp_path):
+    monkeypatch.setenv("DOWNLOAD_ASSET_CACHE_ENABLED", "true")
+    monkeypatch.setenv("DOWNLOAD_ASSET_CACHE_DIR", str(tmp_path / "asset-cache"))
+    monkeypatch.setenv("DOWNLOAD_ASSET_CACHE_TTL_DAYS", "1")
+
+    service = VideoService()
+    identity = service._build_asset_cache_identity(
+        "https://www.youtube.com/watch?v=test-video",
+        "youtube",
+    )
+    cache_dir = tmp_path / "asset-cache" / identity["cache_key"]
+    cache_dir.mkdir(parents=True)
+    audio_path = cache_dir / "test-video.audio.wav"
+    audio_path.write_bytes(b"cached")
+    old_epoch = time.time() - (2 * 24 * 60 * 60)
+    (tmp_path / "asset-cache" / "index.json").write_text(
+        json.dumps(
+            {
+                identity["cache_key"]: {
+                    **identity,
+                    "audio_path": str(audio_path),
+                    "created_at_epoch": old_epoch,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cached = service._get_cached_download_asset(
+        "https://www.youtube.com/watch?v=test-video",
+        "youtube",
+    )
+
+    assert cached is None
 
 
 def test_summarize_download_errors_prefers_bot_and_challenge_signal():
