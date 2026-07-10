@@ -5,7 +5,9 @@ import json
 import logging
 import os
 import tempfile
+import threading
 import time
+import uuid
 from typing import Any, Dict, Optional
 
 try:
@@ -68,6 +70,8 @@ class FileService:
             or 1.0
         )
         self.redis_client = None
+        self._local_operation_claims = {}
+        self._local_operation_claims_lock = threading.Lock()
 
         # 确保目录存在
         self._ensure_directories()
@@ -311,6 +315,49 @@ class FileService:
     def _redis_delete_file_info(self, file_id: str) -> None:
         key = self._redis_hash_key()
         self.redis_client.hdel(key, file_id)
+
+    def _operation_claim_key(self, file_id: str, operation: str) -> str:
+        prefix = (self.redis_key_prefix or "subtitle_processor").strip()
+        return f"{prefix}:claim:{operation}:{file_id}"
+
+    def claim_task_operation(
+        self, file_id: str, operation: str, ttl_seconds: int = 7200
+    ) -> Optional[str]:
+        """Atomically claim an exclusive task operation and return its owner token."""
+        token = str(uuid.uuid4())
+        claim_key = self._operation_claim_key(file_id, operation)
+        if self._use_redis():
+            claimed = self.redis_client.set(
+                claim_key,
+                token,
+                nx=True,
+                ex=max(1, int(ttl_seconds)),
+            )
+            return token if claimed else None
+
+        with self._local_operation_claims_lock:
+            if claim_key in self._local_operation_claims:
+                return None
+            self._local_operation_claims[claim_key] = token
+        return token
+
+    def release_task_operation(
+        self, file_id: str, operation: str, owner_token: str
+    ) -> bool:
+        """Release a task claim only when the caller still owns it."""
+        claim_key = self._operation_claim_key(file_id, operation)
+        if self._use_redis():
+            release_script = (
+                "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                "return redis.call('del', KEYS[1]) else return 0 end"
+            )
+            return bool(self.redis_client.eval(release_script, 1, claim_key, owner_token))
+
+        with self._local_operation_claims_lock:
+            if self._local_operation_claims.get(claim_key) != owner_token:
+                return False
+            del self._local_operation_claims[claim_key]
+        return True
 
     def add_file_info(self, file_id, file_info):
         """添加文件信息

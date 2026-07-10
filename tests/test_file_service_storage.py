@@ -22,3 +22,23 @@ def test_redis_fallbacks_to_json(monkeypatch, tmp_path):
     assert service.storage_backend == "json"
     assert service.redis_client is None
     assert (tmp_path / "uploads" / "files_info.json").exists()
+
+
+def test_task_operation_claim_is_exclusive_and_owner_scoped(monkeypatch, tmp_path):
+    monkeypatch.setenv("STORAGE_BACKEND", "json")
+    service = file_service.FileService(
+        upload_folder=tmp_path / "uploads",
+        output_folder=tmp_path / "outputs",
+    )
+
+    owner_token = service.claim_task_operation("task-1", "force_local_readwise")
+
+    assert owner_token
+    assert service.claim_task_operation("task-1", "force_local_readwise") is None
+    assert service.release_task_operation(
+        "task-1", "force_local_readwise", "wrong-owner"
+    ) is False
+    assert service.release_task_operation(
+        "task-1", "force_local_readwise", owner_token
+    ) is True
+    assert service.claim_task_operation("task-1", "force_local_readwise")

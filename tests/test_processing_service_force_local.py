@@ -6,6 +6,7 @@ class FakeFileService:
     def __init__(self, tmp_path):
         self.tmp_path = tmp_path
         self.files = {}
+        self.claims = {}
 
     def get_file_info(self, file_id):
         return self.files.get(file_id)
@@ -18,6 +19,21 @@ class FakeFileService:
         path = self.tmp_path / filename
         path.write_text(content, encoding="utf-8")
         return str(path)
+
+    def claim_task_operation(self, file_id, operation, ttl_seconds=7200):
+        key = (file_id, operation)
+        if key in self.claims:
+            return None
+        token = f"claim-{file_id}-{operation}"
+        self.claims[key] = token
+        return token
+
+    def release_task_operation(self, file_id, operation, owner_token):
+        key = (file_id, operation)
+        if self.claims.get(key) != owner_token:
+            return False
+        del self.claims[key]
+        return True
 
 
 class FakeVideoService:
@@ -163,6 +179,15 @@ def test_force_local_retry_preserves_url_only_item_and_sends_full_text(tmp_path)
     assert stored["readwise_fallback_from_article_id"] == "url-only-id"
     assert stored["readwise_fallback_article_id"] == "full-text-id"
     assert stored["readwise_parse_status"] == "recovered"
+    fallback_run = stored["progress_runs"][-1]
+    assert fallback_run["path"] == "fallback"
+    assert fallback_run["status"] == "completed"
+    assert [stage["code"] for stage in fallback_run["stages"]] == [
+        "delete_url_only",
+        "download_prepare",
+        "normalize_subtitles",
+        "send_readwise",
+    ]
 
 
 def test_url_only_parse_failure_auto_fallbacks_when_enabled(monkeypatch, tmp_path):
@@ -204,6 +229,8 @@ def test_url_only_parse_failure_auto_fallbacks_when_enabled(monkeypatch, tmp_pat
     assert stored["readwise_fallback_from_article_id"] == "url-only-id"
     assert stored["readwise_fallback_article_id"] == "full-text-id"
     assert task_info["readwise_article_id"] == "full-text-id"
+    assert stored["progress_runs"][-1]["path"] == "fallback"
+    assert stored["progress_runs"][-1]["status"] == "completed"
 
 
 def test_url_only_parse_failure_waits_for_manual_fallback_by_default(tmp_path):
@@ -241,6 +268,12 @@ def test_url_only_parse_failure_waits_for_manual_fallback_by_default(tmp_path):
     assert stored["status"] == "readwise_parse_failed"
     assert stored["readwise_auto_fallback_enabled"] is False
     assert stored["force_local_readwise_available"] is True
+    url_only_run = stored["progress_runs"][-1]
+    assert url_only_run["path"] == "url_only"
+    assert [stage["code"] for stage in url_only_run["stages"]] == [
+        "send_readwise",
+        "verify_readwise",
+    ]
 
 
 def test_force_local_retry_stops_when_url_only_delete_fails(tmp_path):

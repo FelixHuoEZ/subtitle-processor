@@ -56,9 +56,12 @@ def configure_services(services):
     processing_service = services.processing_service
 
 
-def _run_force_local_readwise_with_app_context(app, task_id):
+def _run_force_local_readwise_with_app_context(app, task_id, claim_token):
     with app.app_context():
-        processing_service.retry_readwise_with_local_content(task_id)
+        processing_service.retry_readwise_with_local_content(
+            task_id,
+            claim_token=claim_token,
+        )
 
 
 def _wants_json_response():
@@ -500,11 +503,16 @@ def get_processing_status(task_id):
             return jsonify({'success': False, 'status': 'not_found'}), 404
 
         status = task_info.get('status', 'unknown')
+        progress_details = processing_service.get_progress_snapshot(task_info)
+        current_stage = progress_details.get('current_stage') or {}
         response_data = {
             'success': True,
             'process_id': task_id,
             'status': status,
-            'progress': task_info.get('progress'),
+            'progress': progress_details.get('progress', task_info.get('progress')),
+            'stage': current_stage.get('code') or task_info.get('stage'),
+            'stage_label': current_stage.get('label') or task_info.get('stage_label'),
+            'progress_details': progress_details,
             'error': task_info.get('error'),
             'video_info': task_info.get('video_info'),
             'language': task_info.get('language'),
@@ -517,6 +525,7 @@ def get_processing_status(task_id):
             'skip_processing_for_url_only': task_info.get('skip_processing_for_url_only'),
             'readwise_article_id': task_info.get('readwise_article_id'),
             'readwise_url': task_info.get('readwise_url'),
+            'readwise_delivery_status': task_info.get('readwise_delivery_status'),
             'readwise_url_only_article_id': task_info.get('readwise_url_only_article_id'),
             'readwise_url_only_url': task_info.get('readwise_url_only_url'),
             'readwise_parse_status': task_info.get('readwise_parse_status'),
@@ -592,14 +601,44 @@ def force_local_readwise(task_id):
             flash(message, 'error')
             return redirect(url_for('view.file_detail', file_id=task_id))
 
+        claim_token = processing_service.claim_force_local_readwise(task_id)
+        if not claim_token:
+            message = '该任务正在执行本地全文重发，请勿重复提交。'
+            if _wants_json_response():
+                return jsonify({
+                    'success': False,
+                    'status': 'already_processing',
+                    'error': message,
+                }), 409
+            flash(message, 'error')
+            return redirect(url_for('view.file_detail', file_id=task_id))
+
+        previous_status = task_info.get('status')
+        queued_at = datetime.now().isoformat()
+        file_service.update_file_info(task_id, {
+            'status': 'processing',
+            'stage': 'pending',
+            'stage_label': '准备本地全文重发',
+            'stage_updated_at': queued_at,
+            'updated_time': queued_at,
+        })
+
         app = current_app._get_current_object()
-        thread = threading.Thread(
-            target=_run_force_local_readwise_with_app_context,
-            args=(app, task_id),
-            daemon=True,
-            name=f"readwise-force-local-{task_id}",
-        )
-        thread.start()
+        try:
+            thread = threading.Thread(
+                target=_run_force_local_readwise_with_app_context,
+                args=(app, task_id, claim_token),
+                daemon=True,
+                name=f"readwise-force-local-{task_id}",
+            )
+            thread.start()
+        except Exception:
+            processing_service.release_force_local_readwise(task_id, claim_token)
+            file_service.update_file_info(task_id, {
+                'status': previous_status,
+                'updated_time': datetime.now().isoformat(),
+            })
+            raise
 
         if _wants_json_response():
             return jsonify({

@@ -3,8 +3,181 @@
 {% set title = file_info.get('filename') or file_info.get('original_filename') or (file_info.get('video_info') or {}).get('title') or file_info.get('url') or file_info.get('id') %}
 {% set display_time = file_info.get('updated_time') or file_info.get('created_time') or file_info.get('upload_time') %}
 {% set has_subtitle = file_info.get('subtitle_content') or file_info.get('subtitle_path') or file_info.get('file_path') %}
+{% set initial_progress = file_info.get('progress') %}
+{% if initial_progress is none %}
+{% set initial_progress = 100 if file_info.get('status') == 'completed' else 0 %}
+{% endif %}
+{% set initial_progress = initial_progress|int %}
+{% if initial_progress < 0 %}
+{% set initial_progress = 0 %}
+{% elif initial_progress > 100 %}
+{% set initial_progress = 100 %}
+{% endif %}
+{% set terminal_statuses = ['completed', 'failed', 'interrupted', 'readwise_parse_failed'] %}
 
 {% block title %}任务详情 - {{ title }}{% endblock %}
+
+{% block head %}
+<style>
+    .task-progress {
+        margin: 18px 0;
+        padding: 18px 0;
+        border-top: 1px solid #dfe3e8;
+        border-bottom: 1px solid #dfe3e8;
+        container-type: inline-size;
+    }
+    .task-progress-summary {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: start;
+        gap: 16px;
+    }
+    .task-progress-heading {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 6px 10px;
+        min-width: 0;
+    }
+    .task-progress-heading strong {
+        color: #17212b;
+        font-size: 1rem;
+        letter-spacing: 0;
+        overflow-wrap: anywhere;
+    }
+    .task-progress-position,
+    .task-progress-eta,
+    .task-progress-meta,
+    .task-progress-sample {
+        color: #59636e;
+        font-size: 0.875rem;
+        letter-spacing: 0;
+    }
+    .task-progress-eta {
+        margin-top: 2px;
+    }
+    .task-progress-value {
+        min-width: 48px;
+        color: #17212b;
+        font-variant-numeric: tabular-nums;
+        font-weight: 700;
+        text-align: right;
+    }
+    .task-progress-track {
+        height: 8px;
+        margin-top: 12px;
+        overflow: hidden;
+        background: #e5e9ed;
+        border-radius: 999px;
+    }
+    .task-progress-bar {
+        width: 100%;
+        height: 100%;
+        background: #1769aa;
+        border-radius: inherit;
+        transform: scaleX(var(--progress-scale, 0));
+        transform-origin: left center;
+        transition: transform 0.25s ease-out;
+    }
+    .task-progress[data-status="completed"] .task-progress-bar {
+        background: #2f7d4f;
+    }
+    .task-progress[data-status="failed"] .task-progress-bar,
+    .task-progress[data-status="interrupted"] .task-progress-bar,
+    .task-progress[data-status="readwise_parse_failed"] .task-progress-bar {
+        background: #b63a3a;
+    }
+    .task-progress-meta {
+        display: flex;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 8px;
+    }
+    .task-stage-list {
+        margin: 16px 0 0;
+        padding: 0;
+        list-style: none;
+    }
+    .task-stage {
+        display: grid;
+        grid-template-columns: 22px minmax(0, 1fr) minmax(100px, auto);
+        align-items: start;
+        gap: 10px;
+        min-height: 36px;
+        padding: 7px 0;
+        border-bottom: 1px solid #edf0f2;
+    }
+    .task-stage:last-child {
+        border-bottom: 0;
+    }
+    .task-stage-marker {
+        display: grid;
+        width: 20px;
+        height: 20px;
+        place-items: center;
+        border: 1px solid #b5bdc5;
+        border-radius: 50%;
+        color: #68737d;
+        font-size: 0.72rem;
+        font-variant-numeric: tabular-nums;
+        line-height: 1;
+    }
+    .task-stage-label {
+        color: #27323c;
+        font-size: 0.9rem;
+        overflow-wrap: anywhere;
+    }
+    .task-stage-conditional {
+        margin-left: 6px;
+        color: #8a6200;
+        font-size: 0.78rem;
+    }
+    .task-stage-time {
+        color: #68737d;
+        font-size: 0.82rem;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+    }
+    .task-stage.is-completed .task-stage-marker {
+        border-color: #2f7d4f;
+        background: #2f7d4f;
+        color: #f7fbf8;
+    }
+    .task-stage.is-running .task-stage-marker {
+        border: 5px solid #1769aa;
+        background: #f7fafc;
+    }
+    .task-stage.is-running .task-stage-label {
+        color: #0d4f82;
+        font-weight: 700;
+    }
+    .task-stage.is-failed .task-stage-marker,
+    .task-stage.is-interrupted .task-stage-marker {
+        border-color: #b63a3a;
+        background: #b63a3a;
+        color: #fff8f8;
+    }
+    .task-progress-sample {
+        margin-top: 10px;
+    }
+    .task-progress-error {
+        color: #a72c2c;
+    }
+    @container (max-width: 520px) {
+        .task-progress-summary {
+            gap: 10px;
+        }
+        .task-stage {
+            grid-template-columns: 22px minmax(0, 1fr);
+        }
+        .task-stage-time {
+            grid-column: 2;
+            text-align: left;
+        }
+    }
+</style>
+{% endblock %}
 
 {% block content %}
 <a href="{{ url_for('view.index') }}" class="back-link">← 返回列表</a>
@@ -47,6 +220,50 @@
         {% endif %}
     </p>
 
+    <div
+        class="task-progress"
+        id="taskProgress"
+        data-status-url="{{ url_for('process.get_processing_status', task_id=file_info.get('id')) }}"
+        data-initial-status="{{ file_info.get('status', 'unknown') }}"
+        data-initial-progress="{{ initial_progress }}"
+        data-has-static-error="{{ 'true' if file_info.get('error') else 'false' }}"
+    >
+        <div class="task-progress-summary">
+            <div>
+                <div class="task-progress-heading">
+                    <strong id="taskProgressStage">正在读取处理阶段</strong>
+                    <span class="task-progress-position" id="taskProgressPosition"></span>
+                </div>
+                <div class="task-progress-eta" id="taskProgressEta">正在计算预计时间</div>
+            </div>
+            <span class="task-progress-value" id="taskProgressValue">{{ initial_progress }}%</span>
+        </div>
+        <div class="task-progress-track" aria-label="任务进度">
+            <div
+                class="task-progress-bar"
+                id="taskProgressBar"
+                role="progressbar"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow="{{ initial_progress }}"
+                style="--progress-scale: {{ initial_progress / 100 }}"
+            ></div>
+        </div>
+        <div class="task-progress-meta">
+            <span id="taskProgressStatus">状态：{{ file_info.get('status', 'unknown') }}</span>
+            <span id="taskProgressRemaining"></span>
+        </div>
+        <ol class="task-stage-list" id="taskStageList" aria-live="polite">
+            <li class="task-stage">
+                <span class="task-stage-marker">1</span>
+                <span class="task-stage-label">正在读取阶段信息</span>
+                <span class="task-stage-time"></span>
+            </li>
+        </ol>
+        <div class="task-progress-sample" id="taskProgressSample"></div>
+        <div class="task-progress-meta task-progress-error" id="taskProgressError" style="display: none"></div>
+    </div>
+
     {% if file_info.get('error') %}
     <div class="error-message" style="display: block">{{ file_info.get('error') }}</div>
     {% endif %}
@@ -75,4 +292,283 @@
 <h2>字幕预览</h2>
 <pre>{{ file_info.get('subtitle_content')[:2000] }}{% if file_info.get('subtitle_content')|length > 2000 %}...{% endif %}</pre>
 {% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+    (function () {
+        const terminalStatuses = new Set({{ terminal_statuses|tojson }});
+        const progressEl = document.getElementById("taskProgress");
+        if (!progressEl) {
+            return;
+        }
+
+        const statusUrl = progressEl.dataset.statusUrl;
+        const barEl = document.getElementById("taskProgressBar");
+        const statusEl = document.getElementById("taskProgressStatus");
+        const valueEl = document.getElementById("taskProgressValue");
+        const stageEl = document.getElementById("taskProgressStage");
+        const positionEl = document.getElementById("taskProgressPosition");
+        const etaEl = document.getElementById("taskProgressEta");
+        const remainingEl = document.getElementById("taskProgressRemaining");
+        const stageListEl = document.getElementById("taskStageList");
+        const sampleEl = document.getElementById("taskProgressSample");
+        const errorEl = document.getElementById("taskProgressError");
+        const statusLabels = {
+            pending: "等待处理",
+            processing: "处理中",
+            waiting_for_language_confirmation: "等待语言确认",
+            completed: "已完成",
+            failed: "失败",
+            interrupted: "已中断",
+            readwise_parse_failed: "Reader 解析失败",
+        };
+        const confidenceLabels = { high: "高", medium: "中", low: "低" };
+        let lastRenderWasTerminal = terminalStatuses.has(progressEl.dataset.initialStatus);
+        let pollFailureCount = 0;
+
+        function clampProgress(value) {
+            const parsed = Number(value);
+            if (!Number.isFinite(parsed)) {
+                return 0;
+            }
+            return Math.max(0, Math.min(100, Math.round(parsed)));
+        }
+
+        function formatDuration(value) {
+            const seconds = Math.max(0, Math.round(Number(value) || 0));
+            if (seconds < 60) {
+                return seconds + " 秒";
+            }
+            if (seconds < 3600) {
+                const minutes = Math.floor(seconds / 60);
+                const remainder = seconds % 60;
+                return remainder ? minutes + " 分 " + remainder + " 秒" : minutes + " 分钟";
+            }
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            return minutes ? hours + " 小时 " + minutes + " 分" : hours + " 小时";
+        }
+
+        function formatEstimate(typicalSeconds, upperSeconds) {
+            const typical = Math.max(0, Math.round(Number(typicalSeconds) || 0));
+            const upper = Math.max(typical, Math.round(Number(upperSeconds) || 0));
+            if (!upper) {
+                return "即将完成";
+            }
+            if (!typical) {
+                return "最多约 " + formatDuration(upper);
+            }
+            if (upper <= typical * 1.15) {
+                return "约 " + formatDuration(upper || typical);
+            }
+            return formatDuration(typical) + " - " + formatDuration(upper);
+        }
+
+        function stageTiming(stage) {
+            if (stage.status === "completed") {
+                return "实际 " + formatDuration(stage.actual_seconds);
+            }
+            if (stage.status === "running") {
+                if (stage.overdue) {
+                    return "已用 " + formatDuration(stage.elapsed_seconds) + "，超出常见范围";
+                }
+                return "已用 " + formatDuration(stage.elapsed_seconds)
+                    + " · 还需 "
+                    + formatEstimate(
+                        stage.remaining_typical_seconds,
+                        stage.remaining_upper_seconds
+                    );
+            }
+            if (["failed", "interrupted", "readwise_parse_failed"].includes(stage.status)) {
+                return statusLabels[stage.status] || stage.status;
+            }
+            return "预计 " + formatEstimate(
+                stage.estimate?.typical_seconds,
+                stage.estimate?.upper_seconds
+            );
+        }
+
+        function renderStageList(details) {
+            stageListEl.replaceChildren();
+            const stages = details?.stages || [];
+            if (!stages.length) {
+                const emptyItem = document.createElement("li");
+                emptyItem.className = "task-stage";
+                const marker = document.createElement("span");
+                marker.className = "task-stage-marker";
+                marker.textContent = "-";
+                const label = document.createElement("span");
+                label.className = "task-stage-label";
+                label.textContent = "该任务没有阶段历史记录";
+                emptyItem.append(marker, label);
+                stageListEl.append(emptyItem);
+                return;
+            }
+
+            stages.forEach(function (stage) {
+                const allowedStatus = [
+                    "pending", "running", "completed", "failed", "interrupted", "readwise_parse_failed"
+                ].includes(stage.status) ? stage.status : "pending";
+                const item = document.createElement("li");
+                item.className = "task-stage is-" + allowedStatus;
+
+                const marker = document.createElement("span");
+                marker.className = "task-stage-marker";
+                marker.textContent = allowedStatus === "completed"
+                    ? "✓"
+                    : (["failed", "interrupted", "readwise_parse_failed"].includes(allowedStatus)
+                        ? "!"
+                        : (allowedStatus === "running" ? "" : String(stage.position)));
+
+                const label = document.createElement("span");
+                label.className = "task-stage-label";
+                label.textContent = stage.label;
+                if (stage.conditional) {
+                    const conditional = document.createElement("span");
+                    conditional.className = "task-stage-conditional";
+                    conditional.textContent = "待判断";
+                    label.append(conditional);
+                }
+
+                const timing = document.createElement("span");
+                timing.className = "task-stage-time";
+                timing.textContent = stageTiming(stage);
+                item.append(marker, label, timing);
+                stageListEl.append(item);
+            });
+        }
+
+        function renderEstimateSource(eta) {
+            if (!eta) {
+                sampleEl.textContent = "";
+                return;
+            }
+            const confidence = confidenceLabels[eta.confidence] || "低";
+            if (eta.source === "stage_history" && eta.sample_count) {
+                sampleEl.textContent = "基于 " + eta.sample_count
+                    + " 个近期阶段样本 · 置信度 " + confidence;
+            } else if (eta.source === "legacy_task_history" && eta.sample_count) {
+                sampleEl.textContent = "基于 " + eta.sample_count
+                    + " 个历史完成任务，阶段样本积累中 · 置信度 " + confidence;
+            } else if (eta.source === "mixed" && eta.sample_count) {
+                const componentLabels = {
+                    stage_history: "近期阶段样本",
+                    legacy_task_history: "历史完成任务",
+                    default: "经验模型",
+                };
+                const components = (eta.source_components || [])
+                    .map(function (source) { return componentLabels[source] || source; });
+                sampleEl.textContent = "综合" + components.join("、")
+                    + "（" + eta.sample_count + " 个历史样本）· 置信度 " + confidence;
+            } else if (eta.source === "default") {
+                sampleEl.textContent = "当前使用经验估算，完成后会加入阶段历史样本 · 置信度低";
+            } else {
+                sampleEl.textContent = "暂无可用的耗时样本";
+            }
+        }
+
+        function renderProgress(data) {
+            const status = data.status || "unknown";
+            const details = data.progress_details || null;
+            const progress = clampProgress(
+                details?.progress ?? data.progress
+                    ?? (status === "completed" ? 100 : progressEl.dataset.initialProgress)
+            );
+            const currentStage = details?.current_stage || null;
+            const runIsActive = details?.run_status === "running";
+            const isTerminal = terminalStatuses.has(status) && !runIsActive;
+
+            progressEl.dataset.status = status;
+            statusEl.textContent = "状态：" + (statusLabels[status] || status);
+            valueEl.textContent = progress + "%";
+            barEl.style.setProperty("--progress-scale", String(progress / 100));
+            barEl.setAttribute("aria-valuenow", String(progress));
+            stageEl.textContent = currentStage?.label || data.stage_label || statusLabels[status] || status;
+            if (currentStage?.position && details?.stage_count) {
+                positionEl.textContent = "第 " + currentStage.position + "/" + details.stage_count + " 步";
+            } else {
+                positionEl.textContent = "";
+            }
+
+            const remainingCount = details?.remaining_stage_count || 0;
+            remainingEl.textContent = remainingCount
+                ? "后续还有 " + remainingCount + " 个流程"
+                : (isTerminal ? "流程已结束" : "当前是最后一个流程");
+
+            if (isTerminal) {
+                etaEl.textContent = status === "completed" ? "全部流程已经完成" : "本次流程已经结束";
+            } else if (currentStage?.overdue) {
+                etaEl.textContent = "当前阶段已超出常见范围，任务仍在处理";
+            } else if (details?.eta?.source === "unavailable") {
+                etaEl.textContent = status === "pending" ? "任务尚未开始" : "暂无可用的阶段耗时估算";
+            } else if (details?.eta) {
+                etaEl.textContent = "预计剩余 " + formatEstimate(
+                    details.eta.typical_seconds,
+                    details.eta.upper_seconds
+                );
+            } else {
+                etaEl.textContent = "正在计算预计时间";
+            }
+
+            renderStageList(details);
+            renderEstimateSource(details?.eta);
+
+            if (data.error && progressEl.dataset.hasStaticError !== "true") {
+                errorEl.textContent = data.error;
+                errorEl.style.display = "block";
+            } else {
+                errorEl.textContent = "";
+                errorEl.style.display = "none";
+            }
+
+            const becameTerminal = isTerminal && !lastRenderWasTerminal;
+            lastRenderWasTerminal = isTerminal;
+            if (becameTerminal) {
+                window.location.reload();
+            }
+            return isTerminal;
+        }
+
+        async function refreshProgress() {
+            try {
+                const response = await fetch(statusUrl, { headers: { Accept: "application/json" } });
+                if (response.status === 404) {
+                    errorEl.textContent = "任务记录不存在，已停止刷新。";
+                    errorEl.style.display = "block";
+                    return true;
+                }
+                if (!response.ok) {
+                    throw new Error("HTTP " + response.status);
+                }
+                pollFailureCount = 0;
+                return renderProgress(await response.json());
+            } catch (error) {
+                pollFailureCount += 1;
+                if (pollFailureCount >= 3) {
+                    errorEl.textContent = "暂时无法刷新任务状态，系统会降低频率继续重试。";
+                    errorEl.style.display = "block";
+                }
+                return false;
+            }
+        }
+
+        renderProgress({
+            status: progressEl.dataset.initialStatus,
+            progress: progressEl.dataset.initialProgress,
+        });
+
+        async function pollProgress() {
+            if (await refreshProgress()) {
+                return;
+            }
+            const retryDelay = document.hidden
+                ? 15000
+                : Math.min(30000, 3000 * Math.pow(2, pollFailureCount));
+            window.setTimeout(pollProgress, retryDelay);
+        }
+
+        pollProgress();
+    })();
+</script>
 {% endblock %}

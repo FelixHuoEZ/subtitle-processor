@@ -389,6 +389,7 @@ def test_force_local_readwise_endpoint_starts_background_retry(monkeypatch):
         "platform": "youtube",
     }
     called = {}
+    stored_updates = {}
 
     class ImmediateThread:
         def __init__(self, target, args=(), daemon=None, name=None):
@@ -405,11 +406,23 @@ def test_force_local_readwise_endpoint_starts_background_retry(monkeypatch):
         "get_file_info",
         lambda task_id: task_info if task_id == "task-1" else None,
     )
+    monkeypatch.setattr(
+        process_routes.file_service,
+        "update_file_info",
+        lambda task_id, updates: stored_updates.update(updates),
+    )
     monkeypatch.setattr(process_routes.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(
         process_routes.processing_service,
+        "claim_force_local_readwise",
+        lambda task_id: "claim-token",
+    )
+    monkeypatch.setattr(
+        process_routes.processing_service,
         "retry_readwise_with_local_content",
-        lambda task_id: called.setdefault("task_id", task_id),
+        lambda task_id, claim_token=None: called.update(
+            {"task_id": task_id, "claim_token": claim_token}
+        ),
     )
 
     response = client.post(
@@ -422,6 +435,36 @@ def test_force_local_readwise_endpoint_starts_background_retry(monkeypatch):
     assert payload["success"] is True
     assert payload["status"] == "processing"
     assert called["task_id"] == "task-1"
+    assert called["claim_token"] == "claim-token"
+    assert stored_updates["status"] == "processing"
+
+
+def test_force_local_readwise_endpoint_rejects_duplicate_claim(monkeypatch):
+    client = _build_process_test_client()
+    task_info = {
+        "id": "task-1",
+        "status": "processing",
+        "url": "https://www.youtube.com/watch?v=demo123",
+        "platform": "youtube",
+    }
+    monkeypatch.setattr(
+        process_routes.file_service,
+        "get_file_info",
+        lambda task_id: task_info if task_id == "task-1" else None,
+    )
+    monkeypatch.setattr(
+        process_routes.processing_service,
+        "claim_force_local_readwise",
+        lambda task_id: None,
+    )
+
+    response = client.post(
+        "/process/status/task-1/force-local-readwise",
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["status"] == "already_processing"
 
 
 def test_confirm_language_endpoint_updates_pending_task(monkeypatch):

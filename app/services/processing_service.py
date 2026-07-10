@@ -9,6 +9,7 @@ from datetime import datetime
 
 from ..utils.logging_utils import summarize_text
 from ..utils.file_utils import build_task_filename
+from .task_progress import TaskProgressService, TERMINAL_TASK_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ READWISE_AUTO_FALLBACK_REASONS = {
     "youtube_subtitles_unavailable",
     "video_subtitles_unavailable",
 }
+FORCE_LOCAL_READWISE_OPERATION = "force_local_readwise"
 SRT_TIMING_LINE_RE = re.compile(
     r"^\d{2}:\d{2}:\d{2}[,\.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,\.]\d{3}$",
     re.MULTILINE,
@@ -44,6 +46,10 @@ class ProcessingService:
         self.transcription_service = transcription_service
         self.subtitle_service = subtitle_service
         self.readwise_service = readwise_service
+        self.task_progress = TaskProgressService(file_service)
+        interrupted_count = self.task_progress.mark_orphaned_runs_interrupted()
+        if interrupted_count:
+            logger.warning("服务启动时标记了 %s 个中断任务", interrupted_count)
         self.readwise_auto_fallback_on_parse_failed = self._parse_bool_env(
             "READWISE_AUTO_FALLBACK_ON_PARSE_FAILED", False
         )
@@ -75,6 +81,8 @@ class ProcessingService:
         task_info["progress"] = 0
         task_info["updated_time"] = datetime.now().isoformat()
         self.file_service.update_file_info(process_id, task_info)
+        self.task_progress.start_run(task_info, path="unknown")
+        self.task_progress.transition(task_info, "download_prepare")
 
         try:
             logger.info("第1步：开始视频下载和预处理")
@@ -113,6 +121,8 @@ class ProcessingService:
                 task_info["spoken_pattern"] = result.get("spoken_pattern")
                 task_info["updated_time"] = datetime.now().isoformat()
                 self.file_service.update_file_info(process_id, task_info)
+
+                self._set_progress_plan_from_video_result(task_info, result)
 
                 self.request_language_confirmation_if_needed(
                     process_id,
@@ -179,11 +189,50 @@ class ProcessingService:
             if task_temp_dir:
                 self.video_service.cleanup_task_artifacts(task_temp_dir)
                 task_info["audio_file"] = None
+            outcome = task_info.get("status")
+            if outcome not in TERMINAL_TASK_STATUSES:
+                outcome = "failed"
+                task_info["status"] = outcome
+                task_info.setdefault("error", "处理流程未正常结束")
+            self.task_progress.finish(task_info, outcome)
             self.file_service.update_file_info(process_id, task_info)
+
+    def get_progress_snapshot(self, task_info):
+        """Return a UI-safe snapshot of stages, remaining work, and ETA."""
+        return self.task_progress.snapshot(task_info)
+
+    def _set_progress_plan_from_video_result(self, task_info, result):
+        self.task_progress.update_current_stage_context(
+            task_info,
+            {"cache_hit": bool(result.get("download_asset_cache_hit"))},
+        )
+        if result.get("readwise_url_only") and result.get("skip_processing_for_url_only"):
+            path = "url_only"
+            stages = ["download_prepare", "send_readwise", "verify_readwise"]
+        elif result.get("subtitle_content"):
+            path = "existing_subtitle"
+            stages = ["download_prepare", "normalize_subtitles", "send_readwise"]
+        elif result.get("needs_transcription") and result.get("audio_file"):
+            path = "transcription"
+            stages = [
+                "download_prepare",
+                "transcribe_audio",
+                "generate_subtitles",
+                "send_readwise",
+            ]
+        else:
+            path = "unavailable"
+            stages = ["download_prepare"]
+        self.task_progress.set_plan(task_info, path=path, stage_codes=stages)
 
     def _handle_url_only_readwise(self, process_id, task_info):
         task_info["status"] = "processing"
-        task_info["progress"] = 90
+        self.task_progress.set_plan(
+            task_info,
+            path="url_only",
+            stage_codes=["download_prepare", "send_readwise", "verify_readwise"],
+        )
+        self.task_progress.transition(task_info, "send_readwise")
         logger.info(
             "第2步完成：命中原始中文字幕 URL 剪藏规则，跳过字幕下载与转录: %s",
             process_id,
@@ -210,11 +259,16 @@ class ProcessingService:
                 task_info.pop("readwise_error", None)
                 self.file_service.update_file_info(process_id, task_info)
 
+                self.task_progress.transition(task_info, "verify_readwise")
                 parse_result = self._wait_for_readwise_parse_result(
                     readwise_result.get("id")
                 )
                 self._apply_url_only_parse_result(task_info, parse_result)
                 if self.should_auto_fallback_readwise(parse_result):
+                    task_info["status"] = "processing"
+                    task_info["progress"] = self.task_progress.snapshot(task_info)[
+                        "progress"
+                    ]
                     task_info["readwise_auto_fallback_enabled"] = True
                     task_info["readwise_auto_fallback_requested_at"] = (
                         datetime.now().isoformat()
@@ -246,13 +300,11 @@ class ProcessingService:
                 )
             else:
                 task_info["status"] = "failed"
-                task_info["progress"] = 100
                 task_info["error"] = "Readwise URL剪藏失败"
                 task_info["readwise_error"] = "readwise_url_clip_failed"
                 logger.warning("第3步失败：Readwise URL剪藏失败: %s", process_id)
         except Exception as e:
             task_info["status"] = "failed"
-            task_info["progress"] = 100
             task_info["error"] = f"Readwise URL剪藏失败: {str(e)}"
             task_info["readwise_error"] = str(e)
             logger.error(
@@ -263,6 +315,8 @@ class ProcessingService:
             logger.error("异常堆栈(URL剪藏): %s", traceback.format_exc())
 
         task_info["updated_time"] = datetime.now().isoformat()
+        if task_info.get("status") in TERMINAL_TASK_STATUSES:
+            self.task_progress.finish(task_info, task_info["status"])
         self.file_service.update_file_info(process_id, task_info)
         logger.info("=== 视频处理流程完成 === %s", process_id)
 
@@ -332,7 +386,6 @@ class ProcessingService:
 
         if parse_status == "failed":
             task_info["status"] = "readwise_parse_failed"
-            task_info["progress"] = 100
             task_info["error"] = (
                 task_info.get("readwise_parse_message")
                 or "Readwise Reader 未能解析该视频字幕，可强制本地字幕/全文重发。"
@@ -352,10 +405,34 @@ class ProcessingService:
         task_info.pop("error", None)
         task_info.pop("readwise_error", None)
 
-    def retry_readwise_with_local_content(self, process_id):
+    def claim_force_local_readwise(self, process_id):
+        return self.file_service.claim_task_operation(
+            process_id,
+            FORCE_LOCAL_READWISE_OPERATION,
+        )
+
+    def release_force_local_readwise(self, process_id, owner_token):
+        if not owner_token:
+            return False
+        try:
+            return self.file_service.release_task_operation(
+                process_id,
+                FORCE_LOCAL_READWISE_OPERATION,
+                owner_token,
+            )
+        except Exception as exc:
+            logger.warning(
+                "释放本地全文重发任务锁失败: process=%s error=%s",
+                process_id,
+                exc,
+            )
+            return False
+
+    def retry_readwise_with_local_content(self, process_id, claim_token=None):
         """Re-run one URL-only task locally and send a full-text Reader item."""
         task_info = self.file_service.get_file_info(process_id)
         if not task_info:
+            self.release_force_local_readwise(process_id, claim_token)
             return {
                 "success": False,
                 "status": "not_found",
@@ -372,6 +449,7 @@ class ProcessingService:
                 "任务缺少原始链接或平台，无法本地重发 Readwise。",
             )
             self.file_service.update_file_info(process_id, task_info)
+            self.release_force_local_readwise(process_id, claim_token)
             return {
                 "success": False,
                 "status": task_info.get("status"),
@@ -390,7 +468,32 @@ class ProcessingService:
         if original_reader_url:
             task_info["readwise_url_only_url"] = original_reader_url
 
+        claim_token = claim_token or self.claim_force_local_readwise(process_id)
+        if not claim_token:
+            return {
+                "success": False,
+                "status": "already_processing",
+                "error": "该任务正在执行本地全文重发，请勿重复提交。",
+            }
+
         task_temp_dir = None
+        fallback_prefix = ["delete_url_only"] if original_article_id else []
+        self.task_progress.start_run(
+            task_info,
+            path="fallback",
+            stage_codes=fallback_prefix
+            + [
+                "download_prepare",
+                "transcribe_audio",
+                "generate_subtitles",
+                "send_readwise",
+            ],
+            conditional_stages=["transcribe_audio", "generate_subtitles"],
+        )
+        self.task_progress.transition(
+            task_info,
+            "delete_url_only" if original_article_id else "download_prepare",
+        )
         task_info.update(
             {
                 "status": "processing",
@@ -433,6 +536,7 @@ class ProcessingService:
                 task_info["readwise_deleted_article_id"] = original_article_id
                 task_info["readwise_article_id"] = None
                 task_info["readwise_url"] = None
+                self.task_progress.transition(task_info, "download_prepare")
             else:
                 task_info["readwise_url_only_delete_status"] = "skipped"
 
@@ -468,6 +572,30 @@ class ProcessingService:
 
             self._apply_video_result_fields(task_info, result)
             self._force_full_text_readwise_fields(task_info)
+            self.task_progress.update_current_stage_context(
+                task_info,
+                {"cache_hit": bool(result.get("download_asset_cache_hit"))},
+            )
+            if result.get("subtitle_content"):
+                fallback_stages = fallback_prefix + [
+                    "download_prepare",
+                    "normalize_subtitles",
+                    "send_readwise",
+                ]
+            elif result.get("needs_transcription") and result.get("audio_file"):
+                fallback_stages = fallback_prefix + [
+                    "download_prepare",
+                    "transcribe_audio",
+                    "generate_subtitles",
+                    "send_readwise",
+                ]
+            else:
+                fallback_stages = fallback_prefix + ["download_prepare"]
+            self.task_progress.set_plan(
+                task_info,
+                path="fallback",
+                stage_codes=fallback_stages,
+            )
             task_info["readwise_article_id"] = None
             task_info["readwise_url"] = None
             task_info["updated_time"] = datetime.now().isoformat()
@@ -545,8 +673,15 @@ class ProcessingService:
             if task_temp_dir:
                 self.video_service.cleanup_task_artifacts(task_temp_dir)
                 task_info["audio_file"] = None
+            outcome = task_info.get("status")
+            if outcome not in TERMINAL_TASK_STATUSES:
+                outcome = "failed"
+                task_info["status"] = outcome
+                task_info.setdefault("error", "本地全文重发未正常结束")
+            self.task_progress.finish(task_info, outcome)
             task_info["updated_time"] = datetime.now().isoformat()
             self.file_service.update_file_info(process_id, task_info)
+            self.release_force_local_readwise(process_id, claim_token)
 
     def _apply_video_result_fields(self, task_info, result):
         task_info["video_info"] = result.get("video_info", {})
@@ -581,7 +716,6 @@ class ProcessingService:
     @staticmethod
     def _fail_force_local_readwise(task_info, reason, message):
         task_info["status"] = "failed"
-        task_info["progress"] = 100
         task_info["error"] = message
         task_info["readwise_error"] = reason
         task_info["readwise_parse_status"] = "force_local_failed"
@@ -601,6 +735,7 @@ class ProcessingService:
     ):
         if force_full_text:
             self._force_full_text_readwise_fields(task_info)
+        self.task_progress.transition(task_info, "normalize_subtitles")
 
         raw_subtitle_content = result.get("subtitle_content")
         source_subtitle_format = self.subtitle_service.detect_subtitle_format(
@@ -636,8 +771,6 @@ class ProcessingService:
             normalized_length,
         )
 
-        task_info["status"] = "completed"
-        task_info["progress"] = 100
         if not task_info.get("subtitle_path"):
             safe_title = task_info.get("video_info", {}).get("title") or process_id
             subtitle_filename = build_task_filename(safe_title, process_id)
@@ -648,6 +781,7 @@ class ProcessingService:
             task_info["filename"] = subtitle_filename
         logger.info("第2步完成：视频已有字幕，无需转录: %s", process_id)
         logger.info("第3步：开始发送内容到Readwise Reader: %s", process_id)
+        self.task_progress.transition(task_info, "send_readwise")
 
         logger.debug("调试信息(有字幕) - task_info关键字段:")
         logger.debug("  - video_info存在: %s", bool(task_info.get("video_info")))
@@ -671,21 +805,26 @@ class ProcessingService:
             if readwise_result:
                 task_info["readwise_article_id"] = readwise_result.get("id")
                 task_info["readwise_url"] = readwise_result.get("url")
+                task_info["readwise_delivery_status"] = "sent"
                 logger.info(
                     "第3步完成：Readwise文章创建成功: %s -> %s",
                     process_id,
                     readwise_result.get("id"),
                 )
             else:
+                task_info["readwise_delivery_status"] = "failed"
                 logger.warning("第3步失败：Readwise文章创建失败: %s", process_id)
                 logger.warning(
                     "readwise_service返回了None或False(有字幕): %s",
                     readwise_result,
                 )
         except Exception as e:
+            task_info["readwise_delivery_status"] = "failed"
+            task_info["readwise_delivery_error"] = str(e)
             logger.error("第3步错误：发送到Readwise失败: %s - %s", process_id, str(e))
             logger.error("异常堆栈(有字幕): %s", traceback.format_exc())
 
+        task_info["status"] = "completed"
         logger.info("=== 视频处理流程完成 === %s", process_id)
 
     def _handle_audio_transcription(
@@ -697,6 +836,7 @@ class ProcessingService:
         platform,
         force_full_text=False,
     ):
+        self.task_progress.transition(task_info, "transcribe_audio")
         logger.info("第2步：开始音频转录流程: %s", process_id)
         logger.info("needs_transcription: %s", result.get("needs_transcription"))
         logger.info("audio_file: %s", result.get("audio_file"))
@@ -733,6 +873,7 @@ class ProcessingService:
                     summarize_text(transcription_result["text"], 100),
                 )
 
+            self.task_progress.transition(task_info, "generate_subtitles")
             logger.info("第2.2步：开始转换为SRT格式")
             srt_content = self.subtitle_service.parse_srt(transcription_result, [])
             logger.info("第2.2步完成：SRT转换结果是否为None: %s", srt_content is None)
@@ -803,10 +944,8 @@ class ProcessingService:
         subtitle_count = self.count_srt_entries(srt_content)
         logger.info("生成字幕条数: %s", subtitle_count)
 
-        task_info["status"] = "completed"
         task_info["subtitle_content"] = srt_content
         task_info["transcription_result"] = transcription_result
-        task_info["progress"] = 100
         safe_title = task_info.get("video_info", {}).get("title") or process_id
         subtitle_filename = build_task_filename(safe_title, process_id)
         subtitle_path = self.file_service.save_file(srt_content, subtitle_filename)
@@ -868,6 +1007,7 @@ class ProcessingService:
             self._force_full_text_readwise_fields(task_info)
 
         logger.info("第3步：开始发送内容到Readwise Reader: %s", process_id)
+        self.task_progress.transition(task_info, "send_readwise")
         logger.debug("调试信息 - task_info关键字段:")
         logger.debug("  - video_info存在: %s", bool(task_info.get("video_info")))
         logger.debug(
@@ -894,21 +1034,26 @@ class ProcessingService:
             if readwise_result:
                 task_info["readwise_article_id"] = readwise_result.get("id")
                 task_info["readwise_url"] = readwise_result.get("url")
+                task_info["readwise_delivery_status"] = "sent"
                 logger.info(
                     "第3步完成：Readwise文章创建成功: %s -> %s",
                     process_id,
                     readwise_result.get("id"),
                 )
             else:
+                task_info["readwise_delivery_status"] = "failed"
                 logger.warning("第3步失败：Readwise文章创建失败: %s", process_id)
                 logger.warning(
                     "readwise_service返回了None或False: %s",
                     readwise_result,
                 )
         except Exception as e:
+            task_info["readwise_delivery_status"] = "failed"
+            task_info["readwise_delivery_error"] = str(e)
             logger.error("第3步错误：发送到Readwise失败: %s - %s", process_id, str(e))
             logger.error("异常堆栈: %s", traceback.format_exc())
 
+        task_info["status"] = "completed"
         logger.info("=== 视频处理流程完成 === %s", process_id)
 
     @staticmethod
@@ -1012,6 +1157,7 @@ class ProcessingService:
             result.get("readwise_reason"),
         )
 
+        self.task_progress.transition(task_info, "language_confirmation")
         task_info["status"] = "waiting_for_language_confirmation"
         task_info["language_confirmation"] = confirmation_state
         task_info["updated_time"] = datetime.now().isoformat()
