@@ -552,8 +552,8 @@ def get_processing_status(task_id):
             'page_title': task_info.get('page_title'),
             'subtitle_path': task_info.get('subtitle_path') or task_info.get('path'),
             'view_url': task_info.get('url'),
-            'created_at': task_info.get('upload_time'),
-            'updated_at': task_info.get('updated_time'),
+            'created_at': task_info.get('created_time') or task_info.get('upload_time'),
+            'updated_at': task_info.get('status_updated_at') or task_info.get('updated_time'),
             'status_url': f"/process/status/{task_id}",
         }
 
@@ -620,6 +620,7 @@ def force_local_readwise(task_id):
             'stage': 'pending',
             'stage_label': '准备本地全文重发',
             'stage_updated_at': queued_at,
+            'status_updated_at': queued_at,
             'updated_time': queued_at,
         })
 
@@ -634,9 +635,11 @@ def force_local_readwise(task_id):
             thread.start()
         except Exception:
             processing_service.release_force_local_readwise(task_id, claim_token)
+            restored_at = datetime.now().isoformat()
             file_service.update_file_info(task_id, {
                 'status': previous_status,
-                'updated_time': datetime.now().isoformat(),
+                'status_updated_at': restored_at,
+                'updated_time': restored_at,
             })
             raise
 

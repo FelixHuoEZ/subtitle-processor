@@ -148,8 +148,47 @@ def test_orphaned_running_task_is_marked_interrupted():
     assert interrupted_count == 1
     assert stored["status"] == "interrupted"
     assert stored["stage"] == "interrupted"
+    assert stored["status_updated_at"] == "2026-07-10T11:00:00"
     assert stored["progress_runs"][-1]["status"] == "interrupted"
     assert stored["progress_runs"][-1]["stages"][-1]["status"] == "interrupted"
+
+
+def test_legacy_active_task_without_run_is_not_reclassified_on_startup():
+    task = {
+        "id": "legacy-task",
+        "status": "processing",
+        "created_time": "2026-01-05T10:00:00",
+        "updated_time": "2026-01-05T10:01:00",
+    }
+    file_service = FakeFileService({"legacy-task": task})
+    service = TaskProgressService(
+        file_service,
+        now=lambda: datetime(2026, 7, 10, 11, 0, 0),
+        runtime_id="new-runtime",
+    )
+
+    interrupted_count = service.mark_orphaned_runs_interrupted()
+
+    assert interrupted_count == 0
+    assert task["status"] == "processing"
+    assert task["updated_time"] == "2026-01-05T10:01:00"
+    assert file_service.updates == []
+
+
+def test_running_task_without_runtime_owner_is_not_reclassified_on_startup():
+    task = {
+        "id": "unowned-task",
+        "status": "processing",
+        "progress_runs": [{"run_id": "legacy-run", "status": "running"}],
+    }
+    file_service = FakeFileService({"unowned-task": task})
+    service = TaskProgressService(file_service, runtime_id="new-runtime")
+
+    interrupted_count = service.mark_orphaned_runs_interrupted()
+
+    assert interrupted_count == 0
+    assert task["status"] == "processing"
+    assert file_service.updates == []
 
 
 def test_legacy_completed_tasks_seed_total_eta_baseline():
@@ -246,7 +285,7 @@ def test_failed_run_keeps_last_progress_instead_of_showing_100_percent():
     assert 0 < task["progress"] < 100
 
 
-def test_active_task_with_finished_run_is_recovered_as_interrupted():
+def test_active_task_with_finished_run_is_not_reclassified_as_interrupted():
     task = {
         "id": "task-1",
         "status": "processing",
@@ -265,8 +304,9 @@ def test_active_task_with_finished_run_is_recovered_as_interrupted():
 
     interrupted_count = service.mark_orphaned_runs_interrupted()
 
-    assert interrupted_count == 1
-    assert task["status"] == "interrupted"
+    assert interrupted_count == 0
+    assert task["status"] == "processing"
+    assert file_service.updates == []
 
 
 def test_eta_source_only_counts_stages_that_are_still_active():

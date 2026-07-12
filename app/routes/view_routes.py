@@ -8,6 +8,7 @@ from ..services.file_service import FileService
 from ..services.subtitle_service import SubtitleService
 from ..services.runtime import service_proxy
 from ..config.config_manager import get_config_value
+from ..utils.file_utils import get_file_created_time
 
 logger = logging.getLogger(__name__)
 
@@ -48,15 +49,7 @@ def index():
         
         # 转换为列表并排序
         files_list = list(filtered_files.values())
-        files_list.sort(
-            key=lambda x: (
-                x.get('updated_time')
-                or x.get('created_time')
-                or x.get('upload_time')
-                or ''
-            ),
-            reverse=True,
-        )
+        files_list.sort(key=get_file_created_time, reverse=True)
         
         # 分页处理
         total = len(files_list)
@@ -376,15 +369,7 @@ def api_list_files():
         
         # 转换为列表并排序
         files_list = list(filtered_files.values())
-        files_list.sort(
-            key=lambda x: (
-                x.get('updated_time')
-                or x.get('created_time')
-                or x.get('upload_time')
-                or ''
-            ),
-            reverse=True,
-        )
+        files_list.sort(key=get_file_created_time, reverse=True)
         
         # 分页
         total = len(files_list)

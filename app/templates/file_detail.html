@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 
 {% set title = file_info.get('filename') or file_info.get('original_filename') or (file_info.get('video_info') or {}).get('title') or file_info.get('url') or file_info.get('id') %}
-{% set display_time = file_info.get('updated_time') or file_info.get('created_time') or file_info.get('upload_time') %}
+{% set created_time = file_info.get('created_time') or file_info.get('upload_time') or file_info.get('updated_time') %}
+{% set status_updated_at = file_info.get('status_updated_at') or file_info.get('updated_time') %}
 {% set has_subtitle = file_info.get('subtitle_content') or file_info.get('subtitle_path') or file_info.get('file_path') %}
 {% set initial_progress = file_info.get('progress') %}
 {% if initial_progress is none %}
@@ -187,7 +188,8 @@
     <h2>{{ title }}</h2>
     <p>
         <strong>状态：</strong>{{ file_info.get('status', 'unknown') }}<br>
-        {% if display_time %}<strong>时间：</strong>{{ display_time }}<br>{% endif %}
+        {% if created_time %}<strong>添加时间：</strong>{{ created_time }}<br>{% endif %}
+        {% if status_updated_at and status_updated_at != created_time %}<strong>状态更新时间：</strong>{{ status_updated_at }}<br>{% endif %}
         {% if file_info.get('platform') %}<strong>平台：</strong>{{ file_info.get('platform') }}<br>{% endif %}
         {% if file_info.get('request_source') %}<strong>来源：</strong>{{ file_info.get('request_source') }}<br>{% endif %}
         {% if file_info.get('url') %}

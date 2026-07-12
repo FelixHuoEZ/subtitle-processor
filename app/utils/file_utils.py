@@ -10,6 +10,18 @@ import chardet
 logger = logging.getLogger(__name__)
 
 
+def get_file_created_time(file_info):
+    """Return the stable creation timestamp used for task ordering."""
+    if not isinstance(file_info, dict):
+        return ""
+    return (
+        file_info.get("created_time")
+        or file_info.get("upload_time")
+        or file_info.get("updated_time")
+        or ""
+    )
+
+
 def detect_file_encoding(raw_bytes):
     """使用多种方法检测文件编码"""
     # 尝试使用chardet检测

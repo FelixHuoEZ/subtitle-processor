@@ -73,6 +73,10 @@ def test_status_endpoint_returns_stage_plan_and_eta(monkeypatch):
         "filename": "Running task",
         "status": "processing",
         "progress": 37,
+        "created_time": "2026-07-10T10:00:00",
+        "upload_time": "2026-07-10T10:01:00",
+        "updated_time": "2026-07-10T10:02:00",
+        "status_updated_at": "2026-07-10T10:03:00",
     }
 
     class FakeProgressService:
@@ -106,5 +110,7 @@ def test_status_endpoint_returns_stage_plan_and_eta(monkeypatch):
     assert response.status_code == 200
     assert payload["stage"] == "transcribe_audio"
     assert payload["stage_label"] == "音频转录"
+    assert payload["created_at"] == "2026-07-10T10:00:00"
+    assert payload["updated_at"] == "2026-07-10T10:03:00"
     assert payload["progress_details"]["remaining_stage_count"] == 2
     assert payload["progress_details"]["eta"]["sample_count"] == 42

@@ -6,6 +6,7 @@ from flask import Flask, render_template, jsonify, request, redirect
 from .config.config_manager import ConfigManager, get_config_value, set_config_manager
 from .services.logging_service import LoggingService
 from .services.runtime import attach_services, create_services
+from .utils.file_utils import get_file_created_time
 from .routes import upload_bp, view_bp, process_bp, settings_bp
 from .routes import upload_routes, view_routes, process_routes
 
@@ -205,15 +206,7 @@ def register_main_routes(app):
             from .services.file_service import FileService
 
             files = list(FileService().list_files().values())
-            files.sort(
-                key=lambda item: (
-                    item.get('updated_time')
-                    or item.get('created_time')
-                    or item.get('upload_time')
-                    or ''
-                ),
-                reverse=True,
-            )
+            files.sort(key=get_file_created_time, reverse=True)
             return render_template('index.html', files=files[:50])
         except Exception as exc:
             logger.error("首页文件列表加载失败: %s", exc)

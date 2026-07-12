@@ -19,6 +19,7 @@
                     <option value="processing" {% if current_type == 'processing' %}selected{% endif %}>处理中</option>
                     <option value="completed" {% if current_type == 'completed' %}selected{% endif %}>已完成</option>
                     <option value="failed" {% if current_type == 'failed' %}selected{% endif %}>失败</option>
+                    <option value="interrupted" {% if current_type == 'interrupted' %}selected{% endif %}>已中断</option>
                 </select>
                 <select name="sort" class="form-select me-2">
                     <option value="time_desc" {% if current_sort == 'time_desc' %}selected{% endif %}>最新</option>
@@ -39,7 +40,7 @@
         {% for file in files %}
         {% set title = file.get('filename') or file.get('original_filename') or (file.get('video_info') or {}).get('title') or file.get('url') or file.get('id') %}
         {% set display_type = file.get('file_type') or file.get('platform') or 'task' %}
-        {% set display_time = file.get('updated_time') or file.get('created_time') or file.get('upload_time') %}
+        {% set display_time = file.get('created_time') or file.get('upload_time') or file.get('updated_time') %}
         <div class="col-md-6 col-lg-4 mb-3">
             <div class="card">
                 <div class="card-body">
@@ -48,7 +49,7 @@
                         <small class="text-muted">
                             类型: {{ display_type }}<br>
                             状态: {{ file.get('status', 'unknown') }}<br>
-                            {% if display_time %}时间: {{ display_time }}<br>{% endif %}
+                            {% if display_time %}添加时间: {{ display_time }}<br>{% endif %}
                             {% if file.get('url') %}URL: {{ file.get('url') }}<br>{% endif %}
                             {% if file.get('error') %}错误: {{ file.get('error') }}{% endif %}
                         </small>

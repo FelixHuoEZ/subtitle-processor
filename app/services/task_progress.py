@@ -327,6 +327,7 @@ class TaskProgressService:
                 "stage": "pending",
                 "stage_label": "准备处理",
                 "stage_updated_at": now,
+                "status_updated_at": now,
                 "updated_time": now,
             }
         )
@@ -441,6 +442,7 @@ class TaskProgressService:
                 "stage": outcome,
                 "stage_label": self._terminal_label(outcome),
                 "stage_updated_at": now,
+                "status_updated_at": now,
                 "updated_time": now,
             }
         )
@@ -625,10 +627,12 @@ class TaskProgressService:
             if task_info.get("status") not in ACTIVE_TASK_STATUSES:
                 continue
             run = self._current_run(task_info)
-            if run and run.get("status") == "running":
-                if run.get("runtime_id") == self.runtime_id:
-                    continue
-                self._finish_run_record(run, "interrupted", now, task_info)
+            if not run or run.get("status") != "running":
+                continue
+            previous_runtime_id = run.get("runtime_id")
+            if not previous_runtime_id or previous_runtime_id == self.runtime_id:
+                continue
+            self._finish_run_record(run, "interrupted", now, task_info)
 
             task_info.update(
                 {
@@ -636,6 +640,7 @@ class TaskProgressService:
                     "stage": "interrupted",
                     "stage_label": self._terminal_label("interrupted"),
                     "stage_updated_at": now,
+                    "status_updated_at": now,
                     "updated_time": now,
                     "error": task_info.get("error")
                     or "服务重启，后台任务已中断，请重新发起。",
@@ -658,6 +663,7 @@ class TaskProgressService:
                 "stage_label",
                 "stage_started_at",
                 "stage_updated_at",
+                "status_updated_at",
                 "status",
                 "updated_time",
                 "error",

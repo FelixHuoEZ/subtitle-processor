@@ -39,12 +39,12 @@
 <ul class="file-list">
     {% for file in files %}
     {% set title = file.get('filename') or file.get('original_filename') or (file.get('video_info') or {}).get('title') or file.get('url') or file.get('id') %}
-    {% set display_time = file.get('updated_time') or file.get('created_time') or file.get('upload_time') %}
+    {% set display_time = file.get('created_time') or file.get('upload_time') or file.get('updated_time') %}
     <li class="file-item">
         <a href="{{ url_for('view.file_detail', file_id=file.get('id')) }}" class="file-link">{{ title }}</a>
         <div class="file-time">
             状态：{{ file.get('status', 'unknown') }}
-            {% if display_time %} · 时间：{{ display_time }}{% endif %}
+            {% if display_time %} · 添加时间：{{ display_time }}{% endif %}
             {% if file.get('platform') %} · 平台：{{ file.get('platform') }}{% endif %}
         </div>
         {% if file.get('error') %}
@@ -99,6 +99,7 @@
                 if (
                     status === "completed" ||
                     status === "failed" ||
+                    status === "interrupted" ||
                     status === "readwise_parse_failed"
                 ) {
                     return data;
