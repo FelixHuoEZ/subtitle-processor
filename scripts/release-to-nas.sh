@@ -10,6 +10,7 @@ NAS_REMOTE_STATE_DIR="${NAS_REMOTE_STATE_DIR:-${HOME}/.nas-remote}"
 NAS_COMPOSE_DIR="${NAS_COMPOSE_DIR:-/share/ZFS530_DATA/.qpkg/container-station/data/application/subtitle}"
 NAS_DOCKER_CONFIG="${NAS_DOCKER_CONFIG:-/share/homes/hsk/.docker}"
 NAS_DOCKER_BIN_DIR="${NAS_DOCKER_BIN_DIR:-/share/ZFS530_DATA/.qpkg/container-station/bin}"
+NAS_COMPOSE_PROFILE="${NAS_COMPOSE_PROFILE:-telegram}"
 NAS_DISCOVERY_TIMEOUT="${NAS_DISCOVERY_TIMEOUT:-30}"
 NAS_WAIT_TIMEOUT="${NAS_WAIT_TIMEOUT:-900}"
 USE_NAS_DOCKER_CONFIG_FOR_BUILD="${USE_NAS_DOCKER_CONFIG_FOR_BUILD:-true}"
@@ -44,6 +45,7 @@ Environment:
   NAS_DOCKER_CONFIG      Remote Docker auth config path. Default: /share/homes/hsk/.docker
   NAS_DOCKER_BIN_DIR     Remote Docker CLI dir to prepend to PATH.
                           Default: /share/ZFS530_DATA/.qpkg/container-station/bin
+  NAS_COMPOSE_PROFILE    Compose profile enabled for NAS deploys. Default: telegram
   USE_NAS_DOCKER_CONFIG_FOR_BUILD
                           Use a temporary local DOCKER_CONFIG with NAS registry auth.
                           Default: true. Set false to use the current local config.
@@ -296,22 +298,26 @@ if has_services; then
 fi
 
 build_remote_compose_command() {
-  local compose_dir_quoted docker_config_quoted docker_bin_dir_quoted service_suffix="" up_flags="-d --no-build --force-recreate"
+  local compose_dir_quoted docker_config_quoted docker_bin_dir_quoted profile_args="" service_suffix="" up_flags="-d --no-build --force-recreate"
   compose_dir_quoted="$(printf '%q' "${NAS_COMPOSE_DIR}")"
   docker_config_quoted="$(printf '%q' "${NAS_DOCKER_CONFIG}")"
   docker_bin_dir_quoted="$(printf '%q' "${NAS_DOCKER_BIN_DIR}")"
+
+  if [[ -n "${NAS_COMPOSE_PROFILE}" ]]; then
+    profile_args=" --profile $(printf '%q' "${NAS_COMPOSE_PROFILE}")"
+  fi
 
   if has_services; then
     service_suffix=" $(shell_join "${SERVICES[@]}")"
     up_flags="${up_flags} --no-deps"
   fi
 
-  printf 'PATH=%s:$PATH; cd %s && DOCKER_CONFIG=%s docker compose pull%s && DOCKER_CONFIG=%s docker compose up %s%s && DOCKER_CONFIG=%s docker compose ps%s' \
+  printf 'PATH=%s:$PATH; cd %s && DOCKER_CONFIG=%s docker compose%s pull%s && DOCKER_CONFIG=%s docker compose%s up %s%s && DOCKER_CONFIG=%s docker compose%s ps%s' \
     "${docker_bin_dir_quoted}" \
     "${compose_dir_quoted}" \
-    "${docker_config_quoted}" "${service_suffix}" \
-    "${docker_config_quoted}" "${up_flags}" "${service_suffix}" \
-    "${docker_config_quoted}" "${service_suffix}"
+    "${docker_config_quoted}" "${profile_args}" "${service_suffix}" \
+    "${docker_config_quoted}" "${profile_args}" "${up_flags}" "${service_suffix}" \
+    "${docker_config_quoted}" "${profile_args}" "${service_suffix}"
 }
 
 list_bridge_logs() {
@@ -416,6 +422,7 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   echo "Remote compose dir: ${NAS_COMPOSE_DIR}"
   echo "Remote Docker config: ${NAS_DOCKER_CONFIG}"
   echo "Remote Docker bin dir: ${NAS_DOCKER_BIN_DIR}"
+  echo "Remote Compose profile: ${NAS_COMPOSE_PROFILE:-<none>}"
   echo "Use NAS Docker config for local build: ${USE_NAS_DOCKER_CONFIG_FOR_BUILD}"
   if has_services; then
     echo "Services: ${SERVICES[*]}"

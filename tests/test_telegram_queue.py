@@ -159,3 +159,80 @@ def test_healthcheck_reports_sustained_heartbeat_failure(monkeypatch):
     assert response.status_code == 503
     assert payload["status"] == "unhealthy"
     assert "heartbeat_failed" in payload["reasons"]
+
+
+def test_healthcheck_allows_initial_heartbeat_during_startup_grace(monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(telegram_app, "last_activity", now)
+    monkeypatch.setattr(telegram_app, "is_bot_healthy", True)
+    monkeypatch.setattr(telegram_app, "last_heartbeat_ok", None)
+    monkeypatch.setattr(telegram_app, "last_heartbeat_at", 0.0)
+    monkeypatch.setattr(telegram_app, "heartbeat_unhealthy_since", 0.0)
+    monkeypatch.setattr(
+        telegram_app,
+        "heartbeat_monitor_started_at",
+        now - 60,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        telegram_app,
+        "TELEGRAM_HEARTBEAT_STARTUP_GRACE_SECONDS",
+        300,
+        raising=False,
+    )
+
+    response = telegram_app.health_app.test_client().get("/health?deep=1")
+
+    payload = response.get_json()
+    assert response.status_code == 200
+    assert payload["status"] == "healthy"
+    assert payload["time_since_heartbeat_sec"] is None
+    assert "heartbeat_missing" not in payload["reasons"]
+
+
+def test_healthcheck_rejects_missing_initial_heartbeat_after_grace(monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(telegram_app, "last_activity", now)
+    monkeypatch.setattr(telegram_app, "is_bot_healthy", True)
+    monkeypatch.setattr(telegram_app, "last_heartbeat_ok", None)
+    monkeypatch.setattr(telegram_app, "last_heartbeat_at", 0.0)
+    monkeypatch.setattr(telegram_app, "heartbeat_unhealthy_since", 0.0)
+    monkeypatch.setattr(
+        telegram_app,
+        "heartbeat_monitor_started_at",
+        now - 301,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        telegram_app,
+        "TELEGRAM_HEARTBEAT_STARTUP_GRACE_SECONDS",
+        300,
+        raising=False,
+    )
+
+    response = telegram_app.health_app.test_client().get("/health?deep=1")
+
+    payload = response.get_json()
+    assert response.status_code == 503
+    assert payload["status"] == "unhealthy"
+    assert payload["time_since_heartbeat_sec"] is None
+    assert payload["heartbeat_monitor_age_sec"] >= 300
+    assert "heartbeat_missing" in payload["reasons"]
+
+
+def test_healthcheck_only_mode_does_not_require_telegram_heartbeat(monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(telegram_app, "TELEGRAM_ENABLED", False)
+    monkeypatch.setattr(telegram_app, "last_activity", now)
+    monkeypatch.setattr(telegram_app, "is_bot_healthy", True)
+    monkeypatch.setattr(telegram_app, "last_heartbeat_ok", None)
+    monkeypatch.setattr(telegram_app, "last_heartbeat_at", 0.0)
+    monkeypatch.setattr(telegram_app, "heartbeat_unhealthy_since", 0.0)
+    monkeypatch.setattr(telegram_app, "heartbeat_monitor_started_at", now - 3600)
+
+    response = telegram_app.health_app.test_client().get("/health?deep=1")
+
+    payload = response.get_json()
+    assert response.status_code == 200
+    assert payload["status"] == "healthy"
+    assert "heartbeat_missing" not in payload["reasons"]

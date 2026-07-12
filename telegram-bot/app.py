@@ -217,6 +217,9 @@ TELEGRAM_HEARTBEAT_FAILURE_THRESHOLD = max(
 TELEGRAM_HEARTBEAT_STALE_FAIL_SECONDS = max(
     60, _get_int(os.getenv("TELEGRAM_HEARTBEAT_STALE_FAIL_SECONDS"), 900)
 )
+TELEGRAM_HEARTBEAT_STARTUP_GRACE_SECONDS = max(
+    30, _get_int(os.getenv("TELEGRAM_HEARTBEAT_STARTUP_GRACE_SECONDS"), 300)
+)
 TELEGRAM_RESTART_AFTER_UNHEALTHY_SECONDS = max(
     0, _get_int(os.getenv("TELEGRAM_RESTART_AFTER_UNHEALTHY_SECONDS"), 900)
 )
@@ -1127,6 +1130,7 @@ last_heartbeat_at = 0.0
 last_ping_ms = None
 consecutive_heartbeat_failures = 0
 heartbeat_unhealthy_since = 0.0
+heartbeat_monitor_started_at = time.time()
 last_idle_warning_at = 0.0
 
 
@@ -1135,6 +1139,19 @@ def _heartbeat_unhealthy_age(now: Optional[float] = None) -> Optional[int]:
         return None
     current_time = now if now is not None else time.time()
     return max(0, int(current_time - heartbeat_unhealthy_since))
+
+
+def _heartbeat_monitor_age(now: Optional[float] = None) -> float:
+    current_time = now if now is not None else time.time()
+    return max(0.0, current_time - heartbeat_monitor_started_at)
+
+
+def _initial_heartbeat_missing(now: Optional[float] = None) -> bool:
+    return bool(
+        TELEGRAM_ENABLED
+        and not last_heartbeat_at
+        and _heartbeat_monitor_age(now) >= TELEGRAM_HEARTBEAT_STARTUP_GRACE_SECONDS
+    )
 
 
 def _mark_heartbeat_success(ping_ms: Optional[int], now: Optional[float] = None) -> None:
@@ -1210,7 +1227,10 @@ def health_check():
     current_time = time.time()
     time_since_activity = current_time - last_activity
     time_since_update = current_time - (last_update_at or 0)
-    time_since_heartbeat = current_time - (last_heartbeat_at or 0)
+    time_since_heartbeat = (
+        current_time - last_heartbeat_at if last_heartbeat_at else None
+    )
+    heartbeat_monitor_age = _heartbeat_monitor_age(current_time)
 
     # 判定阈值（秒）
     idle_fail = 30 * 60
@@ -1220,9 +1240,14 @@ def health_check():
         if current_time - last_idle_warning_at > TELEGRAM_IDLE_WARNING_INTERVAL_SECONDS:
             logger.info("健康检查：超过30分钟无活动，仅记录状态，不判定为不健康")
             last_idle_warning_at = current_time
-    if heartbeat_unhealthy_since:
+    if _initial_heartbeat_missing(current_time):
+        unhealthy_reasons.append("heartbeat_missing")
+    if heartbeat_unhealthy_since and last_heartbeat_at:
         unhealthy_reasons.append("heartbeat_failed")
-    if last_heartbeat_at and time_since_heartbeat > TELEGRAM_HEARTBEAT_STALE_FAIL_SECONDS:
+    if (
+        time_since_heartbeat is not None
+        and time_since_heartbeat > TELEGRAM_HEARTBEAT_STALE_FAIL_SECONDS
+    ):
         unhealthy_reasons.append("heartbeat_stale")
     if not is_bot_healthy:
         unhealthy_reasons.append("flag_unhealthy")
@@ -1236,7 +1261,13 @@ def health_check():
                 "reasons": unhealthy_reasons,
                 "time_since_activity_sec": int(time_since_activity),
                 "time_since_update_sec": int(time_since_update),
-                "time_since_heartbeat_sec": int(time_since_heartbeat),
+                "time_since_heartbeat_sec": (
+                    int(time_since_heartbeat)
+                    if time_since_heartbeat is not None
+                    else None
+                ),
+                "heartbeat_monitor_age_sec": int(heartbeat_monitor_age),
+                "heartbeat_startup_grace_sec": TELEGRAM_HEARTBEAT_STARTUP_GRACE_SECONDS,
                 "last_update_id": last_update_id,
                 "last_heartbeat_ok": last_heartbeat_ok,
                 "last_ping_ms": last_ping_ms,
@@ -1282,13 +1313,26 @@ def connection_monitor(application):
             try:
                 current_time = time.time()
                 time_since_activity = current_time - last_activity
-                time_since_heartbeat = current_time - (last_heartbeat_at or 0)
+                time_since_heartbeat = (
+                    current_time - last_heartbeat_at if last_heartbeat_at else None
+                )
 
                 # 若超过30分钟无活动，仅告警；是否重启交由心跳判定
                 if time_since_activity > 1800:  # 30分钟
                     logger.debug("长时间无活动，等待周期性心跳确认连接状态")
 
-                if last_heartbeat_at and time_since_heartbeat > TELEGRAM_HEARTBEAT_STALE_FAIL_SECONDS:
+                if _initial_heartbeat_missing(current_time):
+                    if not heartbeat_unhealthy_since:
+                        heartbeat_unhealthy_since = current_time
+                        logger.warning(
+                            "Telegram启动%s秒后仍未获得首次心跳，标记为不健康",
+                            TELEGRAM_HEARTBEAT_STARTUP_GRACE_SECONDS,
+                        )
+                    is_bot_healthy = False
+                elif (
+                    time_since_heartbeat is not None
+                    and time_since_heartbeat > TELEGRAM_HEARTBEAT_STALE_FAIL_SECONDS
+                ):
                     if not heartbeat_unhealthy_since:
                         heartbeat_unhealthy_since = current_time
                     logger.warning(
@@ -3430,6 +3474,7 @@ def main():
 
     async def log_status(context: ContextTypes.DEFAULT_TYPE):
         now = time.time()
+        heartbeat_age = int(now - last_heartbeat_at) if last_heartbeat_at else None
         logger.info(
             "Bot状态: healthy=%s, idle=%ss, since_update=%ss, hb_ok=%s, "
             "hb_age=%ss, ping_ms=%s, hb_failures=%s, unhealthy_age=%s, "
@@ -3438,7 +3483,7 @@ def main():
             int(now - last_activity),
             int(now - (last_update_at or 0)),
             last_heartbeat_ok,
-            int(now - (last_heartbeat_at or 0)),
+            heartbeat_age,
             last_ping_ms,
             consecutive_heartbeat_failures,
             _heartbeat_unhealthy_age(now),
