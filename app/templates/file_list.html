@@ -55,6 +55,17 @@
                         </small>
                     </p>
                     <a href="{{ url_for('view.file_detail', file_id=file.get('id')) }}" class="btn btn-primary btn-sm">查看详情</a>
+                    {% if file.get('retry_task_id') %}
+                    <div class="task-actions">
+                        <a href="{{ url_for('view.file_detail', file_id=file.get('retry_task_id')) }}" class="action-button">查看重新发起任务</a>
+                    </div>
+                    {% elif file.get('status') == 'interrupted' and file.get('url') %}
+                    <div class="task-actions">
+                        <form method="post" action="{{ url_for('process.retry_interrupted_task', task_id=file.get('id')) }}">
+                            <button type="submit" class="action-button">重新发起</button>
+                        </form>
+                    </div>
+                    {% endif %}
                 </div>
             </div>
         </div>

@@ -50,6 +50,17 @@
         {% if file.get('error') %}
         <div class="error-message" style="display: block">{{ file.get('error') }}</div>
         {% endif %}
+        {% if file.get('retry_task_id') %}
+        <div class="task-actions">
+            <a href="{{ url_for('view.file_detail', file_id=file.get('retry_task_id')) }}" class="action-button">查看重新发起任务</a>
+        </div>
+        {% elif file.get('status') == 'interrupted' and file.get('url') %}
+        <div class="task-actions">
+            <form method="post" action="{{ url_for('process.retry_interrupted_task', task_id=file.get('id')) }}">
+                <button type="submit" class="action-button">重新发起</button>
+            </form>
+        </div>
+        {% endif %}
     </li>
     {% endfor %}
 </ul>

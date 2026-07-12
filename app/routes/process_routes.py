@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import threading
+import uuid
 from datetime import datetime
 
 from flask import Blueprint, request, jsonify, render_template, redirect, url_for, flash, Response, current_app
@@ -20,6 +21,18 @@ from ..services.runtime import service_proxy
 from ..utils.file_utils import build_task_filename
 
 logger = logging.getLogger(__name__)
+
+RETRY_INTERRUPTED_OPERATION = 'retry_interrupted_task'
+RETRY_TASK_COPY_FIELDS = (
+    'auto_transcribe',
+    'extract_audio',
+    'filename',
+    'hotwords',
+    'location',
+    'page_title',
+    'tags',
+    'video_id',
+)
 
 # 创建蓝图
 process_bp = Blueprint('process', __name__, url_prefix='/process')
@@ -64,8 +77,37 @@ def _run_force_local_readwise_with_app_context(app, task_id, claim_token):
         )
 
 
+def _run_retried_video_task_with_app_context(app, task_info):
+    with app.app_context():
+        processing_service.process_video_task(
+            task_info,
+            _task_bool(task_info.get('auto_transcribe')),
+        )
+
+
 def _wants_json_response():
     return request.is_json or request.accept_mimetypes.best == 'application/json'
+
+
+def _task_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+
+def _retry_task_response(task_id, reused=False):
+    if _wants_json_response():
+        return jsonify({
+            'success': True,
+            'status': 'processing',
+            'process_id': task_id,
+            'status_url': f'/process/status/{task_id}',
+            'view_url': f'/view/{task_id}',
+            'reused': reused,
+        }), 202
+    return redirect(url_for('view.file_detail', file_id=task_id), code=303)
 
 
 def _normalize_language_confirmation_choice(language):
@@ -660,6 +702,142 @@ def force_local_readwise(task_id):
             return jsonify({'success': False, 'status': 'error', 'error': str(e)}), 500
         flash(f'启动强制本地Readwise重发失败: {str(e)}', 'error')
         return redirect(url_for('view.file_detail', file_id=task_id))
+
+
+@process_bp.route('/status/<task_id>/retry', methods=['POST'])
+def retry_interrupted_task(task_id):
+    """Create one fresh task from an interrupted task and start it immediately."""
+    claim_token = None
+    new_task_id = None
+    try:
+        task_info = file_service.get_file_info(task_id)
+        if not task_info:
+            if _wants_json_response():
+                return jsonify({'success': False, 'status': 'not_found'}), 404
+            flash('处理任务不存在', 'error')
+            return redirect(url_for('view.index'))
+
+        existing_retry_id = task_info.get('retry_task_id')
+        if existing_retry_id and file_service.get_file_info(existing_retry_id):
+            return _retry_task_response(existing_retry_id, reused=True)
+
+        if task_info.get('status') != 'interrupted':
+            message = '只有因服务重启而中断的任务可以重新发起。'
+            if _wants_json_response():
+                return jsonify({
+                    'success': False,
+                    'status': 'invalid_task_status',
+                    'error': message,
+                }), 409
+            flash(message, 'error')
+            return redirect(url_for('view.file_detail', file_id=task_id))
+
+        if not task_info.get('url') or not task_info.get('platform'):
+            message = '任务缺少原始链接或平台，无法重新发起。'
+            if _wants_json_response():
+                return jsonify({
+                    'success': False,
+                    'status': 'invalid_task',
+                    'error': message,
+                }), 400
+            flash(message, 'error')
+            return redirect(url_for('view.file_detail', file_id=task_id))
+
+        claim_token = file_service.claim_task_operation(
+            task_id,
+            RETRY_INTERRUPTED_OPERATION,
+            ttl_seconds=60,
+        )
+        if not claim_token:
+            refreshed_task = file_service.get_file_info(task_id) or {}
+            existing_retry_id = refreshed_task.get('retry_task_id')
+            if existing_retry_id and file_service.get_file_info(existing_retry_id):
+                return _retry_task_response(existing_retry_id, reused=True)
+
+            message = '该任务正在重新发起，请勿重复提交。'
+            if _wants_json_response():
+                return jsonify({
+                    'success': False,
+                    'status': 'already_processing',
+                    'error': message,
+                }), 409
+            flash(message, 'error')
+            return redirect(url_for('view.file_detail', file_id=task_id))
+
+        task_info = file_service.get_file_info(task_id) or task_info
+        existing_retry_id = task_info.get('retry_task_id')
+        if existing_retry_id and file_service.get_file_info(existing_retry_id):
+            return _retry_task_response(existing_retry_id, reused=True)
+
+        now = datetime.now().isoformat()
+        new_task_id = str(uuid.uuid4())
+        new_task = {
+            'id': new_task_id,
+            'url': task_info['url'],
+            'platform': task_info['platform'],
+            'status': 'pending',
+            'created_time': now,
+            'updated_time': now,
+            'retry_of': task_id,
+            'retry_root_id': task_info.get('retry_root_id') or task_id,
+            'retry_attempt': int(task_info.get('retry_attempt') or 0) + 1,
+            'request_source': 'web_retry',
+            'original_request_source': task_info.get('request_source'),
+        }
+        for field in RETRY_TASK_COPY_FIELDS:
+            if field in task_info:
+                new_task[field] = task_info[field]
+        new_task['auto_transcribe'] = _task_bool(new_task.get('auto_transcribe'))
+        new_task['extract_audio'] = _task_bool(
+            new_task.get('extract_audio', True)
+        )
+
+        file_service.add_file_info(new_task_id, new_task)
+        if not file_service.get_file_info(new_task_id):
+            raise RuntimeError('无法保存重新发起的任务')
+        file_service.update_file_info(task_id, {
+            'retry_task_id': new_task_id,
+            'retry_requested_at': now,
+            'updated_time': now,
+        })
+        persisted_source = file_service.get_file_info(task_id) or {}
+        if persisted_source.get('retry_task_id') != new_task_id:
+            raise RuntimeError('无法保存原任务与新任务的关联')
+
+        app = current_app._get_current_object()
+        thread = threading.Thread(
+            target=_run_retried_video_task_with_app_context,
+            args=(app, dict(new_task)),
+            daemon=True,
+            name=f'video-task-retry-{new_task_id}',
+        )
+        thread.start()
+
+        logger.info('重新发起中断任务: %s -> %s', task_id, new_task_id)
+        if not _wants_json_response():
+            flash('任务已重新发起', 'success')
+        return _retry_task_response(new_task_id)
+
+    except Exception as e:
+        if new_task_id:
+            file_service.delete_file_info(new_task_id)
+            file_service.update_file_info(task_id, {
+                'retry_task_id': None,
+                'retry_requested_at': None,
+                'updated_time': datetime.now().isoformat(),
+            })
+        logger.error('重新发起中断任务失败(%s): %s', task_id, str(e))
+        if _wants_json_response():
+            return jsonify({'success': False, 'status': 'error', 'error': str(e)}), 500
+        flash(f'重新发起失败: {str(e)}', 'error')
+        return redirect(url_for('view.file_detail', file_id=task_id))
+    finally:
+        if claim_token:
+            file_service.release_task_operation(
+                task_id,
+                RETRY_INTERRUPTED_OPERATION,
+                claim_token,
+            )
 
 
 @process_bp.route('/status/<task_id>/language', methods=['POST'])

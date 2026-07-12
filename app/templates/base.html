@@ -108,6 +108,33 @@
                 border-radius: 4px;
                 display: none;
             }
+            .task-actions {
+                display: flex;
+                align-items: center;
+                flex-wrap: wrap;
+                gap: 8px;
+                margin-top: 10px;
+            }
+            .task-actions form {
+                margin: 0;
+            }
+            .action-button {
+                display: inline-flex;
+                align-items: center;
+                min-height: 36px;
+                padding: 7px 14px;
+                border: 0;
+                border-radius: 4px;
+                background: #0066cc;
+                color: white;
+                cursor: pointer;
+                font: inherit;
+                line-height: 1.2;
+                text-decoration: none;
+            }
+            .action-button:hover {
+                background: #0052a3;
+            }
         </style>
         {% block head %}{% endblock %}
     </head>

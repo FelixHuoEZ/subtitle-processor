@@ -3,7 +3,7 @@ from pathlib import Path
 from flask import Flask
 
 from app.main import register_main_routes
-from app.routes import view_routes
+from app.routes import process_routes, view_routes
 from app.services import file_service as file_service_module
 from app.utils.file_utils import get_file_created_time
 
@@ -22,6 +22,7 @@ class FakeFileService:
 def _build_client(monkeypatch, tasks):
     fake_file_service = FakeFileService(tasks)
     monkeypatch.setattr(view_routes, "file_service", fake_file_service)
+    monkeypatch.setattr(process_routes, "file_service", fake_file_service)
     monkeypatch.setattr(file_service_module, "FileService", lambda: fake_file_service)
     app = Flask(
         __name__,
@@ -29,6 +30,7 @@ def _build_client(monkeypatch, tasks):
     )
     app.secret_key = "test"
     app.register_blueprint(view_routes.view_bp)
+    app.register_blueprint(process_routes.process_bp)
     register_main_routes(app)
     return app.test_client()
 

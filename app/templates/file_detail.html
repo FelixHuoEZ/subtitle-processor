@@ -270,6 +270,18 @@
     <div class="error-message" style="display: block">{{ file_info.get('error') }}</div>
     {% endif %}
 
+    {% if file_info.get('retry_task_id') %}
+    <div class="task-actions">
+        <a href="{{ url_for('view.file_detail', file_id=file_info.get('retry_task_id')) }}" class="action-button">查看重新发起任务</a>
+    </div>
+    {% elif file_info.get('status') == 'interrupted' and file_info.get('url') %}
+    <div class="task-actions">
+        <form method="post" action="{{ url_for('process.retry_interrupted_task', task_id=file_info.get('id')) }}">
+            <button type="submit" class="action-button">重新发起</button>
+        </form>
+    </div>
+    {% endif %}
+
     {% if file_info.get('force_local_readwise_available') %}
     <form method="post" action="{{ url_for('process.force_local_readwise', task_id=file_info.get('id')) }}" style="margin: 12px 0">
         <button type="submit">强制本地字幕/全文重发到 Readwise</button>
