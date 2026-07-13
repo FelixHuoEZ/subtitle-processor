@@ -42,8 +42,23 @@ class FakeVideoService:
         self.cleaned = []
         self.events = events if events is not None else []
 
-    def process_video_for_transcription(self, url, platform, force_local_processing=False):
+    def process_video_for_transcription(
+        self,
+        url,
+        platform,
+        force_local_processing=False,
+        download_progress_callback=None,
+    ):
         self.events.append("video")
+        if download_progress_callback:
+            download_progress_callback(
+                {
+                    "event": "acquired",
+                    "queue_position": 0,
+                    "active_downloads": 1,
+                    "download_limit": 2,
+                }
+            )
         self.calls.append(
             {
                 "url": url,
@@ -184,6 +199,7 @@ def test_force_local_retry_preserves_url_only_item_and_sends_full_text(tmp_path)
     assert fallback_run["status"] == "completed"
     assert [stage["code"] for stage in fallback_run["stages"]] == [
         "delete_url_only",
+        "source_analysis",
         "download_prepare",
         "normalize_subtitles",
         "send_readwise",

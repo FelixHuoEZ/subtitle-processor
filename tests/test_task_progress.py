@@ -111,6 +111,36 @@ def test_dynamic_plan_reports_current_and_remaining_stages():
     assert 0 < snapshot["progress"] < 100
 
 
+def test_download_queue_stage_reports_position_without_overdue_warning():
+    clock = Clock(datetime(2026, 7, 10, 12, 0, 0))
+    task = {"id": "task-queue", "status": "processing"}
+    service = TaskProgressService(
+        FakeFileService({"task-queue": task}),
+        now=clock.now,
+    )
+    service.start_run(task, path="unknown")
+    service.transition(task, "source_analysis")
+    service.transition(
+        task,
+        "wait_download_slot",
+        context={"queue_position": 3, "active_downloads": 2, "download_limit": 2},
+    )
+    clock.advance(600)
+    service.transition(
+        task,
+        "wait_download_slot",
+        context={"queue_position": 1, "active_downloads": 2, "download_limit": 2},
+    )
+
+    snapshot = service.snapshot(task)
+
+    assert snapshot["current_stage"]["code"] == "wait_download_slot"
+    assert snapshot["current_stage"]["context"]["queue_position"] == 1
+    assert snapshot["current_stage"]["elapsed_seconds"] == 600
+    assert snapshot["current_stage"]["overdue"] is False
+    assert snapshot["current_stage"]["estimate"]["source"] == "unavailable"
+
+
 def test_orphaned_running_task_is_marked_interrupted():
     task = {
         "id": "task-1",

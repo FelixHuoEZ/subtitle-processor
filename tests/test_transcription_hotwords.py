@@ -204,6 +204,7 @@ def test_transcribe_audio_applies_post_processor(monkeypatch: pytest.MonkeyPatch
 def test_detect_audio_language_uses_segment_votes(monkeypatch: pytest.MonkeyPatch, tmp_path):
     service = TranscriptionService()
     service.openai_api_key = "test-key"
+    service.audio_probe_providers = ["openai"]
     audio_path = _create_dummy_audio(tmp_path)
 
     monkeypatch.setattr(service, "_get_audio_info", lambda _: {"duration_seconds": 90})

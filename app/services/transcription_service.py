@@ -1,5 +1,6 @@
 """Audio transcription service using FunASR for subtitle generation."""
 
+import importlib.util
 import json
 import logging
 import math
@@ -36,6 +37,8 @@ class TranscriptionService:
     _AUDIO_PROBE_REPEAT_BONUS = 0.12
     _AUDIO_PROBE_REPEAT_BONUS_CAP = 0.24
     _AUDIO_PROBE_MIXED_UNCERTAINTY_WEIGHT = 0.35
+    _openai_warning_lock = threading.Lock()
+    _openai_warning_emitted = False
 
     def __init__(self):
         """初始化转录服务"""
@@ -53,9 +56,19 @@ class TranscriptionService:
         )
         self._rr_lock = threading.Lock()
         self._rr_index = 0
-        self.openai_api_key = get_config_value("tokens.openai.api_key", "")
-        self.openai_base_url = get_config_value(
+        raw_openai_api_key = get_config_value("tokens.openai.api_key", "")
+        self.openai_api_key = (
+            raw_openai_api_key.strip()
+            if isinstance(raw_openai_api_key, str)
+            else ""
+        )
+        raw_openai_base_url = get_config_value(
             "tokens.openai.base_url", "https://api.openai.com/v1"
+        )
+        self.openai_base_url = (
+            raw_openai_base_url.strip()
+            if isinstance(raw_openai_base_url, str) and raw_openai_base_url.strip()
+            else "https://api.openai.com/v1"
         )
         self.hotword_service = HotwordService()
         self.default_hotwords = self.hotword_service.get_default_hotwords()
@@ -85,8 +98,20 @@ class TranscriptionService:
             logger.info("转录并发限制: %s", self.transcribe_concurrency)
         else:
             logger.info("转录并发限制: 未启用")
-        self.audio_probe_providers = self._parse_audio_probe_providers(
+        requested_audio_probe_providers = self._parse_audio_probe_providers(
             os.getenv("AUDIO_PROBE_PROVIDERS", "configured_funasr,openai")
+        )
+        openai_unavailable_reason = self._get_openai_unavailable_reason()
+        self.openai_transcription_available = openai_unavailable_reason is None
+        if "openai" in requested_audio_probe_providers and openai_unavailable_reason:
+            self._warn_openai_unavailable_once(openai_unavailable_reason)
+            requested_audio_probe_providers = [
+                provider
+                for provider in requested_audio_probe_providers
+                if provider != "openai"
+            ]
+        self.audio_probe_providers = (
+            requested_audio_probe_providers or ["configured_funasr"]
         )
         self.audio_probe_min_confidence = min(
             1.0, max(0.0, float(os.getenv("AUDIO_PROBE_MIN_CONFIDENCE", "0.58")))
@@ -122,6 +147,21 @@ class TranscriptionService:
             if normalized in {"configured_funasr", "openai"} and normalized not in providers:
                 providers.append(normalized)
         return providers or ["configured_funasr", "openai"]
+
+    def _get_openai_unavailable_reason(self) -> Optional[str]:
+        if not self.openai_api_key:
+            return "未配置 Whisper 可用的标量 API key"
+        if importlib.util.find_spec("openai") is None:
+            return "未安装 openai SDK"
+        return None
+
+    @classmethod
+    def _warn_openai_unavailable_once(cls, reason: str) -> None:
+        with cls._openai_warning_lock:
+            if cls._openai_warning_emitted:
+                return
+            logger.warning("OpenAI Whisper provider 已自动禁用: %s", reason)
+            cls._openai_warning_emitted = True
 
     def _load_transcribe_servers(self) -> List[Dict[str, Any]]:
         """加载转录服务器列表"""
@@ -349,12 +389,15 @@ class TranscriptionService:
                     result, final_hotwords
                 )
 
-            # 如果FunASR失败，尝试OpenAI Whisper
-            logger.warning("FunASR转录失败，尝试OpenAI Whisper")
-            whisper_result = self._transcribe_with_openai(audio_file)
-            return self.hotword_post_processor.process_result(
-                whisper_result, final_hotwords
-            )
+            if self.openai_transcription_available:
+                logger.warning("FunASR转录失败，尝试OpenAI Whisper")
+                whisper_result = self._transcribe_with_openai(audio_file)
+                return self.hotword_post_processor.process_result(
+                    whisper_result, final_hotwords
+                )
+
+            logger.warning("FunASR转录失败，OpenAI Whisper 兜底当前不可用")
+            return None
 
         except Exception as e:
             logger.error(f"转录音频失败: {str(e)}")

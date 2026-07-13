@@ -82,12 +82,14 @@ class ProcessingService:
         task_info["updated_time"] = datetime.now().isoformat()
         self.file_service.update_file_info(process_id, task_info)
         self.task_progress.start_run(task_info, path="unknown")
-        self.task_progress.transition(task_info, "download_prepare")
+        self.task_progress.transition(task_info, "source_analysis")
 
         try:
             logger.info("第1步：开始视频下载和预处理")
             result = self.video_service.process_video_for_transcription(
-                url=url, platform=platform
+                url=url,
+                platform=platform,
+                download_progress_callback=self._download_progress_callback(task_info),
             )
             logger.info("第1步完成：视频处理结果存在: %s", result is not None)
 
@@ -201,6 +203,34 @@ class ProcessingService:
         """Return a UI-safe snapshot of stages, remaining work, and ETA."""
         return self.task_progress.snapshot(task_info)
 
+    def _download_progress_callback(self, task_info):
+        def update_progress(event):
+            event = event or {}
+            context = {
+                key: event.get(key)
+                for key in (
+                    "queue_position",
+                    "active_downloads",
+                    "download_limit",
+                )
+                if event.get(key) is not None
+            }
+            if event.get("event") == "waiting":
+                self.task_progress.transition(
+                    task_info,
+                    "wait_download_slot",
+                    context=context,
+                )
+            elif event.get("event") in {"acquired", "cache_hit"}:
+                context["cache_hit"] = event.get("event") == "cache_hit"
+                self.task_progress.transition(
+                    task_info,
+                    "download_prepare",
+                    context=context,
+                )
+
+        return update_progress
+
     def _set_progress_plan_from_video_result(self, task_info, result):
         self.task_progress.update_current_stage_context(
             task_info,
@@ -208,13 +238,14 @@ class ProcessingService:
         )
         if result.get("readwise_url_only") and result.get("skip_processing_for_url_only"):
             path = "url_only"
-            stages = ["download_prepare", "send_readwise", "verify_readwise"]
+            stages = ["source_analysis", "send_readwise", "verify_readwise"]
         elif result.get("subtitle_content"):
             path = "existing_subtitle"
-            stages = ["download_prepare", "normalize_subtitles", "send_readwise"]
+            stages = ["source_analysis", "normalize_subtitles", "send_readwise"]
         elif result.get("needs_transcription") and result.get("audio_file"):
             path = "transcription"
             stages = [
+                "source_analysis",
                 "download_prepare",
                 "transcribe_audio",
                 "generate_subtitles",
@@ -222,7 +253,7 @@ class ProcessingService:
             ]
         else:
             path = "unavailable"
-            stages = ["download_prepare"]
+            stages = ["source_analysis", "download_prepare"]
         self.task_progress.set_plan(task_info, path=path, stage_codes=stages)
 
     def _handle_url_only_readwise(self, process_id, task_info):
@@ -230,7 +261,7 @@ class ProcessingService:
         self.task_progress.set_plan(
             task_info,
             path="url_only",
-            stage_codes=["download_prepare", "send_readwise", "verify_readwise"],
+            stage_codes=["source_analysis", "send_readwise", "verify_readwise"],
         )
         self.task_progress.transition(task_info, "send_readwise")
         logger.info(
@@ -483,6 +514,7 @@ class ProcessingService:
             path="fallback",
             stage_codes=fallback_prefix
             + [
+                "source_analysis",
                 "download_prepare",
                 "transcribe_audio",
                 "generate_subtitles",
@@ -492,7 +524,7 @@ class ProcessingService:
         )
         self.task_progress.transition(
             task_info,
-            "delete_url_only" if original_article_id else "download_prepare",
+            "delete_url_only" if original_article_id else "source_analysis",
         )
         task_info.update(
             {
@@ -536,7 +568,7 @@ class ProcessingService:
                 task_info["readwise_deleted_article_id"] = original_article_id
                 task_info["readwise_article_id"] = None
                 task_info["readwise_url"] = None
-                self.task_progress.transition(task_info, "download_prepare")
+                self.task_progress.transition(task_info, "source_analysis")
             else:
                 task_info["readwise_url_only_delete_status"] = "skipped"
 
@@ -554,6 +586,7 @@ class ProcessingService:
                 url=url,
                 platform=platform,
                 force_local_processing=True,
+                download_progress_callback=self._download_progress_callback(task_info),
             )
             if result:
                 task_temp_dir = result.get("temp_dir")
@@ -578,19 +611,23 @@ class ProcessingService:
             )
             if result.get("subtitle_content"):
                 fallback_stages = fallback_prefix + [
-                    "download_prepare",
+                    "source_analysis",
                     "normalize_subtitles",
                     "send_readwise",
                 ]
             elif result.get("needs_transcription") and result.get("audio_file"):
                 fallback_stages = fallback_prefix + [
+                    "source_analysis",
                     "download_prepare",
                     "transcribe_audio",
                     "generate_subtitles",
                     "send_readwise",
                 ]
             else:
-                fallback_stages = fallback_prefix + ["download_prepare"]
+                fallback_stages = fallback_prefix + [
+                    "source_analysis",
+                    "download_prepare",
+                ]
             self.task_progress.set_plan(
                 task_info,
                 path="fallback",

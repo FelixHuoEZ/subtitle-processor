@@ -1,3 +1,6 @@
+import logging
+
+from app.services import transcription_service as transcription_module
 from app.services.transcription_service import TranscriptionService
 
 
@@ -5,6 +8,34 @@ def build_transcription_service(monkeypatch):
     monkeypatch.delenv("AUDIO_PROBE_PROVIDERS", raising=False)
     monkeypatch.delenv("AUDIO_PROBE_MIN_CONFIDENCE", raising=False)
     return TranscriptionService()
+
+
+def test_audio_probe_disables_openai_once_when_sdk_is_unavailable(
+    monkeypatch, caplog
+):
+    original_get_config_value = transcription_module.get_config_value
+
+    def fake_get_config_value(key, default=None):
+        if key == "tokens.openai.api_key":
+            return "configured-key"
+        return original_get_config_value(key, default)
+
+    monkeypatch.setattr(transcription_module, "get_config_value", fake_get_config_value)
+    monkeypatch.setattr(transcription_module.importlib.util, "find_spec", lambda _: None)
+    monkeypatch.setattr(TranscriptionService, "_openai_warning_emitted", False)
+
+    with caplog.at_level(logging.WARNING):
+        first = build_transcription_service(monkeypatch)
+        second = build_transcription_service(monkeypatch)
+
+    assert first.audio_probe_providers == ["configured_funasr"]
+    assert second.audio_probe_providers == ["configured_funasr"]
+    warnings = [
+        record
+        for record in caplog.records
+        if "OpenAI Whisper provider 已自动禁用" in record.getMessage()
+    ]
+    assert len(warnings) == 1
 
 
 def test_audio_probe_prefers_configured_funasr_when_result_is_usable(

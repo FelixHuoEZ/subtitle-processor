@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -8,7 +9,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from app.services.video_service import VideoService
+from app.services.video_service import VideoService, _DownloadGate
 from yt_dlp.utils import DownloadError
 
 
@@ -271,7 +272,7 @@ def test_process_video_result_includes_download_error(monkeypatch):
     monkeypatch.setattr(
         service,
         "download_video",
-        lambda url, platform=None: {
+        lambda url, platform=None, progress_callback=None: {
             "audio_file": None,
             "temp_dir": None,
             "error": "YouTube 音频下载失败：媒体流返回 HTTP 403",
@@ -531,3 +532,214 @@ def test_summarize_download_errors_prefers_bot_and_challenge_signal():
     )
 
     assert "YouTube 要求登录验证或 bot 校验" in message
+
+
+def test_download_gate_reports_fifo_queue_position():
+    gate = _DownloadGate(limit=1, heartbeat_seconds=0.01)
+    gate.acquire()
+    events = []
+    acquired = threading.Event()
+
+    def wait_for_slot():
+        gate.acquire(events.append)
+        acquired.set()
+        gate.release()
+
+    worker = threading.Thread(target=wait_for_slot)
+    worker.start()
+    for _ in range(100):
+        if events:
+            break
+        time.sleep(0.01)
+
+    assert events[0] == {
+        "event": "waiting",
+        "queue_position": 1,
+        "active_downloads": 1,
+        "download_limit": 1,
+    }
+
+    gate.release()
+    worker.join(timeout=1)
+
+    assert acquired.is_set()
+    assert events[-1]["event"] == "acquired"
+
+
+def test_download_video_switches_profile_immediately_on_bot_challenge(
+    monkeypatch, tmp_path
+):
+    service = VideoService()
+    attempts = []
+
+    class DummyYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            profile = self.opts["test_profile"]
+            attempts.append((profile, self.opts.get("format")))
+            if profile == "public":
+                raise DownloadError("Sign in to confirm you're not a bot")
+            output_path = self.opts["outtmpl"].replace("%(id)s", "test-video")
+            Path(output_path.replace("%(ext)s", "m4a")).write_bytes(b"audio")
+
+    monkeypatch.setattr("app.services.video_service.time.sleep", lambda *_: None)
+    monkeypatch.setattr("app.services.video_service.yt_dlp.YoutubeDL", DummyYDL)
+    monkeypatch.setattr(
+        service,
+        "_build_download_option_profiles",
+        lambda temp_dir, platform, url: [
+            {
+                "desc": "public",
+                "opts": {
+                    "test_profile": "public",
+                    "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
+                },
+            },
+            {
+                "desc": "auth",
+                "opts": {
+                    "test_profile": "auth",
+                    "cookiefile": "/tmp/cookies.txt",
+                    "outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s"),
+                },
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        service,
+        "_build_download_format_attempts",
+        lambda info, platform: [
+            {"format": None, "desc": "default"},
+            {"format": "140", "desc": "m4a"},
+        ],
+    )
+    monkeypatch.setattr(service, "_convert_to_audio", lambda path, output_dir: path)
+
+    result = service.download_video(
+        "https://www.youtube.com/watch?v=test-video",
+        output_folder=str(tmp_path),
+        platform="youtube",
+    )
+
+    assert result["error"] is None
+    assert attempts == [("public", None), ("auth", None)]
+
+
+def test_download_video_shares_403_retry_budget_across_profile_formats(
+    monkeypatch, tmp_path
+):
+    service = VideoService()
+    service.download_retry_max = 2
+    attempts = []
+
+    class DummyYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            attempts.append(self.opts.get("format"))
+            raise DownloadError("HTTP Error 403: Forbidden")
+
+    monkeypatch.setattr("app.services.video_service.time.sleep", lambda *_: None)
+    monkeypatch.setattr("app.services.video_service.yt_dlp.YoutubeDL", DummyYDL)
+    monkeypatch.setattr(
+        service,
+        "_build_download_option_profiles",
+        lambda temp_dir, platform, url: [
+            {
+                "desc": "single profile",
+                "opts": {"outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s")},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        service,
+        "_build_download_format_attempts",
+        lambda info, platform: [
+            {"format": "140", "desc": "one"},
+            {"format": "251", "desc": "two"},
+            {"format": "18", "desc": "three"},
+        ],
+    )
+
+    result = service.download_video(
+        "https://www.youtube.com/watch?v=test-video",
+        output_folder=str(tmp_path),
+        platform="youtube",
+    )
+
+    assert result["audio_file"] is None
+    assert len(attempts) == 5
+    assert attempts[:3] == ["140", "140", "140"]
+    assert attempts[3:] == ["251", "18"]
+
+
+def test_download_video_stops_new_attempts_after_total_timeout(monkeypatch, tmp_path):
+    service = VideoService()
+    service.download_total_timeout = 5
+    clock = [0.0]
+    attempts = []
+
+    class DummyYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            attempts.append(self.opts.get("format"))
+            raise DownloadError("requested format is not available")
+
+    monkeypatch.setattr(
+        "app.services.video_service.time.monotonic", lambda: clock[0]
+    )
+    monkeypatch.setattr(
+        "app.services.video_service.time.sleep",
+        lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+    monkeypatch.setattr("app.services.video_service.yt_dlp.YoutubeDL", DummyYDL)
+    monkeypatch.setattr(
+        service,
+        "_build_download_option_profiles",
+        lambda temp_dir, platform, url: [
+            {
+                "desc": "single profile",
+                "opts": {"outtmpl": os.path.join(temp_dir, "%(id)s.%(ext)s")},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        service,
+        "_build_download_format_attempts",
+        lambda info, platform: [
+            {"format": "140", "desc": "one"},
+            {"format": "251", "desc": "two"},
+        ],
+    )
+
+    result = service.download_video(
+        "https://www.youtube.com/watch?v=test-video",
+        output_folder=str(tmp_path),
+        platform="youtube",
+    )
+
+    assert attempts == ["140"]
+    assert "下载阶段超过总时限" in result["error"]

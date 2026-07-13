@@ -384,6 +384,11 @@
                 return "实际 " + formatDuration(stage.actual_seconds);
             }
             if (stage.status === "running") {
+                if (stage.code === "wait_download_slot") {
+                    const position = stage.context?.queue_position;
+                    const queueText = position ? "队列第 " + position + " 位 · " : "";
+                    return queueText + "已等待 " + formatDuration(stage.elapsed_seconds);
+                }
                 if (stage.overdue) {
                     return "已用 " + formatDuration(stage.elapsed_seconds) + "，超出常见范围";
                 }
@@ -498,7 +503,11 @@
             valueEl.textContent = progress + "%";
             barEl.style.setProperty("--progress-scale", String(progress / 100));
             barEl.setAttribute("aria-valuenow", String(progress));
+            const queuePosition = currentStage?.context?.queue_position;
             stageEl.textContent = currentStage?.label || data.stage_label || statusLabels[status] || status;
+            if (currentStage?.code === "wait_download_slot" && queuePosition) {
+                stageEl.textContent += "（队列第 " + queuePosition + " 位）";
+            }
             if (currentStage?.position && details?.stage_count) {
                 positionEl.textContent = "第 " + currentStage.position + "/" + details.stage_count + " 步";
             } else {
@@ -512,6 +521,13 @@
 
             if (isTerminal) {
                 etaEl.textContent = status === "completed" ? "全部流程已经完成" : "本次流程已经结束";
+            } else if (currentStage?.code === "wait_download_slot") {
+                const active = currentStage.context?.active_downloads;
+                const limit = currentStage.context?.download_limit;
+                const slotText = Number.isFinite(Number(active)) && Number.isFinite(Number(limit))
+                    ? "当前 " + active + "/" + limit + " 个下载槽位占用"
+                    : "正在等待可用下载槽位";
+                etaEl.textContent = slotText + "，排队时间不计入阶段超时";
             } else if (currentStage?.overdue) {
                 etaEl.textContent = "当前阶段已超出常见范围，任务仍在处理";
             } else if (details?.eta?.source === "unavailable") {

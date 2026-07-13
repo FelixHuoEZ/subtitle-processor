@@ -11,7 +11,7 @@ import threading
 import time
 from copy import deepcopy
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -54,6 +54,74 @@ class _YtDlpLogger:
             self.warning_sink.append(str(msg))
 
 
+class _DownloadGate:
+    """FIFO download concurrency gate with observable queue state."""
+
+    def __init__(self, limit: int, heartbeat_seconds: float = 5.0):
+        self.limit = max(1, int(limit))
+        self.heartbeat_seconds = max(0.1, float(heartbeat_seconds))
+        self._condition = threading.Condition()
+        self._active = 0
+        self._waiters: List[object] = []
+
+    def acquire(
+        self, progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+    ) -> None:
+        ticket = object()
+        with self._condition:
+            self._waiters.append(ticket)
+
+        while True:
+            with self._condition:
+                can_acquire = (
+                    self._active < self.limit
+                    and self._waiters
+                    and self._waiters[0] is ticket
+                )
+                if can_acquire:
+                    self._waiters.pop(0)
+                    self._active += 1
+                    state = {
+                        "event": "acquired",
+                        "queue_position": 0,
+                        "active_downloads": self._active,
+                        "download_limit": self.limit,
+                    }
+                else:
+                    state = {
+                        "event": "waiting",
+                        "queue_position": self._waiters.index(ticket) + 1,
+                        "active_downloads": self._active,
+                        "download_limit": self.limit,
+                    }
+
+            self._emit(progress_callback, state)
+            if can_acquire:
+                return
+
+            with self._condition:
+                self._condition.wait(timeout=self.heartbeat_seconds)
+
+    def release(self) -> None:
+        with self._condition:
+            if self._active <= 0:
+                raise RuntimeError("download gate released without an active holder")
+            self._active -= 1
+            self._condition.notify_all()
+
+    @staticmethod
+    def _emit(
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]],
+        state: Dict[str, Any],
+    ) -> None:
+        if not progress_callback:
+            return
+        try:
+            progress_callback(dict(state))
+        except Exception as exc:
+            logger.warning("更新下载队列进度失败，继续执行下载: %s", exc)
+
+
 class VideoService:
     """视频处理服务 - 支持YouTube、Bilibili、AcFun等平台"""
 
@@ -72,7 +140,7 @@ class VideoService:
         self.download_concurrency = self._parse_concurrency_env(
             "DOWNLOAD_CONCURRENCY", 2, "下载"
         )
-        self._download_semaphore = threading.BoundedSemaphore(self.download_concurrency)
+        self._download_gate = _DownloadGate(self.download_concurrency)
         self.download_retry_max = max(0, int(os.getenv("DOWNLOAD_MAX_RETRIES", "3")))
         self.download_retry_base_delay = max(
             0.1, float(os.getenv("DOWNLOAD_RETRY_BASE_DELAY", "2"))
@@ -83,6 +151,12 @@ class VideoService:
         self.download_retry_max_delay = max(
             self.download_retry_base_delay,
             float(os.getenv("DOWNLOAD_RETRY_MAX_DELAY", "30")),
+        )
+        self.download_total_timeout = max(
+            30.0, float(os.getenv("DOWNLOAD_TOTAL_TIMEOUT_SECONDS", "180"))
+        )
+        self.download_socket_timeout = max(
+            5.0, float(os.getenv("DOWNLOAD_SOCKET_TIMEOUT_SECONDS", "30"))
         )
         self.youtube_download_probe_enabled = self._parse_bool_env(
             "YOUTUBE_DOWNLOAD_PROBE", False
@@ -110,6 +184,11 @@ class VideoService:
             self.download_retry_base_delay,
             self.download_retry_backoff,
             self.download_retry_max_delay,
+        )
+        logger.info(
+            "下载超时参数: total=%.0fs, socket=%.0fs",
+            self.download_total_timeout,
+            self.download_socket_timeout,
         )
         logger.info(
             "YouTube 下载前额外信息探测: %s", self.youtube_download_probe_enabled
@@ -906,6 +985,20 @@ class VideoService:
         lowered = message.lower()
         return "403" in lowered and "forbidden" in lowered
 
+    @staticmethod
+    def _is_youtube_bot_challenge_error(
+        error: Exception, messages: Optional[List[str]] = None
+    ) -> bool:
+        combined = " ".join([str(error), *(messages or [])]).lower()
+        return any(
+            signal in combined
+            for signal in (
+                "sign in to confirm",
+                "not a bot",
+                "cookies-from-browser or --cookies",
+            )
+        )
+
     def _calculate_download_backoff(self, attempt: int) -> float:
         """计算下载403重试的退避时间"""
         delay = self.download_retry_base_delay * (
@@ -1095,6 +1188,12 @@ class VideoService:
             return "音频下载失败"
 
         combined = " ".join(normalized_errors).lower()
+        if "下载阶段超过总时限" in combined:
+            return next(
+                error
+                for error in reversed(normalized_errors)
+                if "下载阶段超过总时限" in error
+            )
         if used_cookie_auth and (
             ("only images are available" in combined or "requested format is not available" in combined)
             and ("n challenge" in combined or "js challenge" in combined or "sabr" in combined)
@@ -1941,6 +2040,7 @@ class VideoService:
         url: str,
         output_folder: Optional[str] = None,
         platform: Optional[str] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Optional[Dict[str, Any]]:
         """下载视频并提取音频
 
@@ -1948,6 +2048,7 @@ class VideoService:
             url: 视频URL
             output_folder: 输出目录，默认使用配置的上传目录
             platform: 平台名称，用于设置正确的请求头
+            progress_callback: 下载排队和槽位获取事件回调
 
         Returns:
             dict: 成功时返回音频文件路径和临时目录，失败返回None
@@ -1955,16 +2056,23 @@ class VideoService:
         resolved_platform = platform or "youtube"
         cached_asset = self._get_cached_download_asset(url, resolved_platform)
         if cached_asset:
+            _DownloadGate._emit(
+                progress_callback,
+                {
+                    "event": "cache_hit",
+                    "queue_position": 0,
+                    "active_downloads": None,
+                    "download_limit": self.download_concurrency,
+                },
+            )
             return cached_asset
 
-        semaphore = self._download_semaphore
-        if semaphore:
-            logger.info(
-                "等待下载并发许可 (limit=%s): %s", self.download_concurrency, url
-            )
-            semaphore.acquire()
+        logger.info("等待下载并发许可 (limit=%s): %s", self.download_concurrency, url)
+        self._download_gate.acquire(progress_callback)
         temp_dir = None
         should_cleanup_temp_dir = True
+        download_started_at = time.monotonic()
+        download_deadline = download_started_at + self.download_total_timeout
         try:
             temp_dir = self._prepare_task_temp_dir(output_folder)
             logger.info(f"开始下载视频: {url}")
@@ -1976,11 +2084,14 @@ class VideoService:
             if self._should_probe_download_info(resolved_platform):
                 # 对非 YouTube 平台保留下载前探测；YouTube 默认跳过，避免额外请求触发风控。
                 for profile in download_profiles:
+                    if time.monotonic() >= download_deadline:
+                        break
                     try:
-                        time.sleep(2)
+                        time.sleep(min(2, max(0, download_deadline - time.monotonic())))
                         info_opts = deepcopy(profile["opts"])
                         info_opts.pop("outtmpl", None)
                         info_opts.pop("format", None)
+                        info_opts["socket_timeout"] = self.download_socket_timeout
                         with yt_dlp.YoutubeDL(info_opts) as ydl:
                             info = ydl.extract_info(url, download=False)
                             logger.info(
@@ -2030,12 +2141,21 @@ class VideoService:
                 for profile in download_profiles
             )
             retry_limit = max(0, self.download_retry_max)
+            download_timed_out = False
             for profile in download_profiles:
+                if time.monotonic() >= download_deadline:
+                    download_timed_out = True
+                    break
                 profile_desc = profile["desc"]
                 base_opts = profile["opts"]
+                profile_retry_count = 0
+                skip_profile = False
                 for format_attempt in format_attempts:
-                    retry_count = 0
                     while True:
+                        if time.monotonic() >= download_deadline:
+                            download_timed_out = True
+                            break
+                        attempt_messages: List[str] = []
                         try:
                             logger.info(
                                 "尝试下载: %s / %s",
@@ -2043,11 +2163,18 @@ class VideoService:
                                 format_attempt["desc"],
                             )
                             # 添加率限制防止IP被封
-                            time.sleep(3)
+                            time.sleep(
+                                min(3, max(0, download_deadline - time.monotonic()))
+                            )
+                            if time.monotonic() >= download_deadline:
+                                download_timed_out = True
+                                break
                             before_files = set(os.listdir(temp_dir))
                             opts = deepcopy(base_opts)
-                            attempt_messages: List[str] = []
                             opts["logger"] = _YtDlpLogger(attempt_messages)
+                            opts["socket_timeout"] = self.download_socket_timeout
+                            opts.setdefault("retries", 2)
+                            opts.setdefault("fragment_retries", 2)
                             selected_format = format_attempt.get("format")
                             if selected_format is not None:
                                 opts["format"] = selected_format
@@ -2078,53 +2205,48 @@ class VideoService:
                             )
                             break
 
-                        except DownloadError as e:
-                            for message in self._collect_relevant_ytdlp_messages(
+                        except Exception as e:
+                            relevant_messages = self._collect_relevant_ytdlp_messages(
                                 attempt_messages
-                            ):
+                            )
+                            for message in relevant_messages:
                                 download_errors.append(
                                     f"{profile_desc} / {format_attempt['desc']}: {message}"
                                 )
                             download_errors.append(
                                 f"{profile_desc} / {format_attempt['desc']}: {str(e)}"
                             )
-                            if self._is_http_403_error(e) and retry_count < retry_limit:
-                                retry_count += 1
-                                delay = self._calculate_download_backoff(retry_count)
+                            if (
+                                resolved_platform == "youtube"
+                                and self._is_youtube_bot_challenge_error(
+                                    e, relevant_messages
+                                )
+                            ):
                                 logger.warning(
-                                    "下载遇到403，%ss后重试 (%s/%s): %s / %s",
-                                    delay,
-                                    retry_count,
-                                    retry_limit,
+                                    "YouTube 要求登录或 bot 校验，停止当前参数组并切换: %s / %s",
                                     profile_desc,
                                     format_attempt["desc"],
                                 )
-                                time.sleep(delay)
-                                continue
-                            logger.warning(
-                                "下载失败 (%s / %s): %s",
-                                profile_desc,
-                                format_attempt["desc"],
-                                str(e),
-                            )
-                            break
-                        except Exception as e:
-                            for message in self._collect_relevant_ytdlp_messages(
-                                attempt_messages
+                                skip_profile = True
+                                break
+                            if (
+                                self._is_http_403_error(e)
+                                and profile_retry_count < retry_limit
                             ):
-                                download_errors.append(
-                                    f"{profile_desc} / {format_attempt['desc']}: {message}"
+                                profile_retry_count += 1
+                                delay = self._calculate_download_backoff(
+                                    profile_retry_count
                                 )
-                            download_errors.append(
-                                f"{profile_desc} / {format_attempt['desc']}: {str(e)}"
-                            )
-                            if self._is_http_403_error(e) and retry_count < retry_limit:
-                                retry_count += 1
-                                delay = self._calculate_download_backoff(retry_count)
+                                remaining_budget = max(
+                                    0, download_deadline - time.monotonic()
+                                )
+                                if delay >= remaining_budget:
+                                    download_timed_out = True
+                                    break
                                 logger.warning(
-                                    "下载遇到403，%ss后重试 (%s/%s): %s / %s",
+                                    "下载遇到403，%ss后重试参数组 (%s/%s): %s / %s",
                                     delay,
-                                    retry_count,
+                                    profile_retry_count,
                                     retry_limit,
                                     profile_desc,
                                     format_attempt["desc"],
@@ -2139,13 +2261,24 @@ class VideoService:
                             )
                             break
 
-                    if downloaded_file and os.path.exists(downloaded_file):
+                    if (
+                        download_timed_out
+                        or skip_profile
+                        or (downloaded_file and os.path.exists(downloaded_file))
+                    ):
                         break
 
-                if downloaded_file and os.path.exists(downloaded_file):
+                if download_timed_out or (
+                    downloaded_file and os.path.exists(downloaded_file)
+                ):
                     break
 
             if not downloaded_file:
+                if download_timed_out:
+                    download_errors.append(
+                        "下载阶段超过总时限（%.0f 秒），已停止后续参数和格式尝试"
+                        % self.download_total_timeout
+                    )
                 summarized_error = self._summarize_download_errors(
                     download_errors, used_cookie_auth=used_cookie_auth
                 )
@@ -2205,8 +2338,7 @@ class VideoService:
         finally:
             if should_cleanup_temp_dir:
                 self._cleanup_task_temp_dir(temp_dir)
-            if semaphore:
-                semaphore.release()
+            self._download_gate.release()
 
     def _find_downloaded_file(
         self,
@@ -2919,7 +3051,13 @@ class VideoService:
         }
 
     def _process_video_for_transcription_with_url(
-        self, url: str, platform: str, force_local_processing: bool = False
+        self,
+        url: str,
+        platform: str,
+        force_local_processing: bool = False,
+        download_progress_callback: Optional[
+            Callable[[Dict[str, Any]], None]
+        ] = None,
     ) -> Optional[Dict[str, Any]]:
         """使用指定URL完成转录前置处理。"""
         logger.info(f"处理{platform}视频用于转录: {url}")
@@ -3001,7 +3139,11 @@ class VideoService:
         audio_probe = None
         if not subtitle_content:
             logger.info("未找到字幕，开始下载音频用于转录")
-            download_result = self.download_video(url, platform=platform)
+            download_result = self.download_video(
+                url,
+                platform=platform,
+                progress_callback=download_progress_callback,
+            )
             if isinstance(download_result, dict):
                 audio_file = download_result.get("audio_file")
                 temp_dir = download_result.get("temp_dir")
@@ -3057,7 +3199,13 @@ class VideoService:
         }
 
     def process_video_for_transcription(
-        self, url: str, platform: str, force_local_processing: bool = False
+        self,
+        url: str,
+        platform: str,
+        force_local_processing: bool = False,
+        download_progress_callback: Optional[
+            Callable[[Dict[str, Any]], None]
+        ] = None,
     ) -> Optional[Dict[str, Any]]:
         """处理视频用于转录
 
@@ -3079,6 +3227,7 @@ class VideoService:
                         normalized_url,
                         platform,
                         force_local_processing=force_local_processing,
+                        download_progress_callback=download_progress_callback,
                     )
                     primary_error = (
                         primary_result.get("download_error")
@@ -3098,6 +3247,7 @@ class VideoService:
                                 url,
                                 platform,
                                 force_local_processing=force_local_processing,
+                                download_progress_callback=download_progress_callback,
                             )
                         )
                         if fallback_result is not None:
@@ -3113,6 +3263,7 @@ class VideoService:
                 url,
                 platform,
                 force_local_processing=force_local_processing,
+                download_progress_callback=download_progress_callback,
             )
 
         except Exception as e:

@@ -29,9 +29,14 @@ class StageDefinition:
     default_upper_seconds: float
     typical_realtime_factor: float = 0.0
     upper_realtime_factor: float = 0.0
+    timed: bool = True
 
 
 STAGE_DEFINITIONS = {
+    "source_analysis": StageDefinition("解析视频与字幕", False, 8, 30),
+    "wait_download_slot": StageDefinition(
+        "等待下载槽位", False, 0, 0, timed=False
+    ),
     "download_prepare": StageDefinition(
         "下载与预处理", True, 45, 150, typical_realtime_factor=0.02, upper_realtime_factor=0.08
     ),
@@ -51,6 +56,8 @@ STAGE_DEFINITIONS = {
 }
 
 UNKNOWN_STAGE_PLAN = [
+    "source_analysis",
+    "wait_download_slot",
     "download_prepare",
     "transcribe_audio",
     "generate_subtitles",
@@ -139,6 +146,9 @@ class TaskProgressEstimator:
             return
         with self._lock:
             for stage in run.get("stages") or []:
+                definition = STAGE_DEFINITIONS.get(stage.get("code"))
+                if not definition or not definition.timed:
+                    continue
                 if stage.get("status") != "completed":
                     continue
                 duration = stage.get("duration_seconds")
@@ -153,6 +163,14 @@ class TaskProgressEstimator:
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         definition = STAGE_DEFINITIONS[stage_code]
+        if not definition.timed:
+            return {
+                "typical_seconds": 0,
+                "upper_seconds": 0,
+                "sample_count": 0,
+                "confidence": "low",
+                "source": "unavailable",
+            }
         samples = self._recent_comparable_samples(stage_code, context or {})
         if len(samples) >= MIN_HISTORY_SAMPLES:
             estimate = self._estimate_from_stage_samples(
@@ -375,6 +393,7 @@ class TaskProgressService:
         current = self._running_stage(run)
         previous_stage_code = current.get("code") if current else None
         if current and current.get("code") == stage_code:
+            current.setdefault("context", {}).update(context or {})
             current["updated_at"] = now
             run["updated_at"] = now
             task_info["stage_updated_at"] = now
@@ -489,8 +508,9 @@ class TaskProgressService:
             if status in {"running", "pending"}:
                 typical_remaining += remaining_typical
                 upper_remaining += remaining_upper
-                active_estimates.append(estimate)
-                history_sample_count += estimate["sample_count"]
+                if definition.timed:
+                    active_estimates.append(estimate)
+                    history_sample_count += estimate["sample_count"]
             stages.append(
                 {
                     "code": stage_code,
@@ -503,7 +523,12 @@ class TaskProgressService:
                     "estimate": estimate,
                     "remaining_typical_seconds": round(remaining_typical),
                     "remaining_upper_seconds": round(remaining_upper),
-                    "overdue": status == "running" and elapsed > estimate["upper_seconds"],
+                    "context": context,
+                    "overdue": (
+                        definition.timed
+                        and status == "running"
+                        and elapsed > estimate["upper_seconds"]
+                    ),
                 }
             )
 
