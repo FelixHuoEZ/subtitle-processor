@@ -181,6 +181,7 @@ def test_orphaned_running_task_is_marked_interrupted():
     assert stored["status_updated_at"] == "2026-07-10T11:00:00"
     assert stored["progress_runs"][-1]["status"] == "interrupted"
     assert stored["progress_runs"][-1]["stages"][-1]["status"] == "interrupted"
+    assert service.last_interrupted_task_ids == ["task-1"]
 
 
 def test_legacy_active_task_without_run_is_not_reclassified_on_startup():

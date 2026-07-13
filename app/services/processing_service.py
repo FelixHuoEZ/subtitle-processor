@@ -48,6 +48,9 @@ class ProcessingService:
         self.readwise_service = readwise_service
         self.task_progress = TaskProgressService(file_service)
         interrupted_count = self.task_progress.mark_orphaned_runs_interrupted()
+        self.orphaned_task_ids = list(
+            getattr(self.task_progress, "last_interrupted_task_ids", [])
+        )
         if interrupted_count:
             logger.warning("服务启动时标记了 %s 个中断任务", interrupted_count)
         self.readwise_auto_fallback_on_parse_failed = self._parse_bool_env(

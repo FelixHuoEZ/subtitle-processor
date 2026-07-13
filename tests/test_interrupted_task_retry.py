@@ -174,6 +174,123 @@ def test_retry_rejects_non_interrupted_task(monkeypatch):
     assert _FakeThread.instances == []
 
 
+def _interrupted_task(stage_code, **overrides):
+    task = {
+        'id': 'old-task',
+        'url': 'https://www.youtube.com/watch?v=video1234567',
+        'platform': 'youtube',
+        'status': 'interrupted',
+        'request_source': 'chrome_extension',
+        'progress_runs': [
+            {
+                'status': 'interrupted',
+                'stages': [
+                    {
+                        'code': stage_code,
+                        'status': 'interrupted',
+                    }
+                ],
+            }
+        ],
+    }
+    task.update(overrides)
+    return task
+
+
+def _call_auto_retry(app, task_id='old-task'):
+    with app.test_request_context(headers={'Accept': 'application/json'}):
+        return process_routes.retry_interrupted_task(
+            task_id,
+            request_source='auto_restart_retry',
+            enforce_auto_safety=True,
+        )
+
+
+def test_auto_retry_replays_safe_stage_as_linked_task(monkeypatch):
+    client, fake_file_service = _build_client(
+        monkeypatch,
+        {'old-task': _interrupted_task('transcribe_audio')},
+    )
+
+    response, status_code = _call_auto_retry(client.application)
+
+    assert status_code == 202
+    assert response.get_json()['process_id'] == 'retry-task'
+    new_task = fake_file_service.tasks['retry-task']
+    assert new_task['request_source'] == 'auto_restart_retry'
+    assert new_task['original_request_source'] == 'chrome_extension'
+    assert new_task['retry_of'] == 'old-task'
+    assert fake_file_service.tasks['old-task']['auto_retry_status'] == 'scheduled'
+    assert fake_file_service.tasks['old-task']['auto_retry_reason'] == 'transcribe_audio'
+
+
+def test_auto_retry_skips_stage_with_possible_readwise_side_effect(monkeypatch):
+    client, fake_file_service = _build_client(
+        monkeypatch,
+        {'old-task': _interrupted_task('send_readwise')},
+    )
+
+    response, status_code = _call_auto_retry(client.application)
+
+    assert status_code == 409
+    assert response.get_json()['status'] == 'auto_retry_skipped'
+    assert response.get_json()['reason'] == 'unsafe_interrupted_stage:send_readwise'
+    assert set(fake_file_service.tasks) == {'old-task'}
+    assert _FakeThread.instances == []
+
+
+def test_auto_retry_skips_safe_stage_with_existing_readwise_article(monkeypatch):
+    client, fake_file_service = _build_client(
+        monkeypatch,
+        {
+            'old-task': _interrupted_task(
+                'transcribe_audio',
+                readwise_url_only_article_id='reader-article',
+            )
+        },
+    )
+
+    response, status_code = _call_auto_retry(client.application)
+
+    assert status_code == 409
+    assert response.get_json()['reason'] == 'readwise_side_effect_may_exist'
+    assert set(fake_file_service.tasks) == {'old-task'}
+    assert _FakeThread.instances == []
+
+
+def test_auto_retry_stops_at_configured_attempt_limit(monkeypatch):
+    monkeypatch.setenv('AUTO_RETRY_INTERRUPTED_MAX_ATTEMPTS', '3')
+    client, fake_file_service = _build_client(
+        monkeypatch,
+        {'old-task': _interrupted_task('download_prepare', retry_attempt=3)},
+    )
+
+    response, status_code = _call_auto_retry(client.application)
+
+    assert status_code == 409
+    assert response.get_json()['reason'] == 'max_attempts_reached'
+    assert fake_file_service.tasks['old-task']['auto_retry_status'] == 'skipped'
+    assert _FakeThread.instances == []
+
+
+def test_startup_auto_retry_scheduler_is_opt_in(monkeypatch):
+    client, _ = _build_client(monkeypatch, {})
+    monkeypatch.setenv('AUTO_RETRY_INTERRUPTED_TASKS', 'true')
+    monkeypatch.setenv('AUTO_RETRY_INTERRUPTED_DELAY_SECONDS', '0')
+
+    scheduled = process_routes.schedule_auto_retry_interrupted_tasks(
+        client.application,
+        ['old-task'],
+    )
+
+    assert scheduled is True
+    assert len(_FakeThread.instances) == 1
+    thread = _FakeThread.instances[0]
+    assert thread.started is True
+    assert thread.name == 'auto-retry-interrupted-tasks'
+    assert thread.args[1] == ['old-task']
+
+
 def test_interrupted_task_detail_shows_retry_button(monkeypatch):
     tasks = {
         'old-task': {

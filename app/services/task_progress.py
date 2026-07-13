@@ -642,6 +642,7 @@ class TaskProgressService:
         )
 
     def mark_orphaned_runs_interrupted(self) -> int:
+        self.last_interrupted_task_ids = []
         try:
             tasks = self.file_service.list_files() or {}
         except (AttributeError, TypeError):
@@ -672,6 +673,7 @@ class TaskProgressService:
                 }
             )
             self.file_service.update_file_info(task_id, task_info)
+            self.last_interrupted_task_ids.append(task_id)
             interrupted_count += 1
         return interrupted_count
 

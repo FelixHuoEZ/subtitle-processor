@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from datetime import datetime
 
@@ -32,6 +33,24 @@ RETRY_TASK_COPY_FIELDS = (
     'page_title',
     'tags',
     'video_id',
+)
+AUTO_RETRY_SAFE_STAGE_CODES = {
+    'source_analysis',
+    'wait_download_slot',
+    'download_prepare',
+    'language_confirmation',
+    'transcribe_audio',
+    'generate_subtitles',
+    'normalize_subtitles',
+}
+AUTO_RETRY_EXTERNAL_EFFECT_FIELDS = (
+    'readwise_article_id',
+    'readwise_url',
+    'readwise_url_only_article_id',
+    'readwise_url_only_url',
+    'readwise_fallback_article_id',
+    'readwise_fallback_url',
+    'readwise_deleted_article_id',
 )
 
 # 创建蓝图
@@ -95,6 +114,98 @@ def _task_bool(value):
     if value is None:
         return False
     return str(value).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+
+def _last_progress_stage_code(task_info):
+    runs = task_info.get('progress_runs') or []
+    if not runs:
+        return None
+    stages = runs[-1].get('stages') or []
+    if not stages:
+        return None
+    return stages[-1].get('code')
+
+
+def _retry_attempt(task_info):
+    try:
+        return max(0, int(task_info.get('retry_attempt') or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _auto_retry_eligibility(task_info):
+    try:
+        max_attempts = max(
+            1,
+            int(os.getenv('AUTO_RETRY_INTERRUPTED_MAX_ATTEMPTS', '3')),
+        )
+    except ValueError:
+        max_attempts = 3
+
+    retry_attempt = _retry_attempt(task_info)
+    if retry_attempt >= max_attempts:
+        return False, 'max_attempts_reached'
+    if any(task_info.get(field) for field in AUTO_RETRY_EXTERNAL_EFFECT_FIELDS):
+        return False, 'readwise_side_effect_may_exist'
+    if task_info.get('readwise_url_only_delete_status') == 'deleted':
+        return False, 'readwise_delete_side_effect_exists'
+
+    interrupted_stage = _last_progress_stage_code(task_info)
+    if interrupted_stage not in AUTO_RETRY_SAFE_STAGE_CODES:
+        return False, f'unsafe_interrupted_stage:{interrupted_stage or "unknown"}'
+    return True, interrupted_stage
+
+
+def _run_startup_auto_retries(app, task_ids, delay_seconds):
+    time.sleep(delay_seconds)
+    for task_id in task_ids:
+        try:
+            with app.test_request_context(headers={'Accept': 'application/json'}):
+                response = retry_interrupted_task(
+                    task_id,
+                    request_source='auto_restart_retry',
+                    enforce_auto_safety=True,
+                )
+            status_code = (
+                response[1]
+                if isinstance(response, tuple)
+                else response.status_code
+            )
+            logger.info(
+                '服务重启自动续跑结果: task=%s status_code=%s',
+                task_id,
+                status_code,
+            )
+        except Exception as exc:
+            logger.error('服务重启自动续跑失败: task=%s error=%s', task_id, exc)
+
+
+def schedule_auto_retry_interrupted_tasks(app, task_ids):
+    """Schedule safe, lineage-preserving retries for tasks interrupted at startup."""
+    task_ids = list(task_ids or [])
+    if not task_ids or not _task_bool(os.getenv('AUTO_RETRY_INTERRUPTED_TASKS')):
+        return False
+    try:
+        delay_seconds = max(
+            0.0,
+            float(os.getenv('AUTO_RETRY_INTERRUPTED_DELAY_SECONDS', '5')),
+        )
+    except ValueError:
+        delay_seconds = 5.0
+
+    thread = threading.Thread(
+        target=_run_startup_auto_retries,
+        args=(app, task_ids, delay_seconds),
+        daemon=True,
+        name='auto-retry-interrupted-tasks',
+    )
+    thread.start()
+    logger.warning(
+        '已安排 %s 个启动中断任务进行安全自动续跑，延迟 %.1f 秒',
+        len(task_ids),
+        delay_seconds,
+    )
+    return True
 
 
 def _retry_task_response(task_id, reused=False):
@@ -705,7 +816,11 @@ def force_local_readwise(task_id):
 
 
 @process_bp.route('/status/<task_id>/retry', methods=['POST'])
-def retry_interrupted_task(task_id):
+def retry_interrupted_task(
+    task_id,
+    request_source='web_retry',
+    enforce_auto_safety=False,
+):
     """Create one fresh task from an interrupted task and start it immediately."""
     claim_token = None
     new_task_id = None
@@ -731,6 +846,27 @@ def retry_interrupted_task(task_id):
                 }), 409
             flash(message, 'error')
             return redirect(url_for('view.file_detail', file_id=task_id))
+
+        if enforce_auto_safety:
+            eligible, reason = _auto_retry_eligibility(task_info)
+            if not eligible:
+                checked_at = datetime.now().isoformat()
+                file_service.update_file_info(task_id, {
+                    'auto_retry_status': 'skipped',
+                    'auto_retry_reason': reason,
+                    'auto_retry_checked_at': checked_at,
+                    'updated_time': checked_at,
+                })
+                logger.warning(
+                    '跳过服务重启自动续跑: task=%s reason=%s',
+                    task_id,
+                    reason,
+                )
+                return jsonify({
+                    'success': False,
+                    'status': 'auto_retry_skipped',
+                    'reason': reason,
+                }), 409
 
         if not task_info.get('url') or not task_info.get('platform'):
             message = '任务缺少原始链接或平台，无法重新发起。'
@@ -780,8 +916,8 @@ def retry_interrupted_task(task_id):
             'updated_time': now,
             'retry_of': task_id,
             'retry_root_id': task_info.get('retry_root_id') or task_id,
-            'retry_attempt': int(task_info.get('retry_attempt') or 0) + 1,
-            'request_source': 'web_retry',
+            'retry_attempt': _retry_attempt(task_info) + 1,
+            'request_source': request_source,
             'original_request_source': task_info.get('request_source'),
         }
         for field in RETRY_TASK_COPY_FIELDS:
@@ -795,11 +931,18 @@ def retry_interrupted_task(task_id):
         file_service.add_file_info(new_task_id, new_task)
         if not file_service.get_file_info(new_task_id):
             raise RuntimeError('无法保存重新发起的任务')
-        file_service.update_file_info(task_id, {
+        source_updates = {
             'retry_task_id': new_task_id,
             'retry_requested_at': now,
             'updated_time': now,
-        })
+        }
+        if request_source == 'auto_restart_retry':
+            source_updates.update({
+                'auto_retry_status': 'scheduled',
+                'auto_retry_reason': _last_progress_stage_code(task_info),
+                'auto_retry_checked_at': now,
+            })
+        file_service.update_file_info(task_id, source_updates)
         persisted_source = file_service.get_file_info(task_id) or {}
         if persisted_source.get('retry_task_id') != new_task_id:
             raise RuntimeError('无法保存原任务与新任务的关联')

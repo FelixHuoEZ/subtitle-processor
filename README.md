@@ -13,6 +13,7 @@
 - 后端提供 `/process/status/<id>?include_content=1` 以及 `/process/status/<id>/subtitle`，方便外部查询任务进度与字幕原文。
 - YouTube alternate URLs (`/shorts/<id>`, `/live/<id>`, `youtu.be/<id>`, `/embed/<id>`, `/v/<id>`) are normalized to `watch?v=` with fallback to the original URL if needed.
 - Download concurrency + 403 backoff retries are configurable, and transcription concurrency can be capped.
+- Safe interrupted stages can be replayed automatically after a restart as fresh lineage-linked tasks.
 - Optional Readwise URL-only clipping when Chinese subtitles are available (`READWISE_URL_ONLY_WHEN_ZH_SUBS`).
 
 <a name="english"></a>
@@ -99,7 +100,8 @@ A comprehensive subtitle processing service that automatically downloads, transc
 
 ### ⚙️ Optional Configuration
 - `READWISE_URL_ONLY_WHEN_ZH_SUBS=true` to clip public YouTube URLs to Readwise when original Chinese subtitles exist (skips subtitle download/transcription). Member-only, private, login-required, and age-restricted videos stay on the local subtitle/transcription path because Readwise Reader cannot use your YouTube cookies.
-- `DOWNLOAD_CONCURRENCY` (0/1 means serial), plus `DOWNLOAD_MAX_RETRIES`, `DOWNLOAD_RETRY_BASE_DELAY`, `DOWNLOAD_RETRY_BACKOFF`, `DOWNLOAD_RETRY_MAX_DELAY` for 403 backoff.
+- `DOWNLOAD_CONCURRENCY` (0/1 means serial), retry/backoff options, and `DOWNLOAD_TOTAL_TIMEOUT_SECONDS` / `DOWNLOAD_SOCKET_TIMEOUT_SECONDS` control download pressure and time budgets.
+- `AUTO_RETRY_INTERRUPTED_TASKS=true` creates a fresh lineage-linked task after restart for safe pre-Readwise stages. `AUTO_RETRY_INTERRUPTED_MAX_ATTEMPTS` limits restart loops; stages that may have changed Reader state remain manual.
 - `TRANSCRIBE_CONCURRENCY` to cap concurrent transcriptions (0/1 means serial, empty means unlimited).
 - `YTDLP_COOKIE_FILE` to provide a Netscape-format cookie file instead of a Firefox profile.
 - `LOG_LEVEL` controls application log verbosity (default `INFO`), and `DEBUG_CONTENT_LOGGING=true` enables full transcript/subtitle payload logging for local debugging.
@@ -223,6 +225,7 @@ Special thanks to:
 - 文档补充镜像分发与 `.env` 覆盖指引，便于多机器快速上线。
 - 支持将 YouTube `shorts/<id>`、`live/<id>`、`youtu.be/<id>`、`embed/<id>`、`v/<id>` 等链接自动转换为 `watch?v=`，必要时回退原始 URL。
 - 下载并发 + 403 退避重试可配置，转录并发可选限制。
+- 服务重启后可自动续跑尚未产生 Readwise 外部副作用的中断任务，并保留新旧任务关联。
 - 可选：检测到中文字幕时直接剪藏 URL 到 Readwise（`READWISE_URL_ONLY_WHEN_ZH_SUBS`）。
 
 ### 🚀 功能特点
@@ -302,7 +305,8 @@ Special thanks to:
 
 ### ⚙️ 可选配置
 - `READWISE_URL_ONLY_WHEN_ZH_SUBS=true`：公开视频检测到原始中文字幕轨时直接剪藏原始 URL 到 Readwise（跳过字幕下载/转录）。会员、私有、需登录或年龄限制视频仍走本地字幕/转录路径，因为 Readwise Reader 不能复用你的 YouTube cookies。
-- `DOWNLOAD_CONCURRENCY`（0/1 视为串行）以及 `DOWNLOAD_MAX_RETRIES`、`DOWNLOAD_RETRY_BASE_DELAY`、`DOWNLOAD_RETRY_BACKOFF`、`DOWNLOAD_RETRY_MAX_DELAY` 用于 403 退避重试。
+- `DOWNLOAD_CONCURRENCY`（0/1 视为串行）、重试退避参数以及 `DOWNLOAD_TOTAL_TIMEOUT_SECONDS` / `DOWNLOAD_SOCKET_TIMEOUT_SECONDS` 用于控制下载压力和时间预算。
+- `AUTO_RETRY_INTERRUPTED_TASKS=true`：服务重启后，为 Readwise 之前的安全阶段创建新的关联续跑任务；`AUTO_RETRY_INTERRUPTED_MAX_ATTEMPTS` 限制重启循环，可能已经修改 Reader 状态的阶段仍需人工确认。
 - `TRANSCRIBE_CONCURRENCY`：限制转录并发（0/1 串行，留空为不限）。
 - `YTDLP_COOKIE_FILE`：使用 Netscape 格式 cookies 文件替代 Firefox profile。
 默认值可参考 `.env.example`。

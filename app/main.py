@@ -70,6 +70,11 @@ def create_app(config_path=None):
     
     # 注册主要路由
     register_main_routes(app)
+
+    process_routes.schedule_auto_retry_interrupted_tasks(
+        app,
+        getattr(app.processing_service, 'orphaned_task_ids', []),
+    )
     
     logger.info("应用初始化完成")
     return app
