@@ -1,6 +1,5 @@
 """Audio transcription service using FunASR for subtitle generation."""
 
-import importlib.util
 import json
 import logging
 import math
@@ -56,20 +55,39 @@ class TranscriptionService:
         )
         self._rr_lock = threading.Lock()
         self._rr_index = 0
-        raw_openai_api_key = get_config_value("tokens.openai.api_key", "")
+        raw_openai_api_key = os.getenv("AUDIO_PROBE_OPENAI_API_KEY") or get_config_value(
+            "audio_probe.openai.api_key", ""
+        )
         self.openai_api_key = (
             raw_openai_api_key.strip()
             if isinstance(raw_openai_api_key, str)
             else ""
         )
-        raw_openai_base_url = get_config_value(
-            "tokens.openai.base_url", "https://api.openai.com/v1"
+        raw_openai_base_url = os.getenv(
+            "AUDIO_PROBE_OPENAI_BASE_URL"
+        ) or get_config_value(
+            "audio_probe.openai.base_url", "https://api.openai.com/v1"
         )
         self.openai_base_url = (
             raw_openai_base_url.strip()
             if isinstance(raw_openai_base_url, str) and raw_openai_base_url.strip()
             else "https://api.openai.com/v1"
         )
+        self.openai_audio_model = (
+            os.getenv("AUDIO_PROBE_OPENAI_MODEL")
+            or get_config_value("audio_probe.openai.model", "whisper-1")
+            or "whisper-1"
+        )
+        try:
+            self.openai_audio_timeout = max(
+                1.0,
+                float(
+                    os.getenv("AUDIO_PROBE_OPENAI_TIMEOUT")
+                    or get_config_value("audio_probe.openai.timeout", 120)
+                ),
+            )
+        except (TypeError, ValueError):
+            self.openai_audio_timeout = 120.0
         self.hotword_service = HotwordService()
         self.default_hotwords = self.hotword_service.get_default_hotwords()
         self.hotword_settings = HotwordSettingsManager.get_instance()
@@ -98,8 +116,11 @@ class TranscriptionService:
             logger.info("转录并发限制: %s", self.transcribe_concurrency)
         else:
             logger.info("转录并发限制: 未启用")
+        configured_probe_providers = get_config_value(
+            "audio_probe.providers", ["configured_funasr"]
+        )
         requested_audio_probe_providers = self._parse_audio_probe_providers(
-            os.getenv("AUDIO_PROBE_PROVIDERS", "configured_funasr,openai")
+            os.getenv("AUDIO_PROBE_PROVIDERS") or configured_probe_providers
         )
         openai_unavailable_reason = self._get_openai_unavailable_reason()
         self.openai_transcription_available = openai_unavailable_reason is None
@@ -113,9 +134,15 @@ class TranscriptionService:
         self.audio_probe_providers = (
             requested_audio_probe_providers or ["configured_funasr"]
         )
-        self.audio_probe_min_confidence = min(
-            1.0, max(0.0, float(os.getenv("AUDIO_PROBE_MIN_CONFIDENCE", "0.58")))
-        )
+        try:
+            raw_min_confidence = os.getenv(
+                "AUDIO_PROBE_MIN_CONFIDENCE"
+            ) or get_config_value("audio_probe.min_confidence", 0.58)
+            self.audio_probe_min_confidence = min(
+                1.0, max(0.0, float(raw_min_confidence))
+            )
+        except (TypeError, ValueError):
+            self.audio_probe_min_confidence = 0.58
         logger.info(
             "音频语言探测 provider 顺序: %s (min_confidence=%.2f)",
             " -> ".join(self.audio_probe_providers) or "none",
@@ -140,19 +167,25 @@ class TranscriptionService:
         return value
 
     @staticmethod
-    def _parse_audio_probe_providers(raw_value: Optional[str]) -> List[str]:
+    def _parse_audio_probe_providers(raw_value: Any) -> List[str]:
         providers: List[str] = []
-        for provider in str(raw_value or "").split(","):
-            normalized = provider.strip().lower()
-            if normalized in {"configured_funasr", "openai"} and normalized not in providers:
+        raw_providers = (
+            raw_value
+            if isinstance(raw_value, (list, tuple))
+            else str(raw_value or "").split(",")
+        )
+        for provider in raw_providers:
+            normalized = str(provider).strip().lower()
+            if (
+                normalized in {"configured_funasr", "openai"}
+                and normalized not in providers
+            ):
                 providers.append(normalized)
-        return providers or ["configured_funasr", "openai"]
+        return providers or ["configured_funasr"]
 
     def _get_openai_unavailable_reason(self) -> Optional[str]:
         if not self.openai_api_key:
-            return "未配置 Whisper 可用的标量 API key"
-        if importlib.util.find_spec("openai") is None:
-            return "未安装 openai SDK"
+            return "未配置独立的 audio_probe.openai API key"
         return None
 
     @classmethod
@@ -957,45 +990,56 @@ class TranscriptionService:
         return True
 
     def _transcribe_with_openai(self, audio_file: str) -> Optional[Dict[str, Any]]:
-        """使用OpenAI Whisper转录音频"""
+        """Use an OpenAI-compatible Audio Transcriptions endpoint."""
         try:
             if not self.openai_api_key:
-                logger.warning("OpenAI API密钥未配置")
+                logger.warning("audio_probe.openai API密钥未配置")
                 return None
-
-            import openai
-
-            # 配置OpenAI客户端
-            client = openai.OpenAI(
-                api_key=self.openai_api_key, base_url=self.openai_base_url
-            )
-
-            # 转录音频
+            endpoint = self.openai_base_url.rstrip("/")
+            if not endpoint.endswith("/audio/transcriptions"):
+                endpoint = f"{endpoint}/audio/transcriptions"
             with open(audio_file, "rb") as audio:
-                transcript = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio,
-                    response_format="verbose_json",
-                    timestamp_granularity=["word"],
+                response = requests.post(
+                    endpoint,
+                    headers={
+                        "Authorization": f"Bearer {self.openai_api_key}",
+                    },
+                    data={
+                        "model": self.openai_audio_model,
+                        "response_format": "verbose_json",
+                    },
+                    files={
+                        "file": (
+                            os.path.basename(audio_file),
+                            audio,
+                            "audio/wav",
+                        )
+                    },
+                    timeout=self.openai_audio_timeout,
                 )
-
-            # 构造返回结果
+            if response.status_code != 200:
+                logger.warning(
+                    "OpenAI兼容音频探测失败，状态码: %s",
+                    response.status_code,
+                )
+                return None
+            transcript = response.json() or {}
+            transcript_text = transcript.get("text")
+            if not isinstance(transcript_text, str) or not transcript_text.strip():
+                logger.warning("OpenAI兼容音频探测返回空文本")
+                return None
             result = {
-                "text": transcript.text,
+                "text": transcript_text,
                 "audio_info": {
-                    "duration_seconds": transcript.duration
-                    if hasattr(transcript, "duration")
-                    else None
+                    "duration_seconds": transcript.get("duration")
                 },
-                "segments": getattr(transcript, "words", []),
+                "segments": transcript.get("words") or transcript.get("segments") or [],
                 "source": "openai_whisper",
             }
-
-            logger.info("OpenAI Whisper转录成功")
+            logger.info("OpenAI兼容音频探测转录成功")
             return result
-
-        except Exception as e:
-            logger.error(f"OpenAI Whisper转录失败: {str(e)}")
+        except (OSError, requests.RequestException, ValueError) as exc:
+            logger.error("OpenAI兼容音频探测转录失败: %s", exc)
             return None
 
     def _get_audio_probe_offsets(

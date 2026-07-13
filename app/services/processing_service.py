@@ -40,12 +40,14 @@ class ProcessingService:
         transcription_service,
         subtitle_service,
         readwise_service,
+        translation_service=None,
     ):
         self.file_service = file_service
         self.video_service = video_service
         self.transcription_service = transcription_service
         self.subtitle_service = subtitle_service
         self.readwise_service = readwise_service
+        self.translation_service = translation_service
         self.task_progress = TaskProgressService(file_service)
         interrupted_count = self.task_progress.mark_orphaned_runs_interrupted()
         self.orphaned_task_ids = list(
@@ -59,6 +61,24 @@ class ProcessingService:
         logger.info(
             "Readwise解析失败自动本地重发: %s",
             self.readwise_auto_fallback_on_parse_failed,
+        )
+        self.auto_translate_non_target_language = self._parse_bool_env(
+            "AUTO_TRANSLATE_NON_TARGET_LANGUAGE", False
+        )
+        configured_target = getattr(
+            self.translation_service, "default_target_language", "zh"
+        )
+        self.auto_translate_target_language = str(
+            os.getenv("AUTO_TRANSLATE_TARGET_LANGUAGE") or configured_target or "zh"
+        ).strip()
+        self.auto_translate_min_source_confidence = self._parse_float_env(
+            "AUTO_TRANSLATE_MIN_SOURCE_CONFIDENCE", 0.75, minimum=0.0, maximum=1.0
+        )
+        logger.info(
+            "非目标语言自动翻译: enabled=%s target=%s min_confidence=%.2f",
+            self.auto_translate_non_target_language,
+            self.auto_translate_target_language,
+            self.auto_translate_min_source_confidence,
         )
 
     def process_video_task(self, task_info, auto_transcribe):
@@ -257,6 +277,7 @@ class ProcessingService:
         else:
             path = "unavailable"
             stages = ["source_analysis", "download_prepare"]
+        stages = self._add_auto_translation_stage(task_info, stages)
         self.task_progress.set_plan(task_info, path=path, stage_codes=stages)
 
     def _handle_url_only_readwise(self, process_id, task_info):
@@ -512,17 +533,20 @@ class ProcessingService:
 
         task_temp_dir = None
         fallback_prefix = ["delete_url_only"] if original_article_id else []
+        fallback_stages = fallback_prefix + [
+            "source_analysis",
+            "download_prepare",
+            "transcribe_audio",
+            "generate_subtitles",
+            "send_readwise",
+        ]
         self.task_progress.start_run(
             task_info,
             path="fallback",
-            stage_codes=fallback_prefix
-            + [
-                "source_analysis",
-                "download_prepare",
-                "transcribe_audio",
-                "generate_subtitles",
-                "send_readwise",
-            ],
+            stage_codes=self._add_auto_translation_stage(
+                task_info,
+                fallback_stages,
+            ),
             conditional_stages=["transcribe_audio", "generate_subtitles"],
         )
         self.task_progress.transition(
@@ -631,6 +655,10 @@ class ProcessingService:
                     "source_analysis",
                     "download_prepare",
                 ]
+            fallback_stages = self._add_auto_translation_stage(
+                task_info,
+                fallback_stages,
+            )
             self.task_progress.set_plan(
                 task_info,
                 path="fallback",
@@ -770,6 +798,210 @@ class ProcessingService:
             return default
         return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
+    @staticmethod
+    def _parse_float_env(key, default, minimum=None, maximum=None):
+        try:
+            value = float(os.getenv(key, str(default)))
+        except (TypeError, ValueError):
+            value = float(default)
+        if minimum is not None:
+            value = max(float(minimum), value)
+        if maximum is not None:
+            value = min(float(maximum), value)
+        return value
+
+    @staticmethod
+    def _normalize_translation_language(language):
+        normalized = str(language or "").strip().lower().replace("_", "-")
+        if not normalized:
+            return None
+        if normalized.startswith("zh"):
+            return "zh"
+        if normalized.startswith("en"):
+            return "en"
+        if normalized in {"auto", "mixed", "unknown", "und", "none"}:
+            return normalized
+        return normalized.split("-", 1)[0]
+
+    def _auto_translation_decision(self, task_info):
+        target = self._normalize_translation_language(
+            self.auto_translate_target_language
+        )
+        language_details = task_info.get("language_details") or {}
+        subtitle_metadata = task_info.get("subtitle_metadata") or {}
+        track_info = subtitle_metadata.get("track_info") or {}
+        override = self._normalize_translation_language(
+            task_info.get("language_override")
+        )
+        subtitle_language = (
+            task_info.get("subtitle_language")
+            or subtitle_metadata.get("matched_lang")
+            or track_info.get("provider_language")
+            or track_info.get("language")
+        )
+        source = self._normalize_translation_language(
+            override
+            if override not in {None, "auto"}
+            else subtitle_language
+            or task_info.get("language")
+            or language_details.get("language")
+        )
+        if not self.auto_translate_non_target_language:
+            return False, "disabled", source, target
+        if not self.translation_service:
+            return False, "translation_service_unavailable", source, target
+        if not target or target in {"auto", "mixed", "unknown", "und", "none"}:
+            return False, "invalid_target_language", source, target
+        if source in {None, "auto", "mixed", "unknown", "und"}:
+            return False, "uncertain_source_language", source, target
+        if source == target:
+            return False, "already_target_language", source, target
+
+        try:
+            confidence = float(language_details.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        source_is_explicit = bool(
+            override not in {None, "auto"} or subtitle_language
+        )
+        if not source_is_explicit and (
+            confidence < self.auto_translate_min_source_confidence
+        ):
+            return False, "source_confidence_too_low", source, target
+        return True, "source_differs_from_target", source, target
+
+    def _add_auto_translation_stage(self, task_info, stages):
+        stages = list(stages)
+        if not self.auto_translate_non_target_language:
+            return stages
+        if "send_readwise" in stages and "translate_subtitles" not in stages:
+            stages.insert(stages.index("send_readwise"), "translate_subtitles")
+        return stages
+
+    def _apply_auto_translation(self, process_id, task_info):
+        if not self.auto_translate_non_target_language:
+            return True
+
+        should_translate, reason, source, target = self._auto_translation_decision(
+            task_info
+        )
+        self.task_progress.transition(
+            task_info,
+            "translate_subtitles",
+            context={
+                "source_language": source,
+                "target_language": target,
+                "decision": reason,
+            },
+        )
+        task_info.update(
+            {
+                "translation_source_language": source,
+                "translation_target_language": target,
+                "translation_reason": reason,
+                "translation_updated_at": datetime.now().isoformat(),
+            }
+        )
+        if not should_translate:
+            if reason in {
+                "translation_service_unavailable",
+                "invalid_target_language",
+            }:
+                task_info["translation_status"] = "failed"
+                task_info["status"] = "failed"
+                task_info["error"] = (
+                    "自动翻译配置不可用，已保留原字幕且未发送到 Readwise。"
+                )
+                self.file_service.update_file_info(process_id, task_info)
+                logger.error(
+                    "自动翻译配置失败: process=%s target=%s reason=%s",
+                    process_id,
+                    target,
+                    reason,
+                )
+                return False
+            task_info["translation_status"] = "skipped"
+            self.file_service.update_file_info(process_id, task_info)
+            logger.info(
+                "自动翻译跳过: process=%s source=%s target=%s reason=%s",
+                process_id,
+                source,
+                target,
+                reason,
+            )
+            return True
+
+        result = self.translation_service.translate_subtitle_content_detailed(
+            task_info.get("subtitle_content", ""),
+            target,
+            source,
+        )
+        result_metadata = {
+            key: result.get(key)
+            for key in (
+                "status",
+                "providers",
+                "total_segments",
+                "translated_segments",
+                "failed_segments",
+                "error",
+            )
+        }
+        task_info["translation_result"] = result_metadata
+        task_info["translation_status"] = result.get("status")
+        task_info["translation_updated_at"] = datetime.now().isoformat()
+        if result.get("status") != "completed" or not result.get("content"):
+            task_info["status"] = "failed"
+            task_info["error"] = (
+                "自动翻译未完整成功，已保留原字幕且未发送到 Readwise。"
+            )
+            self.file_service.update_file_info(process_id, task_info)
+            logger.error(
+                "自动翻译失败: process=%s source=%s target=%s status=%s error=%s",
+                process_id,
+                source,
+                target,
+                result.get("status"),
+                result.get("error"),
+            )
+            return False
+
+        original_path = task_info.get("subtitle_path")
+        safe_title = task_info.get("video_info", {}).get("title") or process_id
+        translated_filename = build_task_filename(
+            f"{safe_title}_{target}", process_id
+        )
+        translated_path = self.file_service.save_file(
+            result["content"], translated_filename
+        )
+        task_info.update(
+            {
+                "original_subtitle_path": original_path,
+                "translated_subtitle_path": translated_path,
+                "subtitle_path": translated_path,
+                "subtitle_content": result["content"],
+                "subtitle_language": target,
+                "translation_status": "completed",
+            }
+        )
+        self.task_progress.update_current_stage_context(
+            task_info,
+            {
+                "providers": result.get("providers") or [],
+                "total_segments": result.get("total_segments"),
+            },
+        )
+        self.file_service.update_file_info(process_id, task_info)
+        logger.info(
+            "自动翻译完成: process=%s source=%s target=%s providers=%s segments=%s",
+            process_id,
+            source,
+            target,
+            ",".join(result.get("providers") or []),
+            result.get("total_segments"),
+        )
+        return True
+
     def _handle_existing_subtitle(
         self, process_id, task_info, result, force_full_text=False
     ):
@@ -791,6 +1023,14 @@ class ProcessingService:
             task_info["subtitle_content"] = normalized_subtitle_content
         else:
             task_info["subtitle_content"] = raw_subtitle_content
+        subtitle_metadata = task_info.get("subtitle_metadata") or {}
+        track_info = subtitle_metadata.get("track_info") or {}
+        task_info["subtitle_language"] = self._normalize_translation_language(
+            subtitle_metadata.get("matched_lang")
+            or track_info.get("provider_language")
+            or track_info.get("language")
+            or task_info.get("language")
+        )
 
         if isinstance(raw_subtitle_content, str):
             converted_subtitle = task_info["subtitle_content"] != raw_subtitle_content
@@ -820,6 +1060,8 @@ class ProcessingService:
             task_info["subtitle_path"] = subtitle_path
             task_info["filename"] = subtitle_filename
         logger.info("第2步完成：视频已有字幕，无需转录: %s", process_id)
+        if not self._apply_auto_translation(process_id, task_info):
+            return
         logger.info("第3步：开始发送内容到Readwise Reader: %s", process_id)
         self.task_progress.transition(task_info, "send_readwise")
 
@@ -1046,6 +1288,11 @@ class ProcessingService:
         if force_full_text:
             self._force_full_text_readwise_fields(task_info)
 
+        task_info["subtitle_language"] = self._normalize_translation_language(
+            task_info.get("language_override") or task_info.get("language")
+        )
+        if not self._apply_auto_translation(process_id, task_info):
+            return
         logger.info("第3步：开始发送内容到Readwise Reader: %s", process_id)
         self.task_progress.transition(task_info, "send_readwise")
         logger.debug("调试信息 - task_info关键字段:")

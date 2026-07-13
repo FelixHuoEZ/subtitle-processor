@@ -59,6 +59,7 @@ def create_services() -> AppServices:
         transcription_service=transcription_service,
         subtitle_service=subtitle_service,
         readwise_service=readwise_service,
+        translation_service=translation_service,
     )
 
     return AppServices(

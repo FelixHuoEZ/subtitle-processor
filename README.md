@@ -7,6 +7,7 @@
 
 ### Recent Updates
 - Current language decision flow is documented in [`docs/language-decision-logic.md`](docs/language-decision-logic.md), including spoken language, content locale, subtitle strategy, and Readwise branching.
+- Translation and audio-language probing are separate provider capabilities; see [`docs/provider-capabilities.md`](docs/provider-capabilities.md) for current adapters and automatic-flow boundaries.
 - Runtime hotword settings can be toggled without restarting: `/process/settings/hotword` persists to `config/hotword_settings.json`, and Telegram 中新增 `/hotword_status` / `/hotword_toggle` 支持在线开关。
 - Telegram 机器人增加标签/热词交互提示、`/skip` 快捷命令，并在后台轮询 `/process/status/<id>` 自动推送字幕文件。
 - `scripts/build-and-push.sh` 新增 `bgutil-provider` 镜像构建；默认 Dockerfile 仅保留必需依赖，X11/VNC 相关组件以注释形式保留，构建镜像更轻量。
@@ -34,6 +35,7 @@ A comprehensive subtitle processing service that automatically downloads, transc
   - Direct subtitle download from platforms
   - Audio transcription using FunASR
   - Support for multiple subtitle formats (SRT, VTT, JSON3)
+  - Configurable subtitle translation with DeepL API, OpenAI-compatible text providers, or DeepLX; optional non-target-language auto-translation is off by default
   
 - **User Interfaces**
   - Telegram Bot for easy access
@@ -102,6 +104,8 @@ A comprehensive subtitle processing service that automatically downloads, transc
 - `READWISE_URL_ONLY_WHEN_ZH_SUBS=true` to clip public YouTube URLs to Readwise when original Chinese subtitles exist (skips subtitle download/transcription). Member-only, private, login-required, and age-restricted videos stay on the local subtitle/transcription path because Readwise Reader cannot use your YouTube cookies.
 - `DOWNLOAD_CONCURRENCY` (0/1 means serial), retry/backoff options, and `DOWNLOAD_TOTAL_TIMEOUT_SECONDS` / `DOWNLOAD_SOCKET_TIMEOUT_SECONDS` control download pressure and time budgets.
 - `AUTO_RETRY_INTERRUPTED_TASKS=true` creates a fresh lineage-linked task after restart for safe pre-Readwise stages. `AUTO_RETRY_INTERRUPTED_MAX_ATTEMPTS` limits restart loops; stages that may have changed Reader state remain manual.
+- `AUTO_TRANSLATE_NON_TARGET_LANGUAGE=true` translates subtitles whose reliable source language differs from `AUTO_TRANSLATE_TARGET_LANGUAGE` (default `zh`). Mixed, unknown, and low-confidence sources are skipped; originals are preserved.
+- `AUDIO_PROBE_PROVIDERS` configures the independent audio-language probe chain. It defaults to `configured_funasr`; add `openai` only with a separate `audio_probe.openai` configuration.
 - `TRANSCRIBE_CONCURRENCY` to cap concurrent transcriptions (0/1 means serial, empty means unlimited).
 - `YTDLP_COOKIE_FILE` to provide a Netscape-format cookie file instead of a Firefox profile.
 - `LOG_LEVEL` controls application log verbosity (default `INFO`), and `DEBUG_CONTENT_LOGGING=true` enables full transcript/subtitle payload logging for local debugging.
@@ -219,6 +223,7 @@ Special thanks to:
 
 ### 最近更新
 - 当前语言判定链路已整理到 [`docs/language-decision-logic.md`](docs/language-decision-logic.md)，包含主语言、内容语境、字幕策略和 Readwise 分支流程图。
+- 字幕翻译与音频语言探测是两个独立的 provider 能力，当前 adapter 和自动流程边界见 [`docs/provider-capabilities.md`](docs/provider-capabilities.md)。
 - `scripts/build-and-push.sh` 支持持续化 BuildKit 缓存，多架构推送后会自动在本机加载当前架构镜像，无需再执行 `docker pull`。
 - Telegram Webhook 立即返回，并将字幕处理放到后台执行，避免因为重试导致的重复回复。
 - Telegram 部署改为“单入口 + 多工作节点”模式，避免同一条消息被多个 bot 实例重复回复。
@@ -240,6 +245,7 @@ Special thanks to:
   - 直接从平台下载字幕
   - 使用 FunASR 进行音频转录
   - 支持多种字幕格式（SRT、VTT、JSON3）
+  - 可配置 DeepL API、OpenAI 兼容文本接口或 DeepLX 的翻译顺序；非目标语言自动翻译默认关闭
   
 - **用户界面**
   - Telegram 机器人便捷访问
@@ -307,6 +313,8 @@ Special thanks to:
 - `READWISE_URL_ONLY_WHEN_ZH_SUBS=true`：公开视频检测到原始中文字幕轨时直接剪藏原始 URL 到 Readwise（跳过字幕下载/转录）。会员、私有、需登录或年龄限制视频仍走本地字幕/转录路径，因为 Readwise Reader 不能复用你的 YouTube cookies。
 - `DOWNLOAD_CONCURRENCY`（0/1 视为串行）、重试退避参数以及 `DOWNLOAD_TOTAL_TIMEOUT_SECONDS` / `DOWNLOAD_SOCKET_TIMEOUT_SECONDS` 用于控制下载压力和时间预算。
 - `AUTO_RETRY_INTERRUPTED_TASKS=true`：服务重启后，为 Readwise 之前的安全阶段创建新的关联续跑任务；`AUTO_RETRY_INTERRUPTED_MAX_ATTEMPTS` 限制重启循环，可能已经修改 Reader 状态的阶段仍需人工确认。
+- `AUTO_TRANSLATE_NON_TARGET_LANGUAGE=true`：把可靠识别为非目标语言的字幕翻译到 `AUTO_TRANSLATE_TARGET_LANGUAGE`（默认 `zh`）；混合、未知和低置信度来源会跳过，原字幕文件会保留。
+- `AUDIO_PROBE_PROVIDERS`：配置独立的音频语言探测链，默认仅使用 `configured_funasr`；只有配置独立的 `audio_probe.openai` 后才应加入 `openai`。
 - `TRANSCRIBE_CONCURRENCY`：限制转录并发（0/1 串行，留空为不限）。
 - `YTDLP_COOKIE_FILE`：使用 Netscape 格式 cookies 文件替代 Firefox profile。
 默认值可参考 `.env.example`。

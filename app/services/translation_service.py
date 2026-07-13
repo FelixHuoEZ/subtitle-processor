@@ -1,11 +1,14 @@
-"""Translation service for subtitle content using various translation APIs."""
+"""Subtitle translation with configurable provider fallbacks."""
 
-import json
 import logging
-import time
 import random
+import re
+import threading
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
 import requests
-from typing import Dict, Any, Optional, List
+
 from ..config.config_manager import get_config_value
 from ..utils.logging_utils import summarize_text
 
@@ -13,516 +16,619 @@ logger = logging.getLogger(__name__)
 
 
 class TranslationService:
-    """翻译服务 - 支持DeepL、OpenAI等多种翻译API"""
-    
+    """Translate subtitle text through DeepL or OpenAI-compatible providers."""
+
     def __init__(self):
-        """初始化翻译服务"""
-        # DeepL配置
-        self.deeplx_server = get_config_value('servers.deeplx', 'http://localhost:1188')
-        self.deepl_api_key = get_config_value('tokens.deepl.api_key', '')
-        self.deepl_base_url = get_config_value('tokens.deepl.base_url', 'https://api-free.deepl.com/v2')
-        
-        # OpenAI配置
-        self.openai_api_key = get_config_value('tokens.openai.api_key', '')
-        self.openai_base_url = get_config_value('tokens.openai.base_url', 'https://api.openai.com/v1')
-        self.openai_model = get_config_value('tokens.openai.model', 'gpt-3.5-turbo')
-        
-        # 翻译重试配置
-        self.max_retries = get_config_value('translation.max_retries', 3)
-        self.base_delay = get_config_value('translation.base_delay', 3)
-        self.request_interval = get_config_value('translation.request_interval', 1.0)
-        
-        # 分块翻译配置
-        self.target_chunk_length = get_config_value('translation.chunk_size', 2000)
-        self.min_chunk_length = get_config_value('translation.min_chunk_size', 1600) 
-        self.max_chunk_length = get_config_value('translation.max_chunk_size', 2400)
-        
-        # 语言映射
+        self.deeplx_server = self._string_config(
+            "servers.deeplx", "http://localhost:1188"
+        ).rstrip("/")
+        self.deepl_api_key = self._string_config("tokens.deepl.api_key", "")
+        self.deepl_base_url = self._string_config(
+            "tokens.deepl.base_url", "https://api-free.deepl.com/v2"
+        ).rstrip("/")
+
+        self.openai_providers = self._load_openai_providers(
+            get_config_value("tokens.openai", [])
+        )
+        self.provider_specs = self._load_provider_specs(
+            get_config_value("translation.services", None)
+        )
+
+        self.max_retries = self._positive_int_config("translation.max_retries", 3)
+        self.base_delay = self._positive_float_config("translation.base_delay", 3.0)
+        self.request_interval = max(
+            0.0,
+            self._float_config("translation.request_interval", 1.0),
+        )
+        self.request_timeout = self._positive_float_config(
+            "translation.request_timeout", 60.0
+        )
+        self.target_chunk_length = self._positive_int_config(
+            "translation.chunk_size", 2000
+        )
+        self.min_chunk_length = self._positive_int_config(
+            "translation.min_chunk_size", 1600
+        )
+        self.max_chunk_length = max(
+            self.target_chunk_length,
+            self._positive_int_config("translation.max_chunk_size", 2400),
+        )
+        self.default_target_language = self._string_config(
+            "translation.default_target_language", "zh"
+        )
+
+        self.deeplx_health_timeout = self._positive_float_config(
+            "translation.deeplx_health_timeout", 2.0
+        )
+        self.deeplx_cooldown_seconds = self._positive_float_config(
+            "translation.deeplx_cooldown_seconds", 300.0
+        )
+        self._deeplx_health_lock = threading.Lock()
+        self._deeplx_health_checked_at = 0.0
+        self._deeplx_available = False
+
         self.language_map = {
-            'zh': 'ZH',
-            'zh-CN': 'ZH', 
-            'zh-TW': 'ZH',
-            'en': 'EN',
-            'en-US': 'EN',
-            'en-GB': 'EN',
-            'ja': 'JA',
-            'ko': 'KO',
-            'fr': 'FR',
-            'de': 'DE',
-            'es': 'ES',
-            'it': 'IT',
-            'pt': 'PT',
-            'ru': 'RU'
+            "zh": "ZH",
+            "zh-CN": "ZH",
+            "zh-TW": "ZH",
+            "en": "EN",
+            "en-US": "EN",
+            "en-GB": "EN",
+            "ja": "JA",
+            "ko": "KO",
+            "fr": "FR",
+            "de": "DE",
+            "es": "ES",
+            "it": "IT",
+            "pt": "PT",
+            "ru": "RU",
         }
-    
-    def translate_text(self, text: str, target_lang: str, source_lang: str = 'auto') -> Optional[str]:
-        """翻译文本
-        
-        Args:
-            text: 待翻译文本
-            target_lang: 目标语言代码
-            source_lang: 源语言代码，默认自动检测
-            
-        Returns:
-            str: 翻译结果，失败返回None
-        """
+        logger.info(
+            "字幕翻译 provider 顺序: %s",
+            " -> ".join(spec["name"] for spec in self.provider_specs) or "none",
+        )
+
+    @staticmethod
+    def _string_config(key: str, default: str) -> str:
+        value = get_config_value(key, default)
+        return value.strip() if isinstance(value, str) else default
+
+    @staticmethod
+    def _positive_int_config(key: str, default: int) -> int:
         try:
-            if not text or not text.strip():
-                logger.warning("翻译文本为空")
-                return None
-            
-            logger.info(f"翻译文本: {source_lang} -> {target_lang}")
-            logger.debug("原文摘要: %s", summarize_text(text, 100))
-            
-            # 检查文本长度，决定是否分块翻译
-            if len(text) > self.max_chunk_length:
-                logger.info(f"文本过长({len(text)}字符)，使用分块翻译")
-                return self._translate_in_chunks(text, target_lang, source_lang)
+            return max(1, int(get_config_value(key, default)))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _float_config(key: str, default: float) -> float:
+        try:
+            return float(get_config_value(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    @classmethod
+    def _positive_float_config(cls, key: str, default: float) -> float:
+        return max(0.1, cls._float_config(key, default))
+
+    @staticmethod
+    def _load_openai_providers(raw_config: Any) -> Dict[str, Dict[str, Any]]:
+        providers: Dict[str, Dict[str, Any]] = {}
+        if isinstance(raw_config, dict):
+            if raw_config.get("api_key"):
+                providers[str(raw_config.get("name") or "default")] = dict(raw_config)
             else:
-                # 使用重试机制翻译
-                return self._translate_with_retry(text, target_lang, source_lang)
-            
-        except Exception as e:
-            logger.error(f"翻译文本失败: {str(e)}")
+                for name, config in raw_config.items():
+                    if isinstance(config, dict):
+                        providers[str(name)] = dict(config)
+        elif isinstance(raw_config, list):
+            for index, config in enumerate(raw_config):
+                if not isinstance(config, dict):
+                    continue
+                name = str(config.get("name") or index)
+                providers[name] = dict(config)
+        return providers
+
+    def _load_provider_specs(self, raw_services: Any) -> List[Dict[str, str]]:
+        specs: List[Tuple[int, int, Dict[str, str]]] = []
+        if isinstance(raw_services, list):
+            for index, service in enumerate(raw_services):
+                if not isinstance(service, dict) or service.get("enabled") is False:
+                    continue
+                spec = self._provider_spec_from_config(service)
+                if not spec:
+                    continue
+                try:
+                    priority = int(service.get("priority", index + 1))
+                except (TypeError, ValueError):
+                    priority = index + 1
+                specs.append((priority, index, spec))
+
+        if not specs and raw_services is None:
+            index = 0
+            if self.deepl_api_key:
+                specs.append(
+                    (1, index, {"name": "deepl", "kind": "deepl", "config": ""})
+                )
+                index += 1
+            for name in self.openai_providers:
+                specs.append(
+                    (
+                        10 + index,
+                        index,
+                        {
+                            "name": f"openai:{name}",
+                            "kind": "openai",
+                            "config": name,
+                        },
+                    )
+                )
+                index += 1
+            if not specs:
+                specs.append(
+                    (99, index, {"name": "deeplx", "kind": "deeplx", "config": ""})
+                )
+
+        specs.sort(key=lambda item: (item[0], item[1]))
+        return [spec for _, _, spec in specs]
+
+    @staticmethod
+    def _provider_spec_from_config(service: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        name = str(service.get("name") or "").strip()
+        normalized = name.lower().replace("-", "_")
+        if normalized in {"deepl", "deepl_api", "deepl_official"}:
+            return {"name": name or "deepl", "kind": "deepl", "config": ""}
+        if normalized in {"deeplx", "deeplx_v2"}:
+            return {"name": name or "deeplx", "kind": "deeplx", "config": ""}
+        if normalized == "openai" or normalized.startswith("openai_"):
+            config_name = str(
+                service.get("config_name")
+                or (normalized.removeprefix("openai_") if normalized != "openai" else "default")
+            )
+            return {
+                "name": name or f"openai:{config_name}",
+                "kind": "openai",
+                "config": config_name,
+            }
+        logger.warning("忽略未知字幕翻译 provider: %s", name or "<empty>")
+        return None
+
+    def translate_text(
+        self, text: str, target_lang: str, source_lang: str = "auto"
+    ) -> Optional[str]:
+        """Return translated text only when every chunk succeeds."""
+        result = self.translate_text_detailed(text, target_lang, source_lang)
+        return result.get("content") if result.get("status") == "completed" else None
+
+    def translate_text_detailed(
+        self, text: str, target_lang: str, source_lang: str = "auto"
+    ) -> Dict[str, Any]:
+        if not isinstance(text, str) or not text.strip():
+            return self._translation_result(
+                "failed", target_lang, source_lang, error="empty_text"
+            )
+
+        chunks = self._split_text_into_chunks(text)
+        translated_chunks: List[str] = []
+        used_providers: List[str] = []
+        for index, chunk in enumerate(chunks, 1):
+            translated, provider = self._translate_with_retry(
+                chunk, target_lang, source_lang
+            )
+            if not translated:
+                status = "partial" if translated_chunks else "failed"
+                return self._translation_result(
+                    status,
+                    target_lang,
+                    source_lang,
+                    providers=used_providers,
+                    total_segments=len(chunks),
+                    translated_segments=len(translated_chunks),
+                    failed_segments=len(chunks) - len(translated_chunks),
+                    error=f"chunk_{index}_failed",
+                )
+            translated_chunks.append(translated)
+            if provider and provider not in used_providers:
+                used_providers.append(provider)
+            if index < len(chunks) and self.request_interval:
+                time.sleep(self.request_interval)
+
+        return self._translation_result(
+            "completed",
+            target_lang,
+            source_lang,
+            content="".join(translated_chunks),
+            providers=used_providers,
+            total_segments=len(chunks),
+            translated_segments=len(chunks),
+        )
+
+    def _translate_with_retry(
+        self, text: str, target_lang: str, source_lang: str
+    ) -> Tuple[Optional[str], Optional[str]]:
+        logger.info("翻译文本: %s -> %s", source_lang, target_lang)
+        logger.debug("原文摘要: %s", summarize_text(text, 100))
+        for retry_index in range(self.max_retries):
+            for spec in self.provider_specs:
+                translated = self._translate_with_provider(
+                    spec, text, target_lang, source_lang
+                )
+                if translated:
+                    logger.info("字幕翻译成功: provider=%s", spec["name"])
+                    return translated, spec["name"]
+                if self.request_interval:
+                    time.sleep(self.request_interval)
+            if retry_index < self.max_retries - 1:
+                delay = self.base_delay * (2**retry_index) + random.uniform(0, 1)
+                logger.info("所有字幕翻译 provider 失败，%.1f 秒后重试", delay)
+                time.sleep(delay)
+        logger.error("字幕翻译完全失败，已重试 %s 次", self.max_retries)
+        return None, None
+
+    def _translate_with_provider(
+        self,
+        spec: Dict[str, str],
+        text: str,
+        target_lang: str,
+        source_lang: str,
+    ) -> Optional[str]:
+        if spec["kind"] == "deepl":
+            return self._translate_with_deepl_api(text, target_lang, source_lang)
+        if spec["kind"] == "deeplx":
+            return self._translate_with_deeplx(text, target_lang, source_lang)
+        if spec["kind"] == "openai":
+            config = self.openai_providers.get(spec["config"])
+            if not config and len(self.openai_providers) == 1:
+                config = next(iter(self.openai_providers.values()))
+            return self._translate_with_openai(
+                text, target_lang, source_lang, config or {}
+            )
+        return None
+
+    def _split_text_into_chunks(self, text: str) -> List[str]:
+        if len(text) <= self.max_chunk_length:
+            return [text]
+        chunks = []
+        current_pos = 0
+        while current_pos < len(text):
+            end_pos = min(current_pos + self.target_chunk_length, len(text))
+            if end_pos < len(text):
+                search_start = max(current_pos + self.min_chunk_length, end_pos - 200)
+                search_end = min(end_pos + 200, len(text))
+                for break_char in ("\n\n", "。", "！", "？", ".", "!", "?"):
+                    break_pos = text.rfind(break_char, search_start, search_end)
+                    if break_pos != -1:
+                        end_pos = break_pos + len(break_char)
+                        break
+            if end_pos <= current_pos:
+                end_pos = min(current_pos + self.target_chunk_length, len(text))
+            chunk = text[current_pos:end_pos]
+            if chunk:
+                chunks.append(chunk)
+            current_pos = end_pos
+        return chunks or [text]
+
+    def _translate_with_deeplx(
+        self, text: str, target_lang: str, source_lang: str
+    ) -> Optional[str]:
+        if not self._check_deeplx_service():
+            return None
+        data = {
+            "text": text,
+            "source_lang": source_lang if source_lang != "auto" else "AUTO",
+            "target_lang": self.language_map.get(target_lang, target_lang.upper()),
+        }
+        try:
+            response = requests.post(
+                f"{self.deeplx_server}/translate",
+                json=data,
+                timeout=self.request_timeout,
+            )
+            if response.status_code != 200:
+                self._mark_deeplx_unavailable()
+                logger.warning("DeepLX翻译失败，状态码: %s", response.status_code)
+                return None
+            translated = (response.json() or {}).get("data")
+            return translated.strip() if isinstance(translated, str) else None
+        except requests.RequestException as exc:
+            self._mark_deeplx_unavailable()
+            logger.debug("DeepLX翻译请求失败: %s", exc)
             return None
 
-    def _translate_with_retry(self, text: str, target_lang: str, source_lang: str = 'auto') -> Optional[str]:
-        """带重试机制的翻译"""
-        # 翻译服务优先级
-        services = [
-            ('DeepLX', self._translate_with_deeplx),
-            ('DeepL API', self._translate_with_deepl_api),
-            ('OpenAI', self._translate_with_openai)
-        ]
-        
-        for retry in range(self.max_retries):
-            for service_name, translate_func in services:
-                try:
-                    logger.debug(f"尝试使用 {service_name} 翻译 (重试 {retry + 1}/{self.max_retries})")
-                    
-                    result = translate_func(text, target_lang, source_lang)
-                    if result:
-                        logger.info(f"{service_name} 翻译成功")
-                        return result
-                    else:
-                        logger.debug(f"{service_name} 翻译失败，尝试下一个服务")
-                        # 在服务之间添加间隔
-                        time.sleep(self.request_interval)
-                        
-                except Exception as e:
-                    logger.debug(f"{service_name} 翻译出错: {str(e)}")
-                    continue
-            
-            # 如果所有服务都失败，等待后重试
-            if retry < self.max_retries - 1:
-                delay = self.base_delay * (2 ** retry) + random.uniform(0, 1)
-                logger.info(f"所有翻译服务都失败，等待 {delay:.1f} 秒后重试")
-                time.sleep(delay)
-        
-        logger.error(f"翻译完全失败，已重试 {self.max_retries} 次")
-        return None
-    
-    def _translate_in_chunks(self, text: str, target_lang: str, source_lang: str) -> Optional[str]:
-        """分块翻译长文本"""
-        try:
-            # 分割文本为合适的块
-            chunks = self._split_text_into_chunks(text)
-            logger.info(f"文本分割为 {len(chunks)} 个块进行翻译")
-            
-            translated_chunks = []
-            
-            for i, chunk in enumerate(chunks, 1):
-                logger.debug(f"翻译块 {i}/{len(chunks)} ({len(chunk)} 字符)")
-                
-                translated_chunk = self._translate_with_retry(chunk, target_lang, source_lang)
-                if translated_chunk:
-                    translated_chunks.append(translated_chunk)
-                else:
-                    logger.error(f"翻译块 {i} 失败")
-                    return None  # 如果任何一块失败，整个翻译失败
-                
-                # 添加请求间隔
-                if i < len(chunks):
-                    time.sleep(self.request_interval)
-            
-            # 合并翻译结果
-            result = ''.join(translated_chunks)
-            logger.info(f"分块翻译完成，总长度: {len(result)} 字符")
-            return result
-            
-        except Exception as e:
-            logger.error(f"分块翻译失败: {str(e)}")
+    def _translate_with_deepl_api(
+        self, text: str, target_lang: str, source_lang: str
+    ) -> Optional[str]:
+        if not self.deepl_api_key:
             return None
-    
-    def _split_text_into_chunks(self, text: str) -> List[str]:
-        """将文本分割为合适大小的块"""
+        data = {
+            "text": [text],
+            "target_lang": self.language_map.get(target_lang, target_lang.upper()),
+            "source_lang": source_lang if source_lang != "auto" else None,
+        }
+        data = {key: value for key, value in data.items() if value is not None}
         try:
-            if len(text) <= self.max_chunk_length:
-                return [text]
-            
-            chunks = []
-            current_pos = 0
-            
-            while current_pos < len(text):
-                # 计算下一个块的结束位置
-                end_pos = min(current_pos + self.target_chunk_length, len(text))
-                
-                # 如果不是最后一块，尝试在句子边界处分割
-                if end_pos < len(text):
-                    # 寻找合适的分割点（句号、问号、感叹号等）
-                    sentence_breaks = ['。', '！', '？', '.', '!', '?', '\n\n']
-                    
-                    # 在目标长度附近寻找句子边界
-                    search_start = max(current_pos + self.min_chunk_length, end_pos - 200)
-                    search_end = min(end_pos + 200, len(text))
-                    
-                    best_break = end_pos
-                    for break_char in sentence_breaks:
-                        break_pos = text.rfind(break_char, search_start, search_end)
-                        if break_pos != -1:
-                            # 找到句子边界，在其后分割
-                            best_break = break_pos + len(break_char)
-                            break
-                    
-                    end_pos = best_break
-                
-                # 确保块不为空
-                if end_pos > current_pos:
-                    chunk = text[current_pos:end_pos].strip()
-                    if chunk:
-                        chunks.append(chunk)
-                
-                current_pos = end_pos
-                
-                # 防止无限循环
-                if current_pos == end_pos and end_pos < len(text):
-                    current_pos += 1
-            
-            logger.debug(f"文本分割完成: {len(chunks)} 个块，长度分别为 {[len(c) for c in chunks]}")
-            return chunks
-            
-        except Exception as e:
-            logger.error(f"分割文本失败: {str(e)}")
-            return [text]  # 出错时返回原文本
-    
-    def _translate_with_deeplx(self, text: str, target_lang: str, source_lang: str) -> Optional[str]:
-        """使用DeepLX翻译"""
-        try:
-            # 检查DeepLX服务是否可用
-            if not self._check_deeplx_service():
-                logger.debug("DeepLX服务不可用")
-                return None
-            
-            # 构造请求数据
-            data = {
-                'text': text,
-                'source_lang': source_lang if source_lang != 'auto' else 'AUTO',
-                'target_lang': self.language_map.get(target_lang, target_lang.upper())
-            }
-            
-            # 发送翻译请求
-            url = f"{self.deeplx_server}/translate"
-            response = requests.post(url, json=data, timeout=30)
-            
-            if response.status_code == 200:
-                result = response.json()
-                if 'data' in result and result['data']:
-                    translated_text = result['data']
-                    logger.debug("DeepLX翻译结果摘要: %s", summarize_text(translated_text, 100))
-                    return translated_text
-                else:
-                    logger.warning("DeepLX返回结果为空")
-                    return None
-            else:
-                logger.warning(f"DeepLX翻译失败，状态码: {response.status_code}")
-                return None
-                
-        except Exception as e:
-            logger.debug(f"DeepLX翻译出错: {str(e)}")
-            return None
-    
-    def _translate_with_deepl_api(self, text: str, target_lang: str, source_lang: str) -> Optional[str]:
-        """使用官方DeepL API翻译"""
-        try:
-            if not self.deepl_api_key:
-                logger.debug("DeepL API密钥未配置")
-                return None
-            
-            # 构造请求数据
-            data = {
-                'text': [text],
-                'target_lang': self.language_map.get(target_lang, target_lang.upper()),
-                'source_lang': source_lang if source_lang != 'auto' else None
-            }
-            
-            # 移除None值
-            data = {k: v for k, v in data.items() if v is not None}
-            
-            # 发送翻译请求
-            url = f"{self.deepl_base_url}/translate"
-            headers = {
-                'Authorization': f'DeepL-Auth-Key {self.deepl_api_key}',
-                'Content-Type': 'application/json'
-            }
-            
-            response = requests.post(url, json=data, headers=headers, timeout=30)
-            
-            if response.status_code == 200:
-                result = response.json()
-                if 'translations' in result and result['translations']:
-                    translated_text = result['translations'][0]['text']
-                    logger.debug("DeepL API翻译结果摘要: %s", summarize_text(translated_text, 100))
-                    return translated_text
-                else:
-                    logger.warning("DeepL API返回结果为空")
-                    return None
-            else:
-                logger.warning(f"DeepL API翻译失败，状态码: {response.status_code}")
-                return None
-                
-        except Exception as e:
-            logger.debug(f"DeepL API翻译出错: {str(e)}")
-            return None
-    
-    def _translate_with_openai(self, text: str, target_lang: str, source_lang: str) -> Optional[str]:
-        """使用OpenAI翻译"""
-        try:
-            if not self.openai_api_key:
-                logger.debug("OpenAI API密钥未配置")
-                return None
-            
-            import openai
-            
-            # 配置OpenAI客户端
-            client = openai.OpenAI(
-                api_key=self.openai_api_key,
-                base_url=self.openai_base_url
+            response = requests.post(
+                f"{self.deepl_base_url}/translate",
+                json=data,
+                headers={
+                    "Authorization": f"DeepL-Auth-Key {self.deepl_api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=self.request_timeout,
             )
-            
-            # 构造翻译提示
-            lang_names = {
-                'zh': '中文', 'zh-CN': '中文', 'zh-TW': '繁体中文',
-                'en': 'English', 'en-US': 'English', 'en-GB': 'English',
-                'ja': '日本语', 'ko': '한국어', 'fr': 'Français',
-                'de': 'Deutsch', 'es': 'Español', 'it': 'Italiano',
-                'pt': 'Português', 'ru': 'Русский'
-            }
-            
-            target_lang_name = lang_names.get(target_lang, target_lang)
-            prompt = f"请将以下文本翻译为{target_lang_name}，保持原意和语气，直接返回翻译结果：\\n\\n{text}"
-            
-            # 发送翻译请求
-            response = client.chat.completions.create(
-                model=self.openai_model,
-                messages=[
-                    {"role": "system", "content": "你是一个专业的翻译助手，能够准确翻译各种语言的文本。"},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=2000
-            )
-            
-            if response.choices and response.choices[0].message:
-                translated_text = response.choices[0].message.content.strip()
-                logger.debug("OpenAI翻译结果摘要: %s", summarize_text(translated_text, 100))
-                return translated_text
-            else:
-                logger.warning("OpenAI返回结果为空")
+            if response.status_code != 200:
+                logger.warning("DeepL API翻译失败，状态码: %s", response.status_code)
                 return None
-                
-        except Exception as e:
-            logger.error(f"OpenAI翻译失败: {str(e)}")
+            translations = (response.json() or {}).get("translations") or []
+            translated = translations[0].get("text") if translations else None
+            return translated.strip() if isinstance(translated, str) else None
+        except requests.RequestException as exc:
+            logger.debug("DeepL API翻译请求失败: %s", exc)
             return None
-    
+
+    def _translate_with_openai(
+        self,
+        text: str,
+        target_lang: str,
+        source_lang: str,
+        config: Dict[str, Any],
+    ) -> Optional[str]:
+        api_key = config.get("api_key")
+        endpoint = config.get("api_endpoint") or config.get("base_url")
+        model = config.get("model") or "gpt-4o-mini"
+        if not isinstance(api_key, str) or not api_key.strip():
+            return None
+        if not isinstance(endpoint, str) or not endpoint.strip():
+            endpoint = "https://api.openai.com/v1"
+        endpoint = endpoint.rstrip("/")
+        if not endpoint.endswith("/chat/completions"):
+            endpoint = f"{endpoint}/chat/completions"
+
+        target_name = self.get_supported_languages().get(target_lang, target_lang)
+        prompt_template = config.get("prompt")
+        if isinstance(prompt_template, str) and prompt_template.strip():
+            try:
+                instruction = prompt_template.format(target_lang=target_name)
+            except (KeyError, ValueError):
+                instruction = prompt_template
+        else:
+            instruction = (
+                f"Translate the following subtitle text to {target_name}. "
+                "Preserve meaning, line breaks, names, and formatting. "
+                "Return only the translation."
+            )
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a precise professional subtitle translator.",
+                },
+                {"role": "user", "content": f"{instruction}\n\n{text}"},
+            ],
+            "temperature": 0.2,
+        }
+        try:
+            response = requests.post(
+                endpoint,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key.strip()}",
+                    "Content-Type": "application/json",
+                },
+                timeout=self.request_timeout,
+            )
+            if response.status_code != 200:
+                logger.warning(
+                    "OpenAI兼容翻译失败，状态码: %s", response.status_code
+                )
+                return None
+            choices = (response.json() or {}).get("choices") or []
+            message = choices[0].get("message") if choices else None
+            translated = message.get("content") if isinstance(message, dict) else None
+            return translated.strip() if isinstance(translated, str) else None
+        except requests.RequestException as exc:
+            logger.debug("OpenAI兼容翻译请求失败: %s", exc)
+            return None
+
     def _check_deeplx_service(self) -> bool:
-        """检查DeepLX服务是否可用"""
-        try:
-            response = requests.get(f"{self.deeplx_server}/", timeout=5)
-            return response.status_code == 200
-        except Exception:
-            return False
-    
-    def translate_subtitle_content(self, content: str, target_lang: str, source_lang: str = 'auto') -> Optional[str]:
-        """翻译字幕内容
-        
-        Args:
-            content: 字幕内容（SRT格式或纯文本）
-            target_lang: 目标语言
-            source_lang: 源语言
-            
-        Returns:
-            str: 翻译后的字幕内容
-        """
-        try:
-            # 检测是否为SRT格式
-            if self._is_srt_format(content):
-                return self._translate_srt_content(content, target_lang, source_lang)
-            else:
-                # 纯文本翻译
-                return self.translate_text(content, target_lang, source_lang)
-                
-        except Exception as e:
-            logger.error(f"翻译字幕内容失败: {str(e)}")
-            return None
-    
-    def _is_srt_format(self, content: str) -> bool:
-        """检测是否为SRT格式"""
-        import re
-        # 检查是否包含SRT时间戳格式
-        time_pattern = r'\\d{2}:\\d{2}:\\d{2},\\d{3}\\s*-->\\s*\\d{2}:\\d{2}:\\d{2},\\d{3}'
-        return bool(re.search(time_pattern, content))
-    
-    def _translate_srt_content(self, srt_content: str, target_lang: str, source_lang: str) -> Optional[str]:
-        """翻译SRT格式字幕"""
-        try:
-            import re
-            
-            # 分割SRT内容
-            blocks = re.split(r'\\n\\s*\\n', srt_content.strip())
-            translated_blocks = []
-            
-            for block in blocks:
-                if not block.strip():
-                    continue
-                
-                lines = block.strip().split('\\n')
-                if len(lines) < 3:
-                    translated_blocks.append(block)
-                    continue
-                
-                # 序号和时间戳保持不变
-                subtitle_id = lines[0]
-                timestamp = lines[1]
-                
-                # 翻译文本内容
-                text_lines = lines[2:]
-                text_content = '\\n'.join(text_lines)
-                
-                translated_text = self.translate_text(text_content, target_lang, source_lang)
-                if translated_text:
-                    # 重新组装字幕块
-                    translated_block = f"{subtitle_id}\\n{timestamp}\\n{translated_text}"
-                    translated_blocks.append(translated_block)
-                else:
-                    # 翻译失败，保持原文
-                    translated_blocks.append(block)
-            
-            return '\\n\\n'.join(translated_blocks)
-            
-        except Exception as e:
-            logger.error(f"翻译SRT内容失败: {str(e)}")
-            return None
-    
-    def batch_translate(self, texts: List[str], target_lang: str, source_lang: str = 'auto') -> Dict[str, Any]:
-        """批量翻译文本
-        
-        Args:
-            texts: 文本列表
-            target_lang: 目标语言
-            source_lang: 源语言
-            
-        Returns:
-            dict: 批量翻译结果
-        """
-        try:
-            logger.info(f"开始批量翻译 {len(texts)} 条文本")
-            
-            results = []
-            successful = 0
-            failed = 0
-            
-            for i, text in enumerate(texts, 1):
-                logger.debug(f"翻译进度: {i}/{len(texts)}")
-                
-                result = self.translate_text(text, target_lang, source_lang)
-                if result:
-                    results.append(result)
-                    successful += 1
-                else:
-                    results.append(text)  # 翻译失败时保持原文
-                    failed += 1
-            
-            summary = {
-                'total': len(texts),
-                'successful': successful,
-                'failed': failed,
-                'results': results
-            }
-            
-            logger.info(f"批量翻译完成 - 成功: {successful}, 失败: {failed}")
-            return summary
-            
-        except Exception as e:
-            logger.error(f"批量翻译失败: {str(e)}")
-            return {'total': 0, 'successful': 0, 'failed': 0, 'results': []}
-    
-    def detect_language(self, text: str) -> Optional[str]:
-        """检测文本语言
-        
-        Args:
-            text: 待检测文本
-            
-        Returns:
-            str: 语言代码，失败返回None
-        """
-        try:
-            if not text or not text.strip():
-                return None
-            
-            # 使用简单的字符统计方法检测语言
-            import re
-            
-            # 统计中文字符
-            chinese_chars = len(re.findall(r'[\\u4e00-\\u9fff]', text))
-            # 统计日文假名
-            japanese_chars = len(re.findall(r'[\\u3040-\\u309f\\u30a0-\\u30ff]', text))
-            # 统计韩文字符
-            korean_chars = len(re.findall(r'[\\uac00-\\ud7af]', text))
-            # 统计英文字符
-            english_chars = len(re.findall(r'[a-zA-Z]', text))
-            
-            total_chars = len([c for c in text if c.isalnum()])
-            
-            if total_chars == 0:
-                return None
-            
-            # 计算各语言字符占比
-            chinese_ratio = chinese_chars / total_chars
-            japanese_ratio = japanese_chars / total_chars
-            korean_ratio = korean_chars / total_chars
-            english_ratio = english_chars / total_chars
-            
-            # 根据占比判断语言
-            if chinese_ratio > 0.3:
-                return 'zh'
-            elif japanese_ratio > 0.2:
-                return 'ja'
-            elif korean_ratio > 0.2:
-                return 'ko'
-            elif english_ratio > 0.5:
-                return 'en'
-            else:
-                return 'auto'  # 无法确定
-                
-        except Exception as e:
-            logger.error(f"语言检测失败: {str(e)}")
-            return None
-    
-    def get_supported_languages(self) -> Dict[str, str]:
-        """获取支持的语言列表"""
+        now = time.monotonic()
+        with self._deeplx_health_lock:
+            if (
+                self._deeplx_health_checked_at > 0
+                and now - self._deeplx_health_checked_at
+                < self.deeplx_cooldown_seconds
+            ):
+                return self._deeplx_available
+            try:
+                response = requests.get(
+                    f"{self.deeplx_server}/",
+                    timeout=self.deeplx_health_timeout,
+                )
+                self._deeplx_available = response.status_code == 200
+            except requests.RequestException:
+                self._deeplx_available = False
+            self._deeplx_health_checked_at = now
+            return self._deeplx_available
+
+    def _mark_deeplx_unavailable(self) -> None:
+        with self._deeplx_health_lock:
+            self._deeplx_available = False
+            self._deeplx_health_checked_at = time.monotonic()
+
+    def translate_subtitle_content(
+        self, content: str, target_lang: str, source_lang: str = "auto"
+    ) -> Optional[str]:
+        """Return a subtitle only when every translatable segment succeeds."""
+        result = self.translate_subtitle_content_detailed(
+            content, target_lang, source_lang
+        )
+        return result.get("content") if result.get("status") == "completed" else None
+
+    def translate_subtitle_content_detailed(
+        self, content: str, target_lang: str, source_lang: str = "auto"
+    ) -> Dict[str, Any]:
+        if not isinstance(content, str) or not content.strip():
+            return self._translation_result(
+                "failed", target_lang, source_lang, error="empty_subtitle"
+            )
+        if not self._is_srt_format(content):
+            return self.translate_text_detailed(content, target_lang, source_lang)
+
+        blocks = re.split(r"\n\s*\n", content.strip())
+        total_translatable_blocks = sum(
+            1
+            for block in blocks
+            if self._is_translatable_srt_block(block)
+        )
+        translated_blocks: List[str] = []
+        used_providers: List[str] = []
+        translated_count = 0
+        translatable_count = 0
+        for block_index, block in enumerate(blocks, 1):
+            lines = block.strip().splitlines()
+            if len(lines) < 3 or not self._is_srt_timing_line(lines[1]):
+                translated_blocks.append(block)
+                continue
+            translatable_count += 1
+            result = self.translate_text_detailed(
+                "\n".join(lines[2:]), target_lang, source_lang
+            )
+            if result.get("status") != "completed" or not result.get("content"):
+                status = "partial" if translated_count else "failed"
+                return self._translation_result(
+                    status,
+                    target_lang,
+                    source_lang,
+                    providers=used_providers,
+                    total_segments=total_translatable_blocks,
+                    translated_segments=translated_count,
+                    failed_segments=total_translatable_blocks - translated_count,
+                    error=f"subtitle_block_{block_index}_failed",
+                )
+            translated_blocks.append(
+                f"{lines[0]}\n{lines[1]}\n{result['content']}"
+            )
+            translated_count += 1
+            for provider in result.get("providers") or []:
+                if provider not in used_providers:
+                    used_providers.append(provider)
+
+        if not translatable_count:
+            return self._translation_result(
+                "failed", target_lang, source_lang, error="no_srt_blocks"
+            )
+        return self._translation_result(
+            "completed",
+            target_lang,
+            source_lang,
+            content="\n\n".join(translated_blocks),
+            providers=used_providers,
+            total_segments=translatable_count,
+            translated_segments=translated_count,
+        )
+
+    @staticmethod
+    def _is_srt_format(content: str) -> bool:
+        return bool(
+            re.search(
+                r"\d{2}:\d{2}:\d{2},\d{3}\s*-->\s*\d{2}:\d{2}:\d{2},\d{3}",
+                content,
+            )
+        )
+
+    @staticmethod
+    def _is_srt_timing_line(line: str) -> bool:
+        return bool(
+            re.fullmatch(
+                r"\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*"
+                r"\d{2}:\d{2}:\d{2}[,.]\d{3}",
+                line.strip(),
+            )
+        )
+
+    @classmethod
+    def _is_translatable_srt_block(cls, block: str) -> bool:
+        lines = block.strip().splitlines()
+        return len(lines) >= 3 and cls._is_srt_timing_line(lines[1])
+
+    @staticmethod
+    def _translation_result(
+        status: str,
+        target_language: str,
+        source_language: str,
+        *,
+        content: Optional[str] = None,
+        providers: Optional[List[str]] = None,
+        total_segments: int = 0,
+        translated_segments: int = 0,
+        failed_segments: int = 0,
+        error: Optional[str] = None,
+    ) -> Dict[str, Any]:
         return {
-            'zh': '中文',
-            'zh-CN': '简体中文',
-            'zh-TW': '繁体中文',
-            'en': 'English',
-            'en-US': 'English (US)',
-            'en-GB': 'English (UK)',
-            'ja': '日本語',
-            'ko': '한국어',
-            'fr': 'Français',
-            'de': 'Deutsch',
-            'es': 'Español',
-            'it': 'Italiano',
-            'pt': 'Português',
-            'ru': 'Русский'
+            "status": status,
+            "content": content if status == "completed" else None,
+            "source_language": source_language,
+            "target_language": target_language,
+            "providers": list(providers or []),
+            "total_segments": total_segments,
+            "translated_segments": translated_segments,
+            "failed_segments": failed_segments,
+            "error": error,
+        }
+
+    def batch_translate(
+        self, texts: List[str], target_lang: str, source_lang: str = "auto"
+    ) -> Dict[str, Any]:
+        results = []
+        failed = 0
+        for text in texts:
+            translated = self.translate_text(text, target_lang, source_lang)
+            if translated is None:
+                failed += 1
+            results.append(translated)
+        return {
+            "total": len(texts),
+            "successful": len(texts) - failed,
+            "failed": failed,
+            "results": results,
+        }
+
+    def detect_language(self, text: str) -> Optional[str]:
+        if not isinstance(text, str) or not text.strip():
+            return None
+        chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", text))
+        japanese_chars = len(re.findall(r"[\u3040-\u30ff]", text))
+        korean_chars = len(re.findall(r"[\uac00-\ud7af]", text))
+        english_chars = len(re.findall(r"[a-zA-Z]", text))
+        total_chars = len([char for char in text if char.isalnum()])
+        if total_chars == 0:
+            return None
+        if chinese_chars / total_chars > 0.3:
+            return "zh"
+        if japanese_chars / total_chars > 0.2:
+            return "ja"
+        if korean_chars / total_chars > 0.2:
+            return "ko"
+        if english_chars / total_chars > 0.5:
+            return "en"
+        return "auto"
+
+    @staticmethod
+    def get_supported_languages() -> Dict[str, str]:
+        return {
+            "zh": "中文",
+            "zh-CN": "简体中文",
+            "zh-TW": "繁体中文",
+            "en": "English",
+            "en-US": "English (US)",
+            "en-GB": "English (UK)",
+            "ja": "日本語",
+            "ko": "한국어",
+            "fr": "Français",
+            "de": "Deutsch",
+            "es": "Español",
+            "it": "Italiano",
+            "pt": "Português",
+            "ru": "Русский",
         }

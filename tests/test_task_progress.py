@@ -74,6 +74,21 @@ def test_stage_estimate_uses_similar_history_after_minimum_sample_count():
     assert estimate["upper_seconds"] >= estimate["typical_seconds"]
 
 
+def test_translation_stage_default_estimate_scales_with_media_duration():
+    service = TaskProgressService(FakeFileService())
+
+    short = service.estimate_stage(
+        "translate_subtitles", media_duration_seconds=300
+    )
+    long = service.estimate_stage(
+        "translate_subtitles", media_duration_seconds=3600
+    )
+
+    assert short["source"] == "default"
+    assert long["typical_seconds"] > short["typical_seconds"]
+    assert long["upper_seconds"] > short["upper_seconds"]
+
+
 def test_dynamic_plan_reports_current_and_remaining_stages():
     clock = Clock(datetime(2026, 7, 10, 12, 0, 0))
     task = {

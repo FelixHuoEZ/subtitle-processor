@@ -7,21 +7,25 @@ from app.services.transcription_service import TranscriptionService
 def build_transcription_service(monkeypatch):
     monkeypatch.delenv("AUDIO_PROBE_PROVIDERS", raising=False)
     monkeypatch.delenv("AUDIO_PROBE_MIN_CONFIDENCE", raising=False)
+    monkeypatch.delenv("AUDIO_PROBE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("AUDIO_PROBE_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("AUDIO_PROBE_OPENAI_MODEL", raising=False)
     return TranscriptionService()
 
 
-def test_audio_probe_disables_openai_once_when_sdk_is_unavailable(
+def test_audio_probe_disables_openai_once_when_separate_key_is_unavailable(
     monkeypatch, caplog
 ):
     original_get_config_value = transcription_module.get_config_value
 
     def fake_get_config_value(key, default=None):
-        if key == "tokens.openai.api_key":
-            return "configured-key"
+        if key == "audio_probe.providers":
+            return ["configured_funasr", "openai"]
+        if key == "audio_probe.openai.api_key":
+            return ""
         return original_get_config_value(key, default)
 
     monkeypatch.setattr(transcription_module, "get_config_value", fake_get_config_value)
-    monkeypatch.setattr(transcription_module.importlib.util, "find_spec", lambda _: None)
     monkeypatch.setattr(TranscriptionService, "_openai_warning_emitted", False)
 
     with caplog.at_level(logging.WARNING):
@@ -36,6 +40,45 @@ def test_audio_probe_disables_openai_once_when_sdk_is_unavailable(
         if "OpenAI Whisper provider 已自动禁用" in record.getMessage()
     ]
     assert len(warnings) == 1
+
+
+def test_openai_audio_probe_uses_compatible_http_endpoint(monkeypatch, tmp_path):
+    original_get_config_value = transcription_module.get_config_value
+
+    def fake_get_config_value(key, default=None):
+        values = {
+            "audio_probe.providers": ["openai"],
+            "audio_probe.openai.api_key": "audio-key",
+            "audio_probe.openai.base_url": "https://audio.example.test/v1",
+            "audio_probe.openai.model": "whisper-test",
+        }
+        return values.get(key, original_get_config_value(key, default))
+
+    monkeypatch.setattr(transcription_module, "get_config_value", fake_get_config_value)
+    service = build_transcription_service(monkeypatch)
+    audio_file = tmp_path / "probe.wav"
+    audio_file.write_bytes(b"probe")
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"text": "Hello", "duration": 1.5, "words": []}
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeResponse()
+
+    monkeypatch.setattr(transcription_module.requests, "post", fake_post)
+
+    result = service._transcribe_with_openai(str(audio_file))
+
+    assert result["text"] == "Hello"
+    assert calls[0][0] == "https://audio.example.test/v1/audio/transcriptions"
+    assert calls[0][1]["data"]["model"] == "whisper-test"
+    assert calls[0][1]["headers"]["Authorization"] == "Bearer audio-key"
 
 
 def test_audio_probe_prefers_configured_funasr_when_result_is_usable(

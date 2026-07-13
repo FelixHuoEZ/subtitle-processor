@@ -42,6 +42,7 @@ AUTO_RETRY_SAFE_STAGE_CODES = {
     'transcribe_audio',
     'generate_subtitles',
     'normalize_subtitles',
+    'translate_subtitles',
 }
 AUTO_RETRY_EXTERNAL_EFFECT_FIELDS = (
     'readwise_article_id',
@@ -70,6 +71,7 @@ processing_service = service_proxy(
         transcription_service=transcription_service,
         subtitle_service=subtitle_service,
         readwise_service=readwise_service,
+        translation_service=translation_service,
     )
 )
 
@@ -550,8 +552,12 @@ def translate_subtitle(file_id):
             return jsonify({'error': 'File not found'}), 404
         
         # 获取翻译参数
-        target_lang = request.json.get('target_lang', 'en')
-        source_lang = request.json.get('source_lang', 'auto')
+        payload = request.get_json(silent=True) or {}
+        target_lang = payload.get(
+            'target_lang',
+            translation_service.default_target_language,
+        )
+        source_lang = payload.get('source_lang', 'auto')
         
         # 获取字幕内容
         subtitle_content = None
@@ -564,12 +570,23 @@ def translate_subtitle(file_id):
             return jsonify({'error': 'No subtitle content found'}), 404
         
         # 开始翻译
-        translated_content = translation_service.translate_subtitle_content(
+        translation_result = translation_service.translate_subtitle_content_detailed(
             subtitle_content, target_lang, source_lang
         )
-        
-        if not translated_content:
-            return jsonify({'error': 'Translation failed'}), 500
+
+        if translation_result.get('status') != 'completed':
+            return jsonify({
+                'error': 'Translation did not complete',
+                'translation_status': translation_result.get('status'),
+                'providers': translation_result.get('providers') or [],
+                'total_segments': translation_result.get('total_segments', 0),
+                'translated_segments': translation_result.get(
+                    'translated_segments', 0
+                ),
+                'failed_segments': translation_result.get('failed_segments', 0),
+                'reason': translation_result.get('error'),
+            }), 502
+        translated_content = translation_result['content']
         
         # 保存翻译后的字幕
         original_name = file_info.get('original_filename', 'subtitle')
@@ -582,7 +599,11 @@ def translate_subtitle(file_id):
         return jsonify({
             'status': 'success',
             'translated_path': translated_path,
-            'translated_content': translated_content
+            'translated_content': translated_content,
+            'source_language': translation_result.get('source_language'),
+            'target_language': translation_result.get('target_language'),
+            'providers': translation_result.get('providers') or [],
+            'total_segments': translation_result.get('total_segments', 0),
         })
         
     except Exception as e:

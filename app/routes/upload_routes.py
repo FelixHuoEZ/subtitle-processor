@@ -39,6 +39,7 @@ processing_service = service_proxy(
         transcription_service=transcription_service,
         subtitle_service=subtitle_service,
         readwise_service=readwise_service,
+        translation_service=translation_service,
     )
 )
 

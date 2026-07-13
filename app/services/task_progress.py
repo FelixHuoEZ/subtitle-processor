@@ -50,6 +50,9 @@ STAGE_DEFINITIONS = {
     "normalize_subtitles": StageDefinition(
         "整理字幕", True, 3, 12, typical_realtime_factor=0.001, upper_realtime_factor=0.004
     ),
+    "translate_subtitles": StageDefinition(
+        "翻译字幕", True, 20, 90, typical_realtime_factor=0.03, upper_realtime_factor=0.12
+    ),
     "send_readwise": StageDefinition("发送到 Readwise", False, 8, 25),
     "verify_readwise": StageDefinition("确认 Reader 解析", False, 15, 35),
     "delete_url_only": StageDefinition("删除原 URL-only 文档", False, 5, 15),

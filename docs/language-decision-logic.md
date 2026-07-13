@@ -2,6 +2,8 @@
 
 本文档描述当前仓库里“视频主语言 / 内容语境 / 字幕与 Readwise 分支”这一整套判定链路，作为当前代码行为的说明文档。
 
+字幕文本翻译和音频语言探测是两个独立需求。它们的 provider 边界、OpenAI 的不同用途以及当前自动翻译限制，见 [`provider-capabilities.md`](provider-capabilities.md)。
+
 当前实现主要分布在：
 
 - `app/utils/language_detection.py`
@@ -149,7 +151,10 @@ flowchart TD
 默认 provider 顺序：
 
 - `configured_funasr`
-- `openai`
+
+`openai` 是可选 provider，只有显式加入 `AUDIO_PROBE_PROVIDERS` 并配置独立的 `audio_probe.openai` 后才启用。
+
+这是当前已实现的 adapter 顺序，不代表产品需求绑定到 OpenAI。`openai` 在这里指 Whisper 兼容音频转写，用于生成语言判定样本，不是字幕文本翻译。
 
 对应环境变量：
 
@@ -331,7 +336,17 @@ flowchart TD
 - `configured_funasr` 的单语偏置模型结果不会盲信。
 - `mixed` 不是错误态，而是一个明确的中间结论，后续会影响字幕下载和 Readwise 分支。
 
-## 10. 代码入口索引
+## 10. Provider 能力边界
+
+- 音频语言探测属于自动主流程，当前可使用 FunASR 或 OpenAI Whisper 兼容接口。
+- 字幕文本翻译可使用 DeepL API、DeepLX 和具名 OpenAI-compatible 文本接口，顺序由 `translation.services` 配置。
+- `AUTO_TRANSLATE_NON_TARGET_LANGUAGE` 可把可靠识别为非目标语言的字幕加入自动翻译阶段；目标语言由 `AUTO_TRANSLATE_TARGET_LANGUAGE` 独立配置，默认关闭。
+- 自动翻译会保留原字幕；混合语言、未知语言和低置信度来源默认跳过，部分翻译失败则不发送 Readwise。
+- 两项需求都允许接入其他 provider，但新增 adapter 仍需代码实现。
+
+详细契约见 [`provider-capabilities.md`](provider-capabilities.md)。
+
+## 11. 代码入口索引
 
 - 文本清洗与基础判定：`app/utils/language_detection.py`
 - 视频主语言：`app/services/video_service.py::get_video_language_details`
@@ -339,3 +354,4 @@ flowchart TD
 - 字幕策略：`app/services/video_service.py::get_subtitle_strategy`
 - Readwise 分支：`app/services/video_service.py::_build_readwise_decision`
 - 音频探测：`app/services/transcription_service.py::detect_audio_language`
+- 字幕翻译：`app/services/translation_service.py::translate_subtitle_content`
