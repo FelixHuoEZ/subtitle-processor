@@ -160,6 +160,10 @@ def test_api_audience_is_limited_to_extension_endpoints(monkeypatch):
     headers = {"Cf-Access-Jwt-Assertion": "signed-access-token"}
 
     assert client.post("/process", headers=headers).status_code == 200
+    assert client.post(
+        "/process",
+        headers={**headers, "Origin": "chrome-extension://dynamic-id"},
+    ).status_code == 200
     assert client.get("/process/status/task-1", headers=headers).status_code == 200
     assert client.get("/health/metrics", headers=headers).status_code == 403
 

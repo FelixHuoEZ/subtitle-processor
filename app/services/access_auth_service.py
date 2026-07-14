@@ -94,20 +94,21 @@ class AccessAuthService:
             )
         )
 
-    def _audience_can_access_request(self, claims) -> bool:
+    def _classify_request_audience(self, claims) -> Optional[str]:
         raw_audience = claims.get("aud", ())
         token_audiences = {
             raw_audience
         } if isinstance(raw_audience, str) else set(raw_audience or ())
         if token_audiences.intersection(self.config.web_audiences):
-            return True
+            return "web"
         if not token_audiences.intersection(self.config.api_audiences):
-            return False
-        return (
+            return None
+        api_request_allowed = (
             request.method == "POST" and request.path == "/process"
         ) or (
             request.method == "GET" and _API_STATUS_PATH.fullmatch(request.path)
         )
+        return "api" if api_request_allowed else None
 
     def authenticate_request(self):
         if request.path in _UNAUTHENTICATED_PATHS:
@@ -142,11 +143,13 @@ class AccessAuthService:
                     audience=list(self.audiences),
                     issuer=self.config.team_domain,
                 )
-                if not self._audience_can_access_request(claims):
+                audience_type = self._classify_request_audience(claims)
+                if audience_type is None:
                     return jsonify({"error": "Access token is not permitted here"}), 403
                 origin = request.headers.get("Origin")
                 if (
-                    request.method not in _SAFE_METHODS
+                    audience_type == "web"
+                    and request.method not in _SAFE_METHODS
                     and origin
                     and not self.is_origin_allowed(origin)
                 ):

@@ -16,7 +16,7 @@
 
 1. 创建 Web 类型的 Self-hosted application，域名为 `readwise.gauss.surf`，只允许指定身份登录。
 2. 创建 API 类型的 Self-hosted application，域名为 `readwise-api.gauss.surf`，策略动作为 `Service Auth`，只包含专用 Service Token。
-3. API 应用如出现预检请求，启用 `Bypass OPTIONS requests to origin`。源站仍会按 `ACCESS_ALLOWED_ORIGINS` 校验 Origin。
+3. API 应用为扩展预检请求返回 `GET, POST, OPTIONS` 和 Access Service Token 请求头。实际请求仍必须通过 Service Auth，应用端 API AUD 也只允许提交和查询状态。
 4. 让 Cloudflare Tunnel 的两个公开主机名都指向同一个字幕服务源站。
 5. 分别记录两个应用的 Application Audience (AUD) Tag。不要把 Service Token Secret 或内部 Token 写入仓库。
 
@@ -27,7 +27,7 @@ ACCESS_AUTH_ENABLED=true
 ACCESS_TEAM_DOMAIN=https://your-team.cloudflareaccess.com
 ACCESS_WEB_APPLICATION_AUD=web-application-aud
 ACCESS_API_APPLICATION_AUD=api-application-aud
-ACCESS_ALLOWED_ORIGINS=https://readwise.gauss.surf,chrome-extension://extension-id
+ACCESS_ALLOWED_ORIGINS=https://readwise.gauss.surf
 INTERNAL_SERVICE_TOKEN=long-random-value
 ```
 
@@ -42,7 +42,7 @@ INTERNAL_SERVICE_TOKEN=long-random-value
 
 Access Client ID 和 Secret 保存在 `chrome.storage.local`，不会通过 Chrome Sync 同步。旧版扩展保存的 `readwiseToken` 会在升级后删除；Readwise Token 只由后端持有。
 
-Service Token 应单独签发、设置到期时间，并在设备丢失或扩展凭据疑似泄漏时立即吊销。扩展升级后需要在 `chrome://extensions` 重新加载一次未打包扩展。
+Service Token 应单独签发、设置到期时间，并在设备丢失或扩展凭据疑似泄漏时立即吊销。API AUD 不依赖动态的扩展 ID，但只能访问提交和状态查询接口。扩展升级后需要在 `chrome://extensions` 重新加载一次未打包扩展。
 
 ## 发布顺序
 
@@ -51,4 +51,3 @@ Service Token 应单独签发、设置到期时间，并在设备丢失或扩展
 3. 配置 NAS Compose、Telegram 内部 Token 和扩展本地凭据。
 4. 设置 `ACCESS_AUTH_ENABLED=true`，仅重建主服务和 Telegram bot。
 5. 验证匿名 Web/API 均被拒绝、身份登录可访问网页、Service Token 可提交和查询任务、Service Token 无法读取指标。
-
