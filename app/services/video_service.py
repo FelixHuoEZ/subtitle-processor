@@ -66,8 +66,10 @@ class _DownloadGate:
 
     def acquire(
         self, progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None
-    ) -> None:
+    ) -> Dict[str, Any]:
         ticket = object()
+        wait_started_at = time.monotonic()
+        max_queue_position = 0
         with self._condition:
             self._waiters.append(ticket)
 
@@ -86,18 +88,22 @@ class _DownloadGate:
                         "queue_position": 0,
                         "active_downloads": self._active,
                         "download_limit": self.limit,
+                        "wait_seconds": max(0.0, time.monotonic() - wait_started_at),
+                        "max_queue_position": max_queue_position,
                     }
                 else:
+                    queue_position = self._waiters.index(ticket) + 1
+                    max_queue_position = max(max_queue_position, queue_position)
                     state = {
                         "event": "waiting",
-                        "queue_position": self._waiters.index(ticket) + 1,
+                        "queue_position": queue_position,
                         "active_downloads": self._active,
                         "download_limit": self.limit,
                     }
 
             self._emit(progress_callback, state)
             if can_acquire:
-                return
+                return state
 
             with self._condition:
                 self._condition.wait(timeout=self.heartbeat_seconds)
@@ -129,8 +135,9 @@ class VideoService:
     _SUBTITLE_SECONDARY_ZH_CHARS_MIN = 40
     _SUBTITLE_SECONDARY_ZH_BOOST = 3.0
 
-    def __init__(self):
+    def __init__(self, metrics_service=None):
         """初始化视频服务"""
+        self.metrics_service = metrics_service
         self.supported_platforms = ["youtube", "bilibili", "acfun"]
         self.subtitle_service = SubtitleService()
         self.bgutil_provider_url = self._normalize_bgutil_url(
@@ -984,6 +991,62 @@ class VideoService:
             return True
         lowered = message.lower()
         return "403" in lowered and "forbidden" in lowered
+
+    @staticmethod
+    def _download_error_text(
+        error: Exception, messages: Optional[List[str]] = None
+    ) -> str:
+        return " ".join([str(error), *(messages or [])]).lower()
+
+    def _collect_download_signals(
+        self,
+        signals: Dict[str, int],
+        error: Exception,
+        messages: Optional[List[str]] = None,
+    ) -> None:
+        combined = self._download_error_text(error, messages)
+        signals["attempt_failures"] += 1
+        if self._is_http_403_error(error) or (
+            "403" in combined and "forbidden" in combined
+        ):
+            signals["http_403"] += 1
+        if "http error 429" in combined or (
+            "429" in combined and "too many requests" in combined
+        ):
+            signals["http_429"] += 1
+        if self._is_youtube_bot_challenge_error(error, messages):
+            signals["bot_challenge"] += 1
+        if any(
+            marker in combined
+            for marker in (
+                "socket timeout",
+                "socket timed out",
+                "read timed out",
+                "connection timed out",
+                "operation timed out",
+                "the read operation timed out",
+            )
+        ):
+            signals["socket_timeout"] += 1
+
+    def _record_download_metric(
+        self,
+        outcome: str,
+        duration_seconds: float,
+        queue_state: Optional[Dict[str, Any]],
+        signals: Optional[Dict[str, int]],
+    ) -> None:
+        if not self.metrics_service:
+            return
+        try:
+            self.metrics_service.record_download(
+                outcome=outcome,
+                duration_seconds=duration_seconds,
+                queue_state=queue_state,
+                signals=signals,
+            )
+        except Exception as exc:
+            logger.warning("记录下载运行指标失败，继续执行任务: %s", exc)
 
     @staticmethod
     def _is_youtube_bot_challenge_error(
@@ -2053,6 +2116,7 @@ class VideoService:
         Returns:
             dict: 成功时返回音频文件路径和临时目录，失败返回None
         """
+        request_started_at = time.monotonic()
         resolved_platform = platform or "youtube"
         cached_asset = self._get_cached_download_asset(url, resolved_platform)
         if cached_asset:
@@ -2065,12 +2129,27 @@ class VideoService:
                     "download_limit": self.download_concurrency,
                 },
             )
+            self._record_download_metric(
+                outcome="cache_hit",
+                duration_seconds=max(0.0, time.monotonic() - request_started_at),
+                queue_state={"download_limit": self.download_concurrency},
+                signals={},
+            )
             return cached_asset
 
         logger.info("等待下载并发许可 (limit=%s): %s", self.download_concurrency, url)
-        self._download_gate.acquire(progress_callback)
+        queue_state = self._download_gate.acquire(progress_callback)
         temp_dir = None
         should_cleanup_temp_dir = True
+        metric_outcome = "failure"
+        metric_signals = {
+            "attempt_failures": 0,
+            "http_403": 0,
+            "http_429": 0,
+            "bot_challenge": 0,
+            "total_timeout": 0,
+            "socket_timeout": 0,
+        }
         download_started_at = time.monotonic()
         download_deadline = download_started_at + self.download_total_timeout
         try:
@@ -2209,6 +2288,9 @@ class VideoService:
                             relevant_messages = self._collect_relevant_ytdlp_messages(
                                 attempt_messages
                             )
+                            self._collect_download_signals(
+                                metric_signals, e, relevant_messages
+                            )
                             for message in relevant_messages:
                                 download_errors.append(
                                     f"{profile_desc} / {format_attempt['desc']}: {message}"
@@ -2275,6 +2357,7 @@ class VideoService:
 
             if not downloaded_file:
                 if download_timed_out:
+                    metric_signals["total_timeout"] = 1
                     download_errors.append(
                         "下载阶段超过总时限（%.0f 秒），已停止后续参数和格式尝试"
                         % self.download_total_timeout
@@ -2325,6 +2408,7 @@ class VideoService:
                 audio_file = cached_audio_file
 
             should_cleanup_temp_dir = False
+            metric_outcome = "success"
             return {
                 "audio_file": audio_file,
                 "temp_dir": temp_dir,
@@ -2338,6 +2422,12 @@ class VideoService:
         finally:
             if should_cleanup_temp_dir:
                 self._cleanup_task_temp_dir(temp_dir)
+            self._record_download_metric(
+                outcome=metric_outcome,
+                duration_seconds=max(0.0, time.monotonic() - download_started_at),
+                queue_state=queue_state,
+                signals=metric_signals,
+            )
             self._download_gate.release()
 
     def _find_downloaded_file(

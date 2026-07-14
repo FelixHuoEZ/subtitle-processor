@@ -25,6 +25,8 @@ def test_create_app_binds_route_modules_to_app_services(tmp_path, monkeypatch):
     app = create_app(str(config_path))
 
     assert app.services.file_service is app.file_service
+    assert app.services.runtime_metrics_service is app.runtime_metrics_service
+    assert app.video_service.metrics_service is app.runtime_metrics_service
     assert upload_routes.file_service is app.file_service
     assert process_routes.file_service is app.file_service
     assert view_routes.file_service is app.file_service

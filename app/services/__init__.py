@@ -7,6 +7,7 @@ from .video_service import VideoService
 from .transcription_service import TranscriptionService
 from .translation_service import TranslationService
 from .readwise_service import ReadwiseService
+from .runtime_metrics_service import RuntimeMetricsService
 
 __all__ = [
     'LoggingService',
@@ -15,5 +16,6 @@ __all__ = [
     'VideoService',
     'TranscriptionService',
     'TranslationService',
-    'ReadwiseService'
+    'ReadwiseService',
+    'RuntimeMetricsService',
 ]

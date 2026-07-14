@@ -106,6 +106,15 @@ def _run_retried_video_task_with_app_context(app, task_info):
         )
 
 
+def _record_auto_retry_metric(metrics_service, outcome, status_code):
+    if not metrics_service:
+        return
+    try:
+        metrics_service.record_auto_restart_retry(outcome, status_code)
+    except Exception as exc:
+        logger.warning('记录自动续跑运行指标失败: %s', exc)
+
+
 def _wants_json_response():
     return request.is_json or request.accept_mimetypes.best == 'application/json'
 
@@ -160,6 +169,7 @@ def _auto_retry_eligibility(task_info):
 
 def _run_startup_auto_retries(app, task_ids, delay_seconds):
     time.sleep(delay_seconds)
+    metrics_service = getattr(app, 'runtime_metrics_service', None)
     for task_id in task_ids:
         try:
             with app.test_request_context(headers={'Accept': 'application/json'}):
@@ -178,8 +188,17 @@ def _run_startup_auto_retries(app, task_ids, delay_seconds):
                 task_id,
                 status_code,
             )
+            if metrics_service:
+                if status_code == 202:
+                    outcome = 'scheduled'
+                elif status_code == 409:
+                    outcome = 'skipped'
+                else:
+                    outcome = 'failed'
+                _record_auto_retry_metric(metrics_service, outcome, status_code)
         except Exception as exc:
             logger.error('服务重启自动续跑失败: task=%s error=%s', task_id, exc)
+            _record_auto_retry_metric(metrics_service, 'failed', 500)
 
 
 def schedule_auto_retry_interrupted_tasks(app, task_ids):

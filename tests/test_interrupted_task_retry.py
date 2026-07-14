@@ -291,6 +291,33 @@ def test_startup_auto_retry_scheduler_is_opt_in(monkeypatch):
     assert thread.args[1] == ['old-task']
 
 
+def test_startup_auto_retry_records_aggregate_outcome(monkeypatch):
+    app = Flask(__name__)
+    recorded = []
+    app.runtime_metrics_service = SimpleNamespace(
+        record_auto_restart_retry=lambda outcome, status_code: recorded.append(
+            (outcome, status_code)
+        )
+    )
+    responses = iter(
+        [SimpleNamespace(status_code=202), SimpleNamespace(status_code=409)]
+    )
+    monkeypatch.setattr(process_routes.time, 'sleep', lambda _seconds: None)
+    monkeypatch.setattr(
+        process_routes,
+        'retry_interrupted_task',
+        lambda *_args, **_kwargs: next(responses),
+    )
+
+    process_routes._run_startup_auto_retries(
+        app,
+        ['scheduled-task', 'skipped-task'],
+        delay_seconds=0,
+    )
+
+    assert recorded == [('scheduled', 202), ('skipped', 409)]
+
+
 def test_interrupted_task_detail_shows_retry_button(monkeypatch):
     tasks = {
         'old-task': {

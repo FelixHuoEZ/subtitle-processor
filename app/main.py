@@ -71,6 +71,7 @@ def create_app(config_path=None):
     # 注册主要路由
     register_main_routes(app)
 
+    app.runtime_metrics_service.record_service_start()
     process_routes.schedule_auto_retry_interrupted_tasks(
         app,
         getattr(app.processing_service, 'orphaned_task_ids', []),
@@ -256,6 +257,18 @@ def register_main_routes(app):
                 'error': str(e),
                 'timestamp': str(datetime.now())
             }), 503
+
+    @app.route('/health/metrics')
+    def runtime_metrics():
+        """Return content-free operational metrics for a bounded time window."""
+        raw_hours = request.args.get('hours', '24')
+        try:
+            hours = float(raw_hours)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'hours must be a number between 1 and 168'}), 400
+        if not 1 <= hours <= 168:
+            return jsonify({'error': 'hours must be between 1 and 168'}), 400
+        return jsonify(app.runtime_metrics_service.get_summary(hours=hours))
 
     @app.route('/api/info')
     def api_info():

@@ -317,7 +317,15 @@ Special thanks to:
 - `AUDIO_PROBE_PROVIDERS`：配置独立的音频语言探测链，默认仅使用 `configured_funasr`；只有配置独立的 `audio_probe.openai` 后才应加入 `openai`。
 - `TRANSCRIBE_CONCURRENCY`：限制转录并发（0/1 串行，留空为不限）。
 - `YTDLP_COOKIE_FILE`：使用 Netscape 格式 cookies 文件替代 Firefox profile。
+- `RUNTIME_METRICS_ENABLED=true`：把不含 URL、任务正文和字幕内容的下载、队列、启动及自动续跑事件写入 Redis Stream；
+  `RUNTIME_METRICS_MAX_EVENTS` 控制保留事件上限。
 默认值可参考 `.env.example`。
+
+### 运行指标
+
+`GET /health/metrics?hours=24` 返回最近 1-168 小时的只读聚合结果，包括下载最终成功/失败/缓存命中、真实 403/429、
+bot 校验、下载与排队 P50/P75、最大并发、服务启动次数、自动续跑结果，以及当前 `uploads/temp`、`uploads/cache`、
+`outputs` 和文件系统空间。指标存储在 Redis AOF 中，因此重建主服务后仍可用于每日趋势比较；接口不会扫描或返回任务正文。
 
 ### 🤖 Telegram 单入口部署
 - 仅在一台机器（例如承载 Caddy 的 NAS）运行 `telegram-bot` 并启用 webhook，在该节点的配置文件或环境变量中填写 `telegram.webhook.public_url`，并使用带有 `telegram` profile 的启动方式：

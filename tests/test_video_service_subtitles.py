@@ -636,7 +636,13 @@ def test_download_video_switches_profile_immediately_on_bot_challenge(
 def test_download_video_shares_403_retry_budget_across_profile_formats(
     monkeypatch, tmp_path
 ):
-    service = VideoService()
+    recorded_metrics = []
+
+    class MetricsRecorder:
+        def record_download(self, **fields):
+            recorded_metrics.append(fields)
+
+    service = VideoService(metrics_service=MetricsRecorder())
     service.download_retry_max = 2
     attempts = []
 
@@ -686,6 +692,10 @@ def test_download_video_shares_403_retry_budget_across_profile_formats(
     assert len(attempts) == 5
     assert attempts[:3] == ["140", "140", "140"]
     assert attempts[3:] == ["251", "18"]
+    assert len(recorded_metrics) == 1
+    assert recorded_metrics[0]["outcome"] == "failure"
+    assert recorded_metrics[0]["signals"]["attempt_failures"] == 5
+    assert recorded_metrics[0]["signals"]["http_403"] == 5
 
 
 def test_download_video_stops_new_attempts_after_total_timeout(monkeypatch, tmp_path):

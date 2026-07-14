@@ -37,6 +37,8 @@ services:
       - STORAGE_BACKEND=redis
       - REDIS_URL=redis://redis:6379/0
       - REDIS_KEY_PREFIX=subtitle_processor
+      - RUNTIME_METRICS_ENABLED=${RUNTIME_METRICS_ENABLED:-true}
+      - RUNTIME_METRICS_MAX_EVENTS=${RUNTIME_METRICS_MAX_EVENTS:-50000}
       # 热词策略可选开关
       - HOTWORD_MODE=curated # user_only/curated/experiment
       # - HOTWORD_MAX_COUNT=20           # 自动热词最大数量

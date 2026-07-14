@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from .file_service import FileService
 from .processing_service import ProcessingService
 from .readwise_service import ReadwiseService
+from .runtime_metrics_service import RuntimeMetricsService
 from .subtitle_service import SubtitleService
 from .transcription_service import TranscriptionService
 from .translation_service import TranslationService
@@ -37,6 +38,7 @@ class AppServices:
     """Container for long-lived application service instances."""
 
     file_service: FileService
+    runtime_metrics_service: RuntimeMetricsService
     video_service: VideoService
     transcription_service: TranscriptionService
     subtitle_service: SubtitleService
@@ -48,7 +50,13 @@ class AppServices:
 def create_services() -> AppServices:
     """Create the application service set."""
     file_service = FileService()
-    video_service = VideoService()
+    runtime_metrics_service = RuntimeMetricsService(
+        redis_client=file_service.redis_client,
+        key_prefix=file_service.redis_key_prefix,
+        upload_folder=file_service.upload_folder,
+        output_folder=file_service.output_folder,
+    )
+    video_service = VideoService(metrics_service=runtime_metrics_service)
     transcription_service = TranscriptionService()
     subtitle_service = SubtitleService()
     translation_service = TranslationService()
@@ -64,6 +72,7 @@ def create_services() -> AppServices:
 
     return AppServices(
         file_service=file_service,
+        runtime_metrics_service=runtime_metrics_service,
         video_service=video_service,
         transcription_service=transcription_service,
         subtitle_service=subtitle_service,
@@ -77,6 +86,7 @@ def attach_services(app, services: AppServices) -> None:
     """Attach services to the Flask app for backwards-compatible access."""
     app.services = services
     app.file_service = services.file_service
+    app.runtime_metrics_service = services.runtime_metrics_service
     app.video_service = services.video_service
     app.transcription_service = services.transcription_service
     app.subtitle_service = services.subtitle_service
