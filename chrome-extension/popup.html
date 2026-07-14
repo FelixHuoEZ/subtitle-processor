@@ -15,7 +15,7 @@
       display: block;
       margin-bottom: 5px;
     }
-    input[type="text"] {
+    input[type="text"], input[type="password"] {
       width: 100%;
       padding: 5px;
       box-sizing: border-box;
@@ -64,12 +64,20 @@
 </head>
 <body>
   <div class="form-group">
-    <label for="serverUrl">服务器地址:</label>
-    <input type="text" id="serverUrl" placeholder="http://your-nas-ip:5000">
+    <label for="apiServerUrl">API 地址:</label>
+    <input type="text" id="apiServerUrl" placeholder="https://readwise-api.gauss.surf">
   </div>
   <div class="form-group">
-    <label for="readwiseToken">Readwise Token（可选）:</label>
-    <input type="text" id="readwiseToken" placeholder="默认使用后端配置">
+    <label for="webServerUrl">网页地址:</label>
+    <input type="text" id="webServerUrl" placeholder="https://readwise.gauss.surf">
+  </div>
+  <div class="form-group">
+    <label for="accessClientId">Access Client ID:</label>
+    <input type="text" id="accessClientId" autocomplete="off">
+  </div>
+  <div class="form-group">
+    <label for="accessClientSecret">Access Client Secret:</label>
+    <input type="password" id="accessClientSecret" autocomplete="off">
   </div>
   <div class="form-group">
     <label for="saveLocation">保存位置:</label>

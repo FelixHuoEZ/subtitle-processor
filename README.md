@@ -109,6 +109,7 @@ A comprehensive subtitle processing service that automatically downloads, transc
 - `TRANSCRIBE_CONCURRENCY` to cap concurrent transcriptions (0/1 means serial, empty means unlimited).
 - `YTDLP_COOKIE_FILE` to provide a Netscape-format cookie file instead of a Firefox profile.
 - `LOG_LEVEL` controls application log verbosity (default `INFO`), and `DEBUG_CONTENT_LOGGING=true` enables full transcript/subtitle payload logging for local debugging.
+- `ACCESS_AUTH_ENABLED=true` enables Cloudflare Access JWT verification plus the internal service token boundary. Configure it only after following [`docs/external-access-security.md`](docs/external-access-security.md).
 All defaults are listed in `.env.example`.
 
 ### 🧩 Distribute Docker Images to Multiple Hosts
@@ -319,6 +320,7 @@ Special thanks to:
 - `YTDLP_COOKIE_FILE`：使用 Netscape 格式 cookies 文件替代 Firefox profile。
 - `RUNTIME_METRICS_ENABLED=true`：把不含 URL、任务正文和字幕内容的下载、队列、启动及自动续跑事件写入 Redis Stream；
   `RUNTIME_METRICS_MAX_EVENTS` 控制保留事件上限。
+- `ACCESS_AUTH_ENABLED=true`：启用 Cloudflare Access JWT 校验和内部服务 Token。请先按 [`docs/external-access-security.md`](docs/external-access-security.md) 完成 Web/API 双入口配置。
 默认值可参考 `.env.example`。
 
 ### 运行指标

@@ -5,6 +5,7 @@ import logging
 from flask import Flask, render_template, jsonify, request, redirect
 from .config.config_manager import ConfigManager, get_config_value, set_config_manager
 from .services.logging_service import LoggingService
+from .services.access_auth_service import configure_access_auth
 from .services.runtime import attach_services, create_services
 from .utils.file_utils import get_file_created_time
 from .routes import upload_bp, view_bp, process_bp, settings_bp
@@ -55,6 +56,9 @@ def create_app(config_path=None):
     
     # 配置Flask应用
     _configure_app(app, config_manager)
+
+    # Configure the source authentication boundary before serving any routes.
+    configure_access_auth(app)
     
     # 初始化服务
     _initialize_services(app)
@@ -302,12 +306,7 @@ def register_main_routes(app):
     def process_main():
         """处理主路由 - 重定向到 /process/"""
         if request.method == 'OPTIONS':
-            # 处理 CORS 预检请求
-            response = jsonify({'status': 'ok'})
-            response.headers.add('Access-Control-Allow-Origin', '*')
-            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-            response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-            return response
+            return '', 204
         elif request.method == 'POST':
             # POST请求：检查是否包含视频URL，如果是则处理，否则返回端点信息
             if request.is_json:

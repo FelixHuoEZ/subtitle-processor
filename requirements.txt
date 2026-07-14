@@ -5,6 +5,7 @@ yt-dlp-ejs @ https://github.com/yt-dlp/ejs/releases/download/0.8.0/yt_dlp_ejs-0.
 bgutil-ytdlp-pot-provider==1.2.2
 chardet
 flask-cors
+PyJWT[crypto]>=2.8,<3
 pydub==0.25.1
 python-telegram-bot==20.7
 pytz

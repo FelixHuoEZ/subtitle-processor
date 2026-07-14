@@ -194,6 +194,7 @@ TELEGRAM_TOKEN = config.get("tokens", {}).get("telegram")
 SUBTITLE_PROCESSOR_URL = os.getenv(
     "SUBTITLE_PROCESSOR_URL", "http://subtitle-processor:5000"
 )
+SUBTITLE_PROCESSOR_TOKEN = os.getenv("SUBTITLE_PROCESSOR_TOKEN", "").strip()
 SERVER_DOMAIN = config.get("servers", {}).get("domain")
 TELEGRAM_SETTINGS = (
     config.get("telegram", {}) if isinstance(config.get("telegram"), dict) else {}
@@ -281,6 +282,7 @@ HOTWORDS_TIMEOUT_SECONDS = _get_int(
 
 
 logger.info(f"使用的SUBTITLE_PROCESSOR_URL: {SUBTITLE_PROCESSOR_URL}")
+logger.info("字幕服务内部认证已配置: %s", bool(SUBTITLE_PROCESSOR_TOKEN))
 logger.info(f"使用的SERVER_DOMAIN: {SERVER_DOMAIN}")
 logger.info(
     "Webhook配置: enabled=%s, public_url=%s, listen=%s, port=%s, path=%s",
@@ -327,12 +329,36 @@ def is_admin_user(user_id: int) -> bool:
     return str(user_id) in TELEGRAM_ADMIN_IDS
 
 
+def processor_get(path_or_url: str, **kwargs) -> requests.Response:
+    """Send an authenticated GET request to subtitle-processor."""
+    url = (
+        path_or_url
+        if path_or_url.startswith(("http://", "https://"))
+        else f"{SUBTITLE_PROCESSOR_URL}{path_or_url}"
+    )
+    headers = dict(kwargs.pop("headers", {}) or {})
+    if SUBTITLE_PROCESSOR_TOKEN:
+        headers.setdefault("Authorization", f"Bearer {SUBTITLE_PROCESSOR_TOKEN}")
+    return requests.get(url, headers=headers, **kwargs)
+
+
+def processor_post(path_or_url: str, **kwargs) -> requests.Response:
+    """Send an authenticated POST request to subtitle-processor."""
+    url = (
+        path_or_url
+        if path_or_url.startswith(("http://", "https://"))
+        else f"{SUBTITLE_PROCESSOR_URL}{path_or_url}"
+    )
+    headers = dict(kwargs.pop("headers", {}) or {})
+    if SUBTITLE_PROCESSOR_TOKEN:
+        headers.setdefault("Authorization", f"Bearer {SUBTITLE_PROCESSOR_TOKEN}")
+    return requests.post(url, headers=headers, **kwargs)
+
+
 def fetch_hotword_settings_from_server() -> Dict[str, Any]:
     """Pull the latest hotword settings from subtitle-processor."""
     try:
-        response = requests.get(
-            f"{SUBTITLE_PROCESSOR_URL}/process/settings/hotword", timeout=10
-        )
+        response = processor_get("/process/settings/hotword", timeout=10)
         response.raise_for_status()
         payload = response.json()
         settings = payload.get("settings")
@@ -345,8 +371,8 @@ def fetch_hotword_settings_from_server() -> Dict[str, Any]:
 
 def update_hotword_settings_on_server(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Send a settings update to subtitle-processor and return the new state."""
-    response = requests.post(
-        f"{SUBTITLE_PROCESSOR_URL}/process/settings/hotword",
+    response = processor_post(
+        "/process/settings/hotword",
         json=payload,
         timeout=10,
     )
@@ -812,8 +838,8 @@ async def _refresh_active_tasks_from_processor(user_id: int, chat_id: int) -> No
         process_id = task["process_id"]
         try:
             response = await asyncio.to_thread(
-                requests.get,
-                f"{SUBTITLE_PROCESSOR_URL}/process/status/{process_id}",
+                processor_get,
+                f"/process/status/{process_id}",
                 timeout=15,
             )
         except Exception as exc:
@@ -2732,8 +2758,8 @@ async def handle_language_confirmation_callback(
 
     try:
         response = await asyncio.to_thread(
-            requests.post,
-            f"{SUBTITLE_PROCESSOR_URL}/process/status/{process_id}/language",
+            processor_post,
+            f"/process/status/{process_id}/language",
             json={"language": selected_language, "source": "telegram"},
             timeout=30,
         )
@@ -2827,7 +2853,7 @@ async def monitor_process_completion(
     for attempt in range(1, max_attempts + 1):
         try:
             response = await asyncio.to_thread(
-                requests.get,
+                processor_get,
                 poll_url,
                 params={"include_content": "1"},
                 timeout=30,
@@ -2923,7 +2949,7 @@ async def monitor_process_completion(
                 view_status_url = f"{poll_url}/subtitle"
                 try:
                     subtitle_response = await asyncio.to_thread(
-                        requests.get,
+                        processor_get,
                         view_status_url,
                         timeout=30,
                     )
@@ -3199,8 +3225,8 @@ async def process_url_with_location(
         # 发送请求到字幕处理服务
         try:
             response = await asyncio.to_thread(
-                requests.post,
-                f"{SUBTITLE_PROCESSOR_URL}/process",
+                processor_post,
+                "/process",
                 json=data,
                 timeout=(SUBTITLE_CONNECT_TIMEOUT, SUBTITLE_READ_TIMEOUT),
             )

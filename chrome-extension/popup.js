@@ -1,31 +1,52 @@
 document.addEventListener('DOMContentLoaded', function() {
-  const defaultServerUrl = 'http://localhost:5000';
+  const defaultApiServerUrl = 'https://readwise-api.gauss.surf';
+  const defaultWebServerUrl = 'https://readwise.gauss.surf';
 
-  // 加载保存的设置
-  chrome.storage.sync.get(['serverUrl', 'readwiseToken', 'saveLocation', 'tags', 'hotwords'], function(items) {
-    document.getElementById('serverUrl').value = items.serverUrl || defaultServerUrl;
-    document.getElementById('readwiseToken').value = items.readwiseToken || '';
+  Promise.all([
+    chrome.storage.sync.get([
+      'apiServerUrl', 'webServerUrl', 'serverUrl', 'saveLocation', 'tags', 'hotwords'
+    ]),
+    chrome.storage.local.get(['accessClientId', 'accessClientSecret'])
+  ]).then(function(results) {
+    const items = results[0];
+    const credentials = results[1];
+    const legacyUrl = items.serverUrl || '';
+    const apiUrl = legacyUrl === defaultWebServerUrl ? defaultApiServerUrl : legacyUrl;
+
+    document.getElementById('apiServerUrl').value = items.apiServerUrl || apiUrl || defaultApiServerUrl;
+    document.getElementById('webServerUrl').value = items.webServerUrl || legacyUrl || defaultWebServerUrl;
+    document.getElementById('accessClientId').value = credentials.accessClientId || '';
+    document.getElementById('accessClientSecret').value = credentials.accessClientSecret || '';
     document.getElementById('saveLocation').value = items.saveLocation || 'new';
     document.getElementById('tags').value = items.tags || '';
     document.getElementById('hotwords').value = items.hotwords || '';
+    chrome.storage.sync.remove(['readwiseToken']);
   });
 
   // 保存设置按钮点击事件
   document.getElementById('saveSettings').addEventListener('click', function() {
-    const serverUrl = document.getElementById('serverUrl').value.trim();
-    const readwiseToken = document.getElementById('readwiseToken').value.trim();
+    const apiServerUrl = document.getElementById('apiServerUrl').value.trim();
+    const webServerUrl = document.getElementById('webServerUrl').value.trim();
+    const accessClientId = document.getElementById('accessClientId').value.trim();
+    const accessClientSecret = document.getElementById('accessClientSecret').value.trim();
     const saveLocation = document.getElementById('saveLocation').value;
     const tags = document.getElementById('tags').value.trim();
     const hotwords = document.getElementById('hotwords').value.trim();
     
     // 保存设置到Chrome存储
-    chrome.storage.sync.set({
-      serverUrl: serverUrl,
-      readwiseToken: readwiseToken,
+    const syncSave = chrome.storage.sync.set({
+      apiServerUrl: apiServerUrl,
+      webServerUrl: webServerUrl,
       saveLocation: saveLocation,
       tags: tags,
       hotwords: hotwords
-    }, function() {
+    });
+    const localSave = chrome.storage.local.set({
+      accessClientId: accessClientId,
+      accessClientSecret: accessClientSecret
+    });
+    Promise.all([syncSave, localSave]).then(function() {
+      chrome.storage.sync.remove(['serverUrl', 'readwiseToken']);
       const status = document.getElementById('status');
       status.textContent = '设置已保存！';
       status.className = 'success';
@@ -40,14 +61,14 @@ document.addEventListener('DOMContentLoaded', function() {
     const status = document.getElementById('status');
     
     // 获取设置
-    chrome.storage.sync.get(['serverUrl', 'readwiseToken', 'saveLocation', 'tags', 'hotwords'], function(items) {
-      if (!items.serverUrl) {
-        chrome.storage.sync.set({ serverUrl: defaultServerUrl });
-        items.serverUrl = defaultServerUrl;
+    chrome.storage.sync.get(['apiServerUrl', 'saveLocation', 'tags', 'hotwords'], function(items) {
+      if (!items.apiServerUrl) {
+        chrome.storage.sync.set({ apiServerUrl: defaultApiServerUrl });
+        items.apiServerUrl = defaultApiServerUrl;
       }
 
-      if (!items.serverUrl) {
-        status.textContent = '请先设置服务器地址！';
+      if (!items.apiServerUrl) {
+        status.textContent = '请先设置 API 地址！';
         status.className = 'error';
         return;
       }

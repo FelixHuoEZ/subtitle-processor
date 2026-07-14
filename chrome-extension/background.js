@@ -1,5 +1,14 @@
-const DEFAULT_SERVER_URL = 'http://localhost:5000';
-const STORAGE_KEYS = ['serverUrl', 'readwiseToken', 'saveLocation', 'tags', 'hotwords'];
+const DEFAULT_API_SERVER_URL = 'https://readwise-api.gauss.surf';
+const DEFAULT_WEB_SERVER_URL = 'https://readwise.gauss.surf';
+const SYNC_STORAGE_KEYS = [
+  'apiServerUrl',
+  'webServerUrl',
+  'serverUrl',
+  'saveLocation',
+  'tags',
+  'hotwords'
+];
+const LOCAL_STORAGE_KEYS = ['accessClientId', 'accessClientSecret'];
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type === undefined) {
@@ -25,10 +34,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 async function submitYouTubeUrl(payload, sender) {
   const settings = await getSettings();
-  const serverUrl = normalizeServerUrl(settings.serverUrl || DEFAULT_SERVER_URL);
+  const apiServerUrl = resolveApiServerUrl(settings);
+  const webServerUrl = resolveWebServerUrl(settings);
 
-  if (!serverUrl) {
-    throw new Error('请先在 Subtitle Processor 扩展里设置服务器地址');
+  if (!apiServerUrl) {
+    throw new Error('请先在 Subtitle Processor 扩展里设置 API 地址');
   }
 
   const currentUrl = payload.url || (sender.tab && sender.tab.url) || '';
@@ -50,10 +60,11 @@ async function submitYouTubeUrl(payload, sender) {
     request_source: 'chrome_extension'
   };
 
-  const response = await fetch(`${serverUrl}/process`, {
+  const response = await fetch(`${apiServerUrl}/process`, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      ...buildAccessHeaders(settings)
     },
     body: JSON.stringify(requestBody)
   });
@@ -68,17 +79,17 @@ async function submitYouTubeUrl(payload, sender) {
     ...data,
     success: true,
     process_id: processId,
-    poll_url: processId ? toAbsoluteUrl(`/process/status/${processId}`, serverUrl) : undefined,
-    result_url: processId ? toAbsoluteUrl(`/view/${processId}`, serverUrl) : undefined
+    poll_url: processId ? toAbsoluteUrl(`/process/status/${processId}`, apiServerUrl) : undefined,
+    result_url: processId ? toAbsoluteUrl(`/view/${processId}`, webServerUrl) : undefined
   };
 }
 
 async function checkTaskStatus(payload) {
   const settings = await getSettings();
-  const serverUrl = normalizeServerUrl(settings.serverUrl || DEFAULT_SERVER_URL);
+  const apiServerUrl = resolveApiServerUrl(settings);
 
-  if (!serverUrl) {
-    throw new Error('请先在 Subtitle Processor 扩展里设置服务器地址');
+  if (!apiServerUrl) {
+    throw new Error('请先在 Subtitle Processor 扩展里设置 API 地址');
   }
 
   const pollUrl = payload.pollUrl || (payload.processId ? `/process/status/${payload.processId}` : '');
@@ -86,7 +97,9 @@ async function checkTaskStatus(payload) {
     throw new Error('缺少任务状态地址');
   }
 
-  const response = await fetch(toAbsoluteUrl(pollUrl, serverUrl));
+  const response = await fetch(toAbsoluteUrl(pollUrl, apiServerUrl), {
+    headers: buildAccessHeaders(settings)
+  });
   const data = await readJson(response);
 
   if (!response.ok || data.success === false) {
@@ -100,10 +113,41 @@ async function checkTaskStatus(payload) {
   };
 }
 
-function getSettings() {
-  return new Promise((resolve) => {
-    chrome.storage.sync.get(STORAGE_KEYS, resolve);
-  });
+async function getSettings() {
+  const [syncSettings, localSettings] = await Promise.all([
+    chrome.storage.sync.get(SYNC_STORAGE_KEYS),
+    chrome.storage.local.get(LOCAL_STORAGE_KEYS)
+  ]);
+  return { ...syncSettings, ...localSettings };
+}
+
+function resolveApiServerUrl(settings) {
+  const legacyUrl = normalizeServerUrl(settings.serverUrl || '');
+  if (legacyUrl === DEFAULT_WEB_SERVER_URL) {
+    return DEFAULT_API_SERVER_URL;
+  }
+  return normalizeServerUrl(
+    settings.apiServerUrl || legacyUrl || DEFAULT_API_SERVER_URL
+  );
+}
+
+function resolveWebServerUrl(settings) {
+  const legacyUrl = normalizeServerUrl(settings.serverUrl || '');
+  return normalizeServerUrl(
+    settings.webServerUrl || legacyUrl || DEFAULT_WEB_SERVER_URL
+  );
+}
+
+function buildAccessHeaders(settings) {
+  const clientId = String(settings.accessClientId || '').trim();
+  const clientSecret = String(settings.accessClientSecret || '').trim();
+  if (!clientId || !clientSecret) {
+    return {};
+  }
+  return {
+    'CF-Access-Client-Id': clientId,
+    'CF-Access-Client-Secret': clientSecret
+  };
 }
 
 function normalizeServerUrl(value) {

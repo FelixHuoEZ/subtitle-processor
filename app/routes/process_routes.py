@@ -255,12 +255,7 @@ def _normalize_language_confirmation_choice(language):
 def process_index():
     """处理服务主页"""
     if request.method == 'OPTIONS':
-        # 处理 CORS 预检请求
-        response = jsonify({'status': 'ok'})
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-        return response
+        return '', 204
     
     return jsonify({
         'service': 'Video and Audio Processing Service',

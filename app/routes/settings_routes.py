@@ -14,22 +14,15 @@ def _settings_manager():
     return HotwordSettingsManager.get_instance()
 
 
-def _apply_cors_headers(response):
-    response.headers.add("Access-Control-Allow-Origin", "*")
-    response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
-    response.headers.add("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
-    return response
-
-
 @settings_bp.route("/hotword", methods=["GET", "POST", "OPTIONS"])
 def manage_hotword_settings():
     """Fetch or update hotword-related runtime settings."""
     if request.method == "OPTIONS":
-        return _apply_cors_headers(jsonify({"status": "ok"}))
+        return "", 204
 
     if request.method == "GET":
         state = _settings_manager().get_state()
-        return _apply_cors_headers(jsonify({"success": True, "settings": state}))
+        return jsonify({"success": True, "settings": state})
 
     payload = request.get_json(silent=True) or {}
     updates = {}
@@ -52,10 +45,8 @@ def manage_hotword_settings():
         updates["max_count"] = payload["hotword_max_count"]
 
     if not updates:
-        return _apply_cors_headers(
-            jsonify({"success": False, "error": "No supported fields provided"})
-        ), 400
+        return jsonify({"success": False, "error": "No supported fields provided"}), 400
 
     new_state = _settings_manager().update_state(**updates)
     logger.info("Hotword settings updated: %s", new_state)
-    return _apply_cors_headers(jsonify({"success": True, "settings": new_state}))
+    return jsonify({"success": True, "settings": new_state})
