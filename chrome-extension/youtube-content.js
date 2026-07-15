@@ -1,12 +1,16 @@
 (function () {
   const ACTION_ID = 'subtitle-processor-youtube-action';
   const BUTTON_ID = 'subtitle-processor-youtube-button';
+  const REPROCESS_BUTTON_ID = 'subtitle-processor-youtube-reprocess';
   const STYLE_ID = 'subtitle-processor-youtube-style';
   const TOAST_ID = 'subtitle-processor-youtube-toast';
+  const READER_STATUS_RETRY_INTERVAL_MS = 5000;
+  const READER_STATUS_MAX_WARMING_RETRIES = 6;
 
   let refreshTimer = null;
   let lastUrl = '';
   let activeProcessId = null;
+  let readerStatusRequestSequence = 0;
 
   injectStyles();
   scheduleRefresh();
@@ -52,6 +56,7 @@
       target.appendChild(action);
     }
     resetButtonForPage(action, videoId);
+    ensureReaderStatus(action, videoId);
   }
 
   function findInsertionTarget() {
@@ -74,21 +79,34 @@
       document.body.appendChild(action);
     }
     resetButtonForPage(action, videoId);
+    ensureReaderStatus(action, videoId);
   }
 
   function createAction(videoId) {
     const wrapper = document.createElement('div');
     wrapper.id = ACTION_ID;
     wrapper.dataset.videoId = videoId;
+    wrapper.dataset.readerStatusRetryCount = '0';
 
     const button = document.createElement('button');
     button.id = BUTTON_ID;
     button.type = 'button';
-    button.textContent = '发送字幕处理';
-    button.title = '发送当前 YouTube 页面到字幕处理后台';
-    button.addEventListener('click', handleSubmitClick);
+    button.textContent = '检查中…';
+    button.title = '正在检查 Reader';
+    button.disabled = true;
+    button.dataset.mode = 'checking';
+    button.addEventListener('click', handlePrimaryClick);
+
+    const reprocessButton = document.createElement('button');
+    reprocessButton.id = REPROCESS_BUTTON_ID;
+    reprocessButton.type = 'button';
+    reprocessButton.textContent = '重新处理';
+    reprocessButton.title = '重新发送当前视频到字幕处理后台';
+    reprocessButton.hidden = true;
+    reprocessButton.addEventListener('click', handleSubmitClick);
 
     wrapper.appendChild(button);
+    wrapper.appendChild(reprocessButton);
     return wrapper;
   }
 
@@ -98,25 +116,217 @@
     }
 
     activeProcessId = null;
+    readerStatusRequestSequence += 1;
     action.dataset.videoId = videoId;
+    action.dataset.readerStatusVideoId = '';
+    action.dataset.readerStatusRetryCount = '0';
+    setCheckingState(action);
+  }
+
+  function handlePrimaryClick(event) {
+    const button = event.currentTarget;
+    const action = button.closest(`#${ACTION_ID}`);
+    const mode = button.dataset.mode;
+
+    if (mode === 'saved') {
+      const readerUrl = action && action.dataset.readerUrl;
+      if (readerUrl) {
+        window.open(readerUrl, '_blank', 'noopener,noreferrer');
+      }
+      return;
+    }
+
+    if (mode === 'unknown') {
+      const videoId = extractVideoId(location.href);
+      if (action && videoId) {
+        action.dataset.readerStatusRetryCount = '0';
+        ensureReaderStatus(action, videoId, true);
+      }
+      return;
+    }
+
+    handleSubmitClick(event);
+  }
+
+  async function ensureReaderStatus(action, videoId, forceRefresh, warmingRetry) {
+    if (!action || action.dataset.videoId !== videoId) {
+      return;
+    }
+    if (
+      !forceRefresh &&
+      !warmingRetry &&
+      action.dataset.readerStatusVideoId === videoId
+    ) {
+      return;
+    }
+
+    if (forceRefresh) {
+      action.dataset.readerStatusRetryCount = '0';
+    }
+
+    const requestSequence = ++readerStatusRequestSequence;
+    action.dataset.readerStatusVideoId = videoId;
+    setCheckingState(action);
+
+    try {
+      const response = await sendMessage({
+        type: 'CHECK_YOUTUBE_READER_STATUS',
+        payload: {
+          url: location.href,
+          videoId,
+          forceRefresh: Boolean(forceRefresh)
+        }
+      });
+
+      if (
+        requestSequence !== readerStatusRequestSequence ||
+        action.dataset.videoId !== videoId
+      ) {
+        return;
+      }
+
+      if (!response || !response.success) {
+        action.dataset.readerStatusRetryCount = '0';
+        setUnknownState(action);
+        return;
+      }
+
+      if (response.saved && response.reader_url) {
+        action.dataset.readerStatusRetryCount = '0';
+        setSavedState(action, response.reader_url);
+        return;
+      }
+
+      if (response.status === 'not_saved' || response.saved === false) {
+        action.dataset.readerStatusRetryCount = '0';
+        setNotSavedState(action);
+        return;
+      }
+
+      if (
+        response.status === 'unknown' &&
+        response.reason === 'reader_index_warming' &&
+        scheduleReaderStatusRetry(action, videoId)
+      ) {
+        return;
+      }
+
+      action.dataset.readerStatusRetryCount = '0';
+      setUnknownState(action);
+    } catch (error) {
+      if (
+        requestSequence === readerStatusRequestSequence &&
+        action.dataset.videoId === videoId
+      ) {
+        action.dataset.readerStatusRetryCount = '0';
+        setUnknownState(action);
+      }
+    }
+  }
+
+  function scheduleReaderStatusRetry(action, videoId) {
+    const retryCount = Number(action.dataset.readerStatusRetryCount || '0');
+    if (retryCount >= READER_STATUS_MAX_WARMING_RETRIES) {
+      return false;
+    }
+
+    action.dataset.readerStatusRetryCount = String(retryCount + 1);
+    setCheckingState(action);
+    setTimeout(() => {
+      if (action.dataset.videoId === videoId) {
+        ensureReaderStatus(action, videoId, false, true);
+      }
+    }, READER_STATUS_RETRY_INTERVAL_MS);
+    return true;
+  }
+
+  function setCheckingState(action) {
     const button = action.querySelector(`#${BUTTON_ID}`);
+    const reprocessButton = action.querySelector(`#${REPROCESS_BUTTON_ID}`);
+    action.dataset.readerUrl = '';
+    if (button) {
+      button.disabled = true;
+      button.dataset.mode = 'checking';
+      button.textContent = '检查中…';
+      button.title = '正在检查 Reader';
+    }
+    if (reprocessButton) {
+      reprocessButton.hidden = true;
+      reprocessButton.disabled = false;
+    }
+  }
+
+  function setSavedState(action, readerUrl) {
+    const button = action.querySelector(`#${BUTTON_ID}`);
+    const reprocessButton = action.querySelector(`#${REPROCESS_BUTTON_ID}`);
+    action.dataset.readerUrl = readerUrl || '';
     if (button) {
       button.disabled = false;
-      button.textContent = '发送字幕处理';
+      button.dataset.mode = 'saved';
+      button.textContent = '已剪藏 ↗';
+      button.title = '打开 Reader 文章';
+    }
+    if (reprocessButton) {
+      reprocessButton.hidden = false;
+      reprocessButton.disabled = false;
+    }
+  }
+
+  function setNotSavedState(action) {
+    const button = action.querySelector(`#${BUTTON_ID}`);
+    const reprocessButton = action.querySelector(`#${REPROCESS_BUTTON_ID}`);
+    action.dataset.readerUrl = '';
+    if (button) {
+      button.disabled = false;
+      button.dataset.mode = 'submit';
+      button.textContent = '剪藏';
+      button.title = '发送当前视频到字幕处理后台';
+    }
+    if (reprocessButton) {
+      reprocessButton.hidden = true;
+      reprocessButton.disabled = false;
+    }
+  }
+
+  function setUnknownState(action) {
+    const button = action.querySelector(`#${BUTTON_ID}`);
+    const reprocessButton = action.querySelector(`#${REPROCESS_BUTTON_ID}`);
+    action.dataset.readerUrl = '';
+    if (button) {
+      button.disabled = false;
+      button.dataset.mode = 'unknown';
+      button.textContent = '状态未知';
+      button.title = '点击重新检查 Reader';
+    }
+    if (reprocessButton) {
+      reprocessButton.hidden = true;
+      reprocessButton.disabled = false;
+    }
+  }
+
+  function setSubmittingState(action) {
+    const button = action.querySelector(`#${BUTTON_ID}`);
+    const reprocessButton = action.querySelector(`#${REPROCESS_BUTTON_ID}`);
+    if (button) {
+      button.disabled = true;
+      button.dataset.mode = 'submitting';
+      button.textContent = '发送中…';
+    }
+    if (reprocessButton) {
+      reprocessButton.disabled = true;
     }
   }
 
   async function handleSubmitClick(event) {
-    const button = event.currentTarget;
+    const action = event.currentTarget.closest(`#${ACTION_ID}`);
     const videoId = extractVideoId(location.href);
 
-    if (!videoId) {
+    if (!videoId || !action) {
       showToast('无法识别当前 YouTube 视频', 'error');
       return;
     }
 
-    button.disabled = true;
-    button.textContent = '发送中...';
+    setSubmittingState(action);
     showToast('正在发送到后台...', 'info');
 
     try {
@@ -134,29 +344,38 @@
       }
 
       activeProcessId = response.process_id || null;
-      button.textContent = '已发送';
+      const readerUrl = getReaderUrl(response);
+      const preferredUrl = getPreferredResultUrl(response, response.result_url);
       showToast(
-        response.readwise_url ? '已保存到 Readwise Reader' : '已发送到后台',
+        readerUrl ? '已保存到 Readwise Reader' : '已发送到后台',
         'success',
-        getPreferredResultUrl(response, response.result_url)
+        preferredUrl
       );
 
       if (String(response.status || '').toLowerCase() === 'completed') {
-        restoreSubmittedButton();
+        if (readerUrl) {
+          setSavedState(action, readerUrl);
+        } else {
+          ensureReaderStatus(action, videoId, true);
+        }
         return;
       }
 
       if (response.process_id && response.poll_url) {
-        pollTaskStatus(response.process_id, response.poll_url, response.result_url);
+        pollTaskStatus(
+          response.process_id,
+          response.poll_url,
+          response.result_url,
+          videoId
+        );
       }
     } catch (error) {
-      button.disabled = false;
-      button.textContent = '发送字幕处理';
+      ensureReaderStatus(action, videoId, true);
       showToast(formatError(error), 'error');
     }
   }
 
-  async function pollTaskStatus(processId, pollUrl, resultUrl) {
+  async function pollTaskStatus(processId, pollUrl, resultUrl, videoId) {
     let attempts = 0;
     const maxAttempts = 120;
 
@@ -184,42 +403,66 @@
             'error',
             getPreferredResultUrl(status, resultUrl)
           );
-          restoreSubmittedButton();
+          refreshCurrentAction(videoId);
           return;
         }
 
         if (normalizedStatus === 'completed') {
+          const readerUrl = getReaderUrl(status);
           const linkUrl = getPreferredResultUrl(status, resultUrl);
           showToast(
-            status.readwise_url ? '已保存到 Readwise Reader' : '后台处理完成',
+            readerUrl ? '已保存到 Readwise Reader' : '后台处理完成',
             'success',
             linkUrl
           );
-          restoreSubmittedButton();
+          const action = currentActionForVideo(videoId);
+          if (action && readerUrl) {
+            setSavedState(action, readerUrl);
+          } else {
+            refreshCurrentAction(videoId);
+          }
           return;
         }
 
         if (normalizedStatus === 'failed') {
           showToast(status.error || '后台处理失败', 'error', resultUrl);
-          restoreSubmittedButton();
+          refreshCurrentAction(videoId);
           return;
         }
       } catch (error) {
         // Polling is best-effort; the submitted task remains visible in the backend.
       }
     }
+
+    refreshCurrentAction(videoId);
   }
 
-  function restoreSubmittedButton() {
-    const button = document.getElementById(BUTTON_ID);
-    if (button) {
-      button.disabled = false;
-      button.textContent = '再次发送';
+  function currentActionForVideo(videoId) {
+    const action = document.getElementById(ACTION_ID);
+    if (action && action.dataset.videoId === videoId) {
+      return action;
+    }
+    return null;
+  }
+
+  function refreshCurrentAction(videoId) {
+    const action = currentActionForVideo(videoId);
+    if (action) {
+      ensureReaderStatus(action, videoId, true);
     }
   }
 
   function getPreferredResultUrl(response, fallbackUrl) {
-    return (response && (response.readwise_url || response.reader_url)) || fallbackUrl;
+    return getReaderUrl(response) || fallbackUrl;
+  }
+
+  function getReaderUrl(response) {
+    return response && (
+      response.readwise_url ||
+      response.reader_url ||
+      response.readwise_fallback_url ||
+      response.readwise_url_only_url
+    );
   }
 
   function isReadwiseParseFailed(status) {
@@ -277,6 +520,7 @@
       #${ACTION_ID} {
         display: inline-flex;
         align-items: center;
+        gap: 6px;
         margin-left: 8px;
         vertical-align: middle;
         z-index: 9999;
@@ -289,8 +533,8 @@
         margin-left: 0;
       }
 
-      #${BUTTON_ID} {
-        min-width: 112px;
+      #${BUTTON_ID},
+      #${REPROCESS_BUTTON_ID} {
         height: 36px;
         padding: 0 14px;
         border: 1px solid var(--yt-spec-10-percent-layer, rgba(0, 0, 0, 0.12));
@@ -304,13 +548,33 @@
         white-space: nowrap;
       }
 
-      #${BUTTON_ID}:hover {
+      #${BUTTON_ID}:hover,
+      #${REPROCESS_BUTTON_ID}:hover {
         background: var(--yt-spec-button-chip-background-hover, rgba(0, 0, 0, 0.1));
       }
 
-      #${BUTTON_ID}:disabled {
+      #${BUTTON_ID}:disabled,
+      #${REPROCESS_BUTTON_ID}:disabled {
         cursor: default;
         opacity: 0.7;
+      }
+
+      #${BUTTON_ID}[data-mode='saved'] {
+        border-color: rgba(22, 163, 74, 0.35);
+        color: #15803d;
+      }
+
+      #${REPROCESS_BUTTON_ID} {
+        height: 30px;
+        padding: 0 10px;
+        border-radius: 15px;
+        font-size: 12px;
+        line-height: 30px;
+        opacity: 0.78;
+      }
+
+      #${REPROCESS_BUTTON_ID}[hidden] {
+        display: none;
       }
 
       #${TOAST_ID} {

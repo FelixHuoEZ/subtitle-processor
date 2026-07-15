@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -341,6 +342,136 @@ class ReadwiseService:
         except Exception as e:
             logger.error("获取Readwise Reader文档失败: %s", str(e))
             return None
+
+    def lookup_reader_document(self, document_id: str) -> Dict[str, Any]:
+        """Check a Reader document ID without conflating missing and API failure."""
+        if not self.enabled:
+            return {
+                "status": "unavailable",
+                "reason": "reader_not_configured",
+                "document": None,
+            }
+        if not document_id:
+            return {
+                "status": "missing",
+                "reason": "missing_document_id",
+                "document": None,
+            }
+
+        response = self._make_request(
+            "GET",
+            "/list/",
+            params={"id": str(document_id), "limit": 1},
+        )
+        if not isinstance(response, dict):
+            return {
+                "status": "unavailable",
+                "reason": "reader_list_request_failed",
+                "document": None,
+            }
+
+        results = response.get("results") or []
+        document = next(
+            (
+                dict(candidate)
+                for candidate in results
+                if isinstance(candidate, dict)
+                and str(candidate.get("id") or "") == str(document_id)
+            ),
+            None,
+        )
+        if document is None:
+            return {
+                "status": "missing",
+                "reason": "document_not_found",
+                "document": None,
+            }
+        return {
+            "status": "found",
+            "reason": "document_found",
+            "document": self._ensure_reader_url(document),
+        }
+
+    def list_reader_documents(
+        self,
+        *,
+        category: Optional[str] = None,
+        limit: int = 100,
+        max_pages: int = 20,
+        page_interval_seconds: float = 0.0,
+        request_retry_delay_seconds: float = 0.0,
+        max_request_retries: int = 0,
+    ) -> Dict[str, Any]:
+        """Fetch a bounded Reader document index with explicit completeness."""
+        if not self.enabled:
+            return {
+                "status": "unavailable",
+                "reason": "reader_not_configured",
+                "documents": [],
+            }
+
+        bounded_limit = max(1, min(int(limit), 100))
+        bounded_max_pages = max(1, int(max_pages))
+        bounded_page_interval = max(0.0, float(page_interval_seconds))
+        bounded_retry_delay = max(0.0, float(request_retry_delay_seconds))
+        bounded_max_retries = max(0, int(max_request_retries))
+        documents: List[Dict[str, Any]] = []
+        page_cursor = None
+
+        for page_number in range(bounded_max_pages):
+            if page_number > 0 and bounded_page_interval > 0:
+                time.sleep(bounded_page_interval)
+
+            params: Dict[str, Any] = {"limit": bounded_limit}
+            if category:
+                params["category"] = category
+            if page_cursor:
+                params["pageCursor"] = page_cursor
+
+            response = None
+            for request_attempt in range(bounded_max_retries + 1):
+                response = self._make_request("GET", "/list/", params=params)
+                if isinstance(response, dict):
+                    break
+                if request_attempt < bounded_max_retries:
+                    logger.warning(
+                        "Reader list request failed; retrying page %s in %.1fs",
+                        page_number + 1,
+                        bounded_retry_delay,
+                    )
+                    if bounded_retry_delay > 0:
+                        time.sleep(bounded_retry_delay)
+            if not isinstance(response, dict):
+                return {
+                    "status": "unavailable",
+                    "reason": "reader_list_request_failed",
+                    "documents": documents,
+                    "pages_read": page_number,
+                }
+
+            results = response.get("results") or []
+            documents.extend(
+                dict(document)
+                for document in results
+                if isinstance(document, dict)
+            )
+            page_cursor = response.get("nextPageCursor") or response.get(
+                "next_page_cursor"
+            )
+            if not page_cursor:
+                return {
+                    "status": "complete",
+                    "reason": None,
+                    "documents": documents,
+                    "pages_read": page_number + 1,
+                }
+
+        return {
+            "status": "partial",
+            "reason": "reader_list_page_limit_reached",
+            "documents": documents,
+            "pages_read": bounded_max_pages,
+        }
 
     def check_reader_parse_result(self, document_id: str) -> Dict[str, Any]:
         """Classify whether Reader successfully parsed a saved URL."""

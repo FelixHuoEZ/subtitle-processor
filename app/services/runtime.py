@@ -10,6 +10,7 @@ from .subtitle_service import SubtitleService
 from .transcription_service import TranscriptionService
 from .translation_service import TranslationService
 from .video_service import VideoService
+from .youtube_reader_status_service import YouTubeReaderStatusService
 
 
 class LazyServiceProxy:
@@ -44,6 +45,7 @@ class AppServices:
     subtitle_service: SubtitleService
     translation_service: TranslationService
     readwise_service: ReadwiseService
+    youtube_reader_status_service: YouTubeReaderStatusService
     processing_service: ProcessingService
 
 
@@ -61,6 +63,10 @@ def create_services() -> AppServices:
     subtitle_service = SubtitleService()
     translation_service = TranslationService()
     readwise_service = ReadwiseService()
+    youtube_reader_status_service = YouTubeReaderStatusService(
+        file_service=file_service,
+        readwise_service=readwise_service,
+    )
     processing_service = ProcessingService(
         file_service=file_service,
         video_service=video_service,
@@ -78,6 +84,7 @@ def create_services() -> AppServices:
         subtitle_service=subtitle_service,
         translation_service=translation_service,
         readwise_service=readwise_service,
+        youtube_reader_status_service=youtube_reader_status_service,
         processing_service=processing_service,
     )
 
@@ -92,4 +99,5 @@ def attach_services(app, services: AppServices) -> None:
     app.subtitle_service = services.subtitle_service
     app.translation_service = services.translation_service
     app.readwise_service = services.readwise_service
+    app.youtube_reader_status_service = services.youtube_reader_status_service
     app.processing_service = services.processing_service

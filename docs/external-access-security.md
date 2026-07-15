@@ -7,7 +7,7 @@
 | 入口 | Cloudflare Access 策略 | 应用端权限 |
 | --- | --- | --- |
 | `https://readwise.gauss.surf` | 身份登录 Allow | 完整网页与 API 权限 |
-| `https://readwise-api.gauss.surf` | Service Auth | 仅 `POST /process` 和 `GET /process/status/<id>` |
+| `https://readwise-api.gauss.surf` | Service Auth | 仅任务提交、任务状态和 YouTube Reader 状态查询 |
 | Docker 内网 `http://subtitle-processor:5000` | 不经过 Access | `Authorization: Bearer <INTERNAL_SERVICE_TOKEN>` |
 
 `GET /health` 专供容器健康检查，不要求应用端认证。`/health/metrics`、设置接口、任务详情和管理页面都需要认证。
@@ -16,7 +16,7 @@
 
 1. 创建 Web 类型的 Self-hosted application，域名为 `readwise.gauss.surf`，只允许指定身份登录。
 2. 创建 API 类型的 Self-hosted application，域名为 `readwise-api.gauss.surf`，策略动作为 `Service Auth`，只包含专用 Service Token。
-3. API 应用为扩展预检请求返回 `GET, POST, OPTIONS` 和 Access Service Token 请求头。实际请求仍必须通过 Service Auth，应用端 API AUD 也只允许提交和查询状态。
+3. API 应用为扩展预检请求返回 `GET, POST, OPTIONS` 和 Access Service Token 请求头。实际请求仍必须通过 Service Auth，应用端 API AUD 只允许 `POST /process`、`GET /process/status/<id>` 和 `GET /process/reader-status/youtube/<video_id>`。
 4. 让 Cloudflare Tunnel 的两个公开主机名都指向同一个字幕服务源站。
 5. 分别记录两个应用的 Application Audience (AUD) Tag。不要把 Service Token Secret 或内部 Token 写入仓库。
 
@@ -47,7 +47,9 @@ Access Client ID 和 Secret 默认保存在 `chrome.storage.local`，不会通�
 `chrome-extension/local-settings.json` 已被 Git 忽略，插件会在 Chrome 存储缺少凭据时读取该文件。
 旧版扩展保存的 `readwiseToken` 会在升级后删除；Readwise Token 只由后端持有。
 
-Service Token 应单独签发、设置到期时间，并在设备丢失或扩展凭据疑似泄漏时立即吊销。API AUD 不依赖动态的扩展 ID，但只能访问提交和状态查询接口。扩展升级后需要在 `chrome://extensions` 重新加载一次未打包扩展。
+Service Token 应单独签发、设置到期时间，并在设备丢失或扩展凭据疑似泄漏时立即吊销。API AUD 不依赖动态的扩展 ID，但只能访问上述三个扩展接口。扩展升级后需要在 `chrome://extensions` 重新加载一次未打包扩展。
+
+YouTube 页面打开后，扩展按视频 ID 查询 Reader 状态：`检查中…`、`已剪藏 ↗`、`剪藏` 或 `状态未知`。`已剪藏 ↗` 直接打开 Reader 文档，并显示次级 `重新处理`。查询由后端先验证本地任务保存的 Reader 文档 ID；没有本地记录时，再使用 Reader `video` 文档索引按规范化 YouTube URL 匹配。索引请求按 Reader 列表接口速率限制节流并在后台执行，默认每 6 小时刷新，完整索引持久化到 uploads 缓存目录；刷新失败时继续使用 last-known-good，避免容器重启或短暂限流让所有页面退化。已确认删除或查无此文档的本地 Reader ID 会从缓存匹配中排除。Reader Token 始终只存在于后端。
 
 ### 为什么同时有网页登录和 Service Token
 

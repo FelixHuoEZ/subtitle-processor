@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 _UNAUTHENTICATED_PATHS = {"/health"}
 _API_STATUS_PATH = re.compile(r"^/process/status/[^/]+$")
+_API_READER_STATUS_PATH = re.compile(
+    r"^/process/reader-status/youtube/[A-Za-z0-9_-]{6,32}$"
+)
 
 
 def _as_bool(value: Optional[str], default: bool = False) -> bool:
@@ -121,7 +124,11 @@ class AccessAuthService:
         api_request_allowed = (
             request.method == "POST" and request.path == "/process"
         ) or (
-            request.method == "GET" and _API_STATUS_PATH.fullmatch(request.path)
+            request.method == "GET"
+            and (
+                _API_STATUS_PATH.fullmatch(request.path)
+                or _API_READER_STATUS_PATH.fullmatch(request.path)
+            )
         )
         return "api" if api_request_allowed else None
 

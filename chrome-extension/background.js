@@ -31,6 +31,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'CHECK_YOUTUBE_READER_STATUS') {
+    checkYouTubeReaderStatus(message.payload || {})
+      .then(sendResponse)
+      .catch((error) => sendResponse({
+        success: false,
+        status: 'unknown',
+        saved: null,
+        error: formatError(error)
+      }));
+    return true;
+  }
+
   return false;
 });
 
@@ -112,6 +124,35 @@ async function checkTaskStatus(payload) {
     ...data,
     success: true,
     done: ['completed', 'failed'].includes(String(data.status || '').toLowerCase())
+  };
+}
+
+async function checkYouTubeReaderStatus(payload) {
+  const settings = await getSettings();
+  const apiServerUrl = resolveApiServerUrl(settings);
+  const videoId = payload.videoId || extractVideoId(payload.url || '');
+
+  if (!apiServerUrl) {
+    throw new Error('请先在 Subtitle Processor 扩展里设置 API 地址');
+  }
+  if (!videoId) {
+    throw new Error('缺少 YouTube 视频ID');
+  }
+
+  const refreshQuery = payload.forceRefresh ? '?refresh=1' : '';
+  const response = await fetch(
+    `${apiServerUrl}/process/reader-status/youtube/${encodeURIComponent(videoId)}${refreshQuery}`,
+    { headers: buildAccessHeaders(settings) }
+  );
+  const data = await readJson(response);
+
+  if (!response.ok || data.success === false) {
+    throw new Error(data.error || `服务器返回 ${response.status}`);
+  }
+
+  return {
+    ...data,
+    success: true
   };
 }
 

@@ -17,6 +17,7 @@ from ..services.transcription_service import TranscriptionService
 from ..services.subtitle_service import SubtitleService
 from ..services.translation_service import TranslationService
 from ..services.readwise_service import ReadwiseService
+from ..services.youtube_reader_status_service import YouTubeReaderStatusService
 from ..config.config_manager import get_config_value
 from ..services.runtime import service_proxy
 from ..utils.file_utils import build_task_filename
@@ -74,12 +75,19 @@ processing_service = service_proxy(
         translation_service=translation_service,
     )
 )
+youtube_reader_status_service = service_proxy(
+    lambda: YouTubeReaderStatusService(
+        file_service=file_service,
+        readwise_service=readwise_service,
+    )
+)
 
 
 def configure_services(services):
     """Bind this module to the application service set."""
     global file_service, video_service, transcription_service
     global subtitle_service, translation_service, readwise_service, processing_service
+    global youtube_reader_status_service
 
     file_service = services.file_service
     video_service = services.video_service
@@ -87,6 +95,7 @@ def configure_services(services):
     subtitle_service = services.subtitle_service
     translation_service = services.translation_service
     readwise_service = services.readwise_service
+    youtube_reader_status_service = services.youtube_reader_status_service
     processing_service = services.processing_service
 
 
@@ -264,7 +273,8 @@ def process_index():
             'audio_transcription': '/process/audio/<file_id>',
             'subtitle_translation': '/process/translate/<file_id>',
             'readwise_creation': '/process/readwise/<file_id>',
-            'status_check': '/process/status/<task_id>'
+            'status_check': '/process/status/<task_id>',
+            'youtube_reader_status': '/process/reader-status/youtube/<video_id>'
         },
         'status': 'ready'
     })
@@ -680,6 +690,32 @@ def create_readwise_article(file_id):
     except Exception as e:
         logger.error(f"创建Readwise文章失败: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+
+@process_bp.route('/reader-status/youtube/<video_id>')
+def get_youtube_reader_status(video_id):
+    """Return actual Reader presence for one YouTube video ID."""
+    try:
+        force_refresh = _task_bool(request.args.get('refresh'))
+        return jsonify(
+            youtube_reader_status_service.get_status(
+                video_id,
+                force_refresh=force_refresh,
+            )
+        )
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        logger.error('查询 YouTube Reader 状态失败: %s', exc)
+        return jsonify(
+            {
+                'success': False,
+                'status': 'unknown',
+                'saved': None,
+                'video_id': video_id,
+                'error': 'reader_status_lookup_failed',
+            }
+        ), 503
 
 
 @process_bp.route('/status/<task_id>')

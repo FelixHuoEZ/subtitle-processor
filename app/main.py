@@ -294,7 +294,8 @@ def register_main_routes(app):
                     'process_video': '/process/video/<process_id>',
                     'transcribe_audio': '/process/audio/<file_id>',
                     'translate_subtitle': '/process/translate/<file_id>',
-                    'create_readwise': '/process/readwise/<file_id>'
+                    'create_readwise': '/process/readwise/<file_id>',
+                    'youtube_reader_status': '/process/reader-status/youtube/<video_id>'
                 }
             })
             
@@ -330,6 +331,7 @@ def register_main_routes(app):
                     'subtitle_translation': '/process/translate/<file_id>',
                     'readwise_creation': '/process/readwise/<file_id>',
                     'status_check': '/process/status/<task_id>',
+                    'youtube_reader_status': '/process/reader-status/youtube/<video_id>',
                     'upload_url': '/upload/url'
                 },
                 'status': 'ready'

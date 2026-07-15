@@ -183,6 +183,10 @@ def test_api_audience_is_limited_to_extension_endpoints(monkeypatch):
     def status(task_id):
         return jsonify({"id": task_id})
 
+    @app.get("/process/reader-status/youtube/<video_id>")
+    def reader_status(video_id):
+        return jsonify({"video_id": video_id})
+
     @app.get("/health/metrics")
     def metrics():
         return jsonify({"private": True})
@@ -196,6 +200,10 @@ def test_api_audience_is_limited_to_extension_endpoints(monkeypatch):
         headers={**headers, "Origin": "chrome-extension://dynamic-id"},
     ).status_code == 200
     assert client.get("/process/status/task-1", headers=headers).status_code == 200
+    assert client.get(
+        "/process/reader-status/youtube/abcdefghijk",
+        headers=headers,
+    ).status_code == 200
     assert client.get("/health/metrics", headers=headers).status_code == 403
 
 
