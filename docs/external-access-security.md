@@ -28,10 +28,12 @@ ACCESS_TEAM_DOMAIN=https://your-team.cloudflareaccess.com
 ACCESS_WEB_APPLICATION_AUD=web-application-aud
 ACCESS_API_APPLICATION_AUD=api-application-aud
 ACCESS_ALLOWED_ORIGINS=https://readwise.gauss.surf
+ACCESS_JWT_LEEWAY_SECONDS=60
 INTERNAL_SERVICE_TOKEN=long-random-value
 ```
 
 启用前必须同时配置两个 AUD、Team Domain 和内部 Token，否则服务会拒绝启动，避免误以为源站已经受保护。
+`ACCESS_JWT_LEEWAY_SECONDS` 用于容忍 Cloudflare 与源站之间的小幅时钟偏差，默认 60 秒，允许范围为 0-300 秒；签名、issuer 和 AUD 校验不受影响。
 
 ## Chrome 扩展
 
@@ -40,9 +42,23 @@ INTERNAL_SERVICE_TOKEN=long-random-value
 - API 地址：`https://readwise-api.gauss.surf`
 - 网页地址：`https://readwise.gauss.surf`
 
-Access Client ID 和 Secret 保存在 `chrome.storage.local`，不会通过 Chrome Sync 同步。旧版扩展保存的 `readwiseToken` 会在升级后删除；Readwise Token 只由后端持有。
+Access Client ID 和 Secret 默认保存在 `chrome.storage.local`，不会通过 Chrome Sync 同步。也可以从
+`chrome-extension/local-settings.json.example` 复制本地配置模板；实际的
+`chrome-extension/local-settings.json` 已被 Git 忽略，插件会在 Chrome 存储缺少凭据时读取该文件。
+旧版扩展保存的 `readwiseToken` 会在升级后删除；Readwise Token 只由后端持有。
 
 Service Token 应单独签发、设置到期时间，并在设备丢失或扩展凭据疑似泄漏时立即吊销。API AUD 不依赖动态的扩展 ID，但只能访问提交和状态查询接口。扩展升级后需要在 `chrome://extensions` 重新加载一次未打包扩展。
+
+### 为什么同时有网页登录和 Service Token
+
+两种认证保护的是不同入口，不要求用户对同一次操作重复认证：
+
+- Cloudflare 身份登录用于本人访问 `readwise.gauss.surf` 网页，包括任务列表、详情和受保护的管理界面。
+- Access Client ID 和 Secret 是扩展的机器凭据，用于后台访问 `readwise-api.gauss.surf`，使扩展能在网页未打开时提交并轮询任务。
+
+仅使用 Cloudflare 身份登录在技术上可行，但扩展需要依赖跨域 Access Cookie，并额外处理交互式登录跳转、CORS、Cookie 发送和会话过期。Access Cookie 是 HttpOnly 且受应用和域名范围约束，扩展不能把网页登录状态当作稳定的后台 API 凭据。该方案会增加周期性重新登录和后台请求失败的概率，因此当前保留身份登录与 Service Token 分离的设计。
+
+对用户而言仍然只有网页登录是交互步骤。扩展凭据由被 Git 忽略的 `chrome-extension/local-settings.json` 在本机管理，不需要日常手工填写；popup 后续可将凭据字段收纳到高级设置或仅显示本地配置状态。Service Token 的 API audience 在应用层仅允许任务提交和状态查询，不能访问指标或设置接口。
 
 ## 发布顺序
 

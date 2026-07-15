@@ -12,6 +12,7 @@ AUTH_ENV_KEYS = (
     "ACCESS_WEB_APPLICATION_AUD",
     "ACCESS_API_APPLICATION_AUD",
     "ACCESS_ALLOWED_ORIGINS",
+    "ACCESS_JWT_LEEWAY_SECONDS",
     "INTERNAL_SERVICE_TOKEN",
 )
 
@@ -121,6 +122,36 @@ def test_cloudflare_assertion_validates_issuer_and_any_configured_audience(
     assert decode_calls[0][2]["issuer"] == (
         "https://example.cloudflareaccess.com"
     )
+    assert decode_calls[0][2]["leeway"] == 60
+
+
+def test_cloudflare_assertion_leeway_is_configurable_and_bounded(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    _enable_auth(monkeypatch)
+    monkeypatch.setenv("ACCESS_JWT_LEEWAY_SECONDS", "999")
+
+    class FakeJWKClient:
+        def __init__(self, url, cache_keys):
+            pass
+
+        def get_signing_key_from_jwt(self, assertion):
+            return SimpleNamespace(key="public-key")
+
+    decode_calls = []
+    monkeypatch.setattr(
+        "app.services.access_auth_service.jwt.PyJWKClient", FakeJWKClient
+    )
+    monkeypatch.setattr(
+        "app.services.access_auth_service.jwt.decode",
+        lambda *args, **kwargs: decode_calls.append(kwargs) or {"aud": ["web-aud"]},
+    )
+
+    response = _make_app().test_client().get(
+        "/private", headers={"Cf-Access-Jwt-Assertion": "signed-access-token"}
+    )
+
+    assert response.status_code == 200
+    assert decode_calls[0]["leeway"] == 300
 
 
 def test_api_audience_is_limited_to_extension_endpoints(monkeypatch):

@@ -27,6 +27,14 @@ def _split_csv(value: Optional[str]) -> tuple[str, ...]:
     return tuple(item.strip() for item in (value or "").split(",") if item.strip())
 
 
+def _bounded_int(value: Optional[str], default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
 def _normalize_team_domain(value: str) -> str:
     domain = value.strip().rstrip("/")
     if domain and not domain.startswith(("http://", "https://")):
@@ -42,6 +50,7 @@ class AccessAuthConfig:
     api_audiences: tuple[str, ...]
     internal_token: str
     allowed_origins: tuple[str, ...]
+    jwt_leeway_seconds: int
 
     @classmethod
     def from_env(cls) -> "AccessAuthConfig":
@@ -52,6 +61,12 @@ class AccessAuthConfig:
             api_audiences=_split_csv(os.getenv("ACCESS_API_APPLICATION_AUD")),
             internal_token=os.getenv("INTERNAL_SERVICE_TOKEN", "").strip(),
             allowed_origins=_split_csv(os.getenv("ACCESS_ALLOWED_ORIGINS")),
+            jwt_leeway_seconds=_bounded_int(
+                os.getenv("ACCESS_JWT_LEEWAY_SECONDS"),
+                default=60,
+                minimum=0,
+                maximum=300,
+            ),
         )
 
     def validate(self) -> None:
@@ -142,6 +157,7 @@ class AccessAuthService:
                     algorithms=["RS256"],
                     audience=list(self.audiences),
                     issuer=self.config.team_domain,
+                    leeway=self.config.jwt_leeway_seconds,
                 )
                 audience_type = self._classify_request_audience(claims)
                 if audience_type is None:

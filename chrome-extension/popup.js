@@ -6,17 +6,23 @@ document.addEventListener('DOMContentLoaded', function() {
     chrome.storage.sync.get([
       'apiServerUrl', 'webServerUrl', 'serverUrl', 'saveLocation', 'tags', 'hotwords'
     ]),
-    chrome.storage.local.get(['accessClientId', 'accessClientSecret'])
+    chrome.storage.local.get(['accessClientId', 'accessClientSecret']),
+    loadLocalExtensionSettings()
   ]).then(function(results) {
     const items = results[0];
     const credentials = results[1];
+    const localSettings = results[2];
     const legacyUrl = items.serverUrl || '';
     const apiUrl = legacyUrl === defaultWebServerUrl ? defaultApiServerUrl : legacyUrl;
 
-    document.getElementById('apiServerUrl').value = items.apiServerUrl || apiUrl || defaultApiServerUrl;
-    document.getElementById('webServerUrl').value = items.webServerUrl || legacyUrl || defaultWebServerUrl;
-    document.getElementById('accessClientId').value = credentials.accessClientId || '';
-    document.getElementById('accessClientSecret').value = credentials.accessClientSecret || '';
+    document.getElementById('apiServerUrl').value =
+      items.apiServerUrl || apiUrl || localSettings.apiServerUrl || defaultApiServerUrl;
+    document.getElementById('webServerUrl').value =
+      items.webServerUrl || legacyUrl || localSettings.webServerUrl || defaultWebServerUrl;
+    document.getElementById('accessClientId').value =
+      credentials.accessClientId || localSettings.accessClientId || '';
+    document.getElementById('accessClientSecret').value =
+      credentials.accessClientSecret || localSettings.accessClientSecret || '';
     document.getElementById('saveLocation').value = items.saveLocation || 'new';
     document.getElementById('tags').value = items.tags || '';
     document.getElementById('hotwords').value = items.hotwords || '';
@@ -123,8 +129,12 @@ document.addEventListener('DOMContentLoaded', function() {
               return;
             }
 
-            status.textContent = '已发送到后台，等待 Readwise 链接...';
-            status.className = 'success';
+            showStatusLink(
+              status,
+              '已发送到后台，等待 Readwise 链接...',
+              data.result_url,
+              'success'
+            );
             if (data.process_id && data.poll_url) {
               pollTaskStatus(data.process_id, data.poll_url, data.result_url);
             }

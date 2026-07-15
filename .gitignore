@@ -35,6 +35,7 @@ __pycache__/
 env/
 venv/
 images.env
+chrome-extension/local-settings.json
 
 # IDE
 .vscode/

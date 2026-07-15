@@ -1,0 +1,6 @@
+{
+  "apiServerUrl": "https://readwise-api.gauss.surf",
+  "webServerUrl": "https://readwise.gauss.surf",
+  "accessClientId": "your-service-token-client-id",
+  "accessClientSecret": "your-service-token-client-secret"
+}

@@ -1,3 +1,5 @@
+importScripts('local-settings-loader.js');
+
 const DEFAULT_API_SERVER_URL = 'https://readwise-api.gauss.surf';
 const DEFAULT_WEB_SERVER_URL = 'https://readwise.gauss.surf';
 const SYNC_STORAGE_KEYS = [
@@ -114,11 +116,20 @@ async function checkTaskStatus(payload) {
 }
 
 async function getSettings() {
-  const [syncSettings, localSettings] = await Promise.all([
+  const [syncSettings, storedLocalSettings, fileSettings] = await Promise.all([
     chrome.storage.sync.get(SYNC_STORAGE_KEYS),
-    chrome.storage.local.get(LOCAL_STORAGE_KEYS)
+    chrome.storage.local.get(LOCAL_STORAGE_KEYS),
+    loadLocalExtensionSettings()
   ]);
-  return { ...syncSettings, ...localSettings };
+  return {
+    ...fileSettings,
+    ...syncSettings,
+    ...storedLocalSettings,
+    accessClientId:
+      storedLocalSettings.accessClientId || fileSettings.accessClientId || '',
+    accessClientSecret:
+      storedLocalSettings.accessClientSecret || fileSettings.accessClientSecret || ''
+  };
 }
 
 function resolveApiServerUrl(settings) {
