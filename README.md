@@ -102,6 +102,7 @@ A comprehensive subtitle processing service that automatically downloads, transc
 
 ### ⚙️ Optional Configuration
 - `READWISE_URL_ONLY_WHEN_ZH_SUBS=true` to clip public YouTube URLs to Readwise when original Chinese subtitles exist (skips subtitle download/transcription). Member-only, private, login-required, and age-restricted videos stay on the local subtitle/transcription path because Readwise Reader cannot use your YouTube cookies.
+- `YOUTUBE_READER_INCREMENTAL_REFRESH_SECONDS` controls Reader status-cache updates (default 30 minutes), while `YOUTUBE_READER_FULL_REFRESH_SECONDS` performs a full reconciliation every 24 hours. Incremental queries overlap by `YOUTUBE_READER_INCREMENTAL_OVERLAP_SECONDS` (default 5 minutes) to avoid boundary gaps.
 - `DOWNLOAD_CONCURRENCY` (0/1 means serial), retry/backoff options, and `DOWNLOAD_TOTAL_TIMEOUT_SECONDS` / `DOWNLOAD_SOCKET_TIMEOUT_SECONDS` control download pressure and time budgets.
 - `AUTO_RETRY_INTERRUPTED_TASKS=true` creates a fresh lineage-linked task after restart for safe pre-Readwise stages. `AUTO_RETRY_INTERRUPTED_MAX_ATTEMPTS` limits restart loops; stages that may have changed Reader state remain manual.
 - `AUTO_TRANSLATE_NON_TARGET_LANGUAGE=true` translates subtitles whose reliable source language differs from `AUTO_TRANSLATE_TARGET_LANGUAGE` (default `zh`). Mixed, unknown, and low-confidence sources are skipped; originals are preserved.
@@ -312,6 +313,7 @@ Special thanks to:
 
 ### ⚙️ 可选配置
 - `READWISE_URL_ONLY_WHEN_ZH_SUBS=true`：公开视频检测到原始中文字幕轨时直接剪藏原始 URL 到 Readwise（跳过字幕下载/转录）。会员、私有、需登录或年龄限制视频仍走本地字幕/转录路径，因为 Readwise Reader 不能复用你的 YouTube cookies。
+- `YOUTUBE_READER_INCREMENTAL_REFRESH_SECONDS`：控制 Reader 状态缓存的增量同步周期（默认 30 分钟）；`YOUTUBE_READER_FULL_REFRESH_SECONDS` 每 24 小时做一次全量校准。增量查询按 `YOUTUBE_READER_INCREMENTAL_OVERLAP_SECONDS`（默认 5 分钟）回看，避免游标边界漏项。
 - `DOWNLOAD_CONCURRENCY`（0/1 视为串行）、重试退避参数以及 `DOWNLOAD_TOTAL_TIMEOUT_SECONDS` / `DOWNLOAD_SOCKET_TIMEOUT_SECONDS` 用于控制下载压力和时间预算。
 - `AUTO_RETRY_INTERRUPTED_TASKS=true`：服务重启后，为 Readwise 之前的安全阶段创建新的关联续跑任务；`AUTO_RETRY_INTERRUPTED_MAX_ATTEMPTS` 限制重启循环，可能已经修改 Reader 状态的阶段仍需人工确认。
 - `AUTO_TRANSLATE_NON_TARGET_LANGUAGE=true`：把可靠识别为非目标语言的字幕翻译到 `AUTO_TRANSLATE_TARGET_LANGUAGE`（默认 `zh`）；混合、未知和低置信度来源会跳过，原字幕文件会保留。

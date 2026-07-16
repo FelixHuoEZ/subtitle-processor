@@ -1,5 +1,7 @@
+import json
 import threading
 import time
+from datetime import datetime, timezone
 
 from app.services.youtube_reader_status_service import YouTubeReaderStatusService
 
@@ -23,6 +25,7 @@ class FakeReadwiseService:
         }
         self.document_calls = []
         self.list_calls = 0
+        self.list_call_kwargs = []
 
     def lookup_reader_document(self, document_id):
         self.document_calls.append(document_id)
@@ -33,6 +36,7 @@ class FakeReadwiseService:
 
     def list_reader_documents(self, **kwargs):
         self.list_calls += 1
+        self.list_call_kwargs.append(kwargs)
         return self.library_lookup
 
 
@@ -334,3 +338,138 @@ def test_complete_library_index_is_persisted_and_reused(tmp_path):
     assert second_result["status"] == "saved"
     assert second_result["reader_document_id"] == "reader-persisted"
     assert second_readwise.list_calls == 0
+
+    payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert payload["version"] == 2
+    assert payload["last_full_refresh_at"]
+    assert payload["last_incremental_sync_at"]
+    assert payload["documents"]["reader-persisted"]["id"] == "reader-persisted"
+
+
+def test_force_refresh_uses_incremental_overlap_and_replaces_document_mapping():
+    now = {"monotonic": 100.0, "wall": 1784196000.0}
+    readwise = FakeReadwiseService(
+        library_lookup={
+            "status": "complete",
+            "documents": [
+                {
+                    "id": "reader-changing",
+                    "source_url": "https://youtu.be/abcdefghijk",
+                    "updated_at": "2026-07-16T10:00:00+00:00",
+                }
+            ],
+        }
+    )
+    service = build_service(
+        FakeFileService(),
+        readwise,
+        clock=lambda: now["monotonic"],
+        wall_clock=lambda: now["wall"],
+        incremental_refresh_seconds=600,
+        full_refresh_seconds=86400,
+        incremental_overlap_seconds=300,
+    )
+
+    first = service.get_status("abcdefghijk")
+    first_sync_at = datetime.fromtimestamp(
+        now["wall"],
+        timezone.utc,
+    ).isoformat(timespec="seconds")
+    readwise.library_lookup = {
+        "status": "complete",
+        "documents": [
+            {
+                "id": "reader-changing",
+                "source_url": "https://youtu.be/lmnopqrstuv",
+                "updated_at": "2026-07-16T10:01:00+00:00",
+            }
+        ],
+    }
+    now["monotonic"] += 60
+    now["wall"] += 60
+
+    changed = service.get_status("lmnopqrstuv", force_refresh=True)
+    old = service.get_status("abcdefghijk")
+
+    assert first["status"] == "saved"
+    assert changed["status"] == "saved"
+    assert old["status"] == "not_saved"
+    assert readwise.list_call_kwargs[0]["updated_after"] is None
+    expected_overlap = datetime.fromtimestamp(
+        datetime.fromisoformat(first_sync_at).timestamp() - 300,
+        timezone.utc,
+    ).isoformat(timespec="seconds")
+    assert readwise.list_call_kwargs[1]["updated_after"] == expected_overlap
+
+
+def test_full_refresh_after_one_day_removes_stale_documents():
+    now = {"monotonic": 100.0, "wall": 1784196000.0}
+    readwise = FakeReadwiseService(
+        library_lookup={
+            "status": "complete",
+            "documents": [
+                {
+                    "id": "reader-deleted-remotely",
+                    "source_url": "https://youtu.be/abcdefghijk",
+                }
+            ],
+        }
+    )
+    service = build_service(
+        FakeFileService(),
+        readwise,
+        clock=lambda: now["monotonic"],
+        wall_clock=lambda: now["wall"],
+        incremental_refresh_seconds=600,
+        full_refresh_seconds=86400,
+    )
+
+    assert service.get_status("abcdefghijk")["status"] == "saved"
+    now["monotonic"] += 86401
+    now["wall"] += 86401
+    readwise.library_lookup = {"status": "complete", "documents": []}
+
+    after_reconciliation = service.get_status("abcdefghijk")
+
+    assert after_reconciliation["status"] == "not_saved"
+    assert readwise.list_calls == 2
+    assert readwise.list_call_kwargs[1]["updated_after"] is None
+
+
+def test_version_one_persisted_index_remains_compatible(tmp_path):
+    cache_path = tmp_path / "reader-index-v1.json"
+    wall_timestamp = 1784196000.0
+    generated_at = datetime.fromtimestamp(
+        wall_timestamp,
+        timezone.utc,
+    ).isoformat(timespec="seconds")
+    cache_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "generated_at": generated_at,
+                "index": {
+                    "abcdefghijk": {
+                        "id": "reader-v1",
+                        "source_url": "https://youtu.be/abcdefghijk",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    readwise = FakeReadwiseService()
+    service = build_service(
+        FakeFileService(),
+        readwise,
+        library_cache_path=str(cache_path),
+        wall_clock=lambda: wall_timestamp,
+        incremental_refresh_seconds=600,
+        full_refresh_seconds=86400,
+    )
+
+    result = service.get_status("abcdefghijk")
+
+    assert result["status"] == "saved"
+    assert result["reader_document_id"] == "reader-v1"
+    assert readwise.list_calls == 0

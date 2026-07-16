@@ -192,6 +192,40 @@ def test_list_reader_documents_paginates_and_reports_completeness(monkeypatch):
     ]
 
 
+def test_list_reader_documents_passes_updated_after_to_every_page(monkeypatch):
+    service = ReadwiseService()
+    service.enabled = True
+    calls = []
+
+    def fake_make_request(method, endpoint, data=None, params=None):
+        calls.append(params)
+        if len(calls) == 1:
+            return {"results": [], "nextPageCursor": "next-page"}
+        return {"results": [], "nextPageCursor": None}
+
+    monkeypatch.setattr(service, "_make_request", fake_make_request)
+
+    result = service.list_reader_documents(
+        category="video",
+        updated_after="2026-07-16T10:00:00+00:00",
+    )
+
+    assert result["status"] == "complete"
+    assert calls == [
+        {
+            "limit": 100,
+            "category": "video",
+            "updatedAfter": "2026-07-16T10:00:00+00:00",
+        },
+        {
+            "limit": 100,
+            "category": "video",
+            "updatedAfter": "2026-07-16T10:00:00+00:00",
+            "pageCursor": "next-page",
+        },
+    ]
+
+
 def test_list_reader_documents_marks_page_limit_as_partial(monkeypatch):
     service = ReadwiseService()
     service.enabled = True

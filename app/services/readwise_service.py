@@ -396,6 +396,7 @@ class ReadwiseService:
         self,
         *,
         category: Optional[str] = None,
+        updated_after: Optional[str] = None,
         limit: int = 100,
         max_pages: int = 20,
         page_interval_seconds: float = 0.0,
@@ -425,6 +426,8 @@ class ReadwiseService:
             params: Dict[str, Any] = {"limit": bounded_limit}
             if category:
                 params["category"] = category
+            if updated_after:
+                params["updatedAfter"] = str(updated_after)
             if page_cursor:
                 params["pageCursor"] = page_cursor
 

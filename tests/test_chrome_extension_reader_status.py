@@ -14,10 +14,15 @@ def test_extension_exposes_short_reader_status_labels_and_reprocess_action():
     assert "已剪藏 ↗" in content_script
     assert "button.textContent = '剪藏'" in content_script
     assert "状态未知" in content_script
+    assert "直接剪藏" in content_script
     assert "重新处理" in content_script
     assert "CHECK_YOUTUBE_READER_STATUS" in content_script
     assert "reader_index_warming" in content_script
-    assert "READER_STATUS_MAX_WARMING_RETRIES = 6" in content_script
+    assert "READER_STATUS_DIRECT_CLIP_DELAY_MS = 2000" in content_script
+    assert "READER_STATUS_MAX_WARMING_RETRIES = 24" in content_script
+    assert "action.dataset.readerStatusReason !== 'reader_index_warming'" in content_script
+    assert "button.dataset.mode === 'checking'" in content_script
+    assert "readerStatusRequestSequence += 1" in content_script
     assert "response.readwise_fallback_url" in content_script
     assert "response.readwise_url_only_url" in content_script
 
@@ -33,4 +38,4 @@ def test_extension_background_uses_server_side_reader_status_endpoint():
     assert "/process/reader-status/youtube/" in background
     assert "buildAccessHeaders(settings)" in background
     assert "readwiseToken" not in background
-    assert manifest["version"] == "1.5"
+    assert manifest["version"] == "1.6"

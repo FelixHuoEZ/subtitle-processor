@@ -1,16 +1,19 @@
 (function () {
   const ACTION_ID = 'subtitle-processor-youtube-action';
   const BUTTON_ID = 'subtitle-processor-youtube-button';
+  const DIRECT_CLIP_BUTTON_ID = 'subtitle-processor-youtube-direct-clip';
   const REPROCESS_BUTTON_ID = 'subtitle-processor-youtube-reprocess';
   const STYLE_ID = 'subtitle-processor-youtube-style';
   const TOAST_ID = 'subtitle-processor-youtube-toast';
+  const READER_STATUS_DIRECT_CLIP_DELAY_MS = 2000;
   const READER_STATUS_RETRY_INTERVAL_MS = 5000;
-  const READER_STATUS_MAX_WARMING_RETRIES = 6;
+  const READER_STATUS_MAX_WARMING_RETRIES = 24;
 
   let refreshTimer = null;
   let lastUrl = '';
   let activeProcessId = null;
   let readerStatusRequestSequence = 0;
+  let readerStatusDirectClipTimer = null;
 
   injectStyles();
   scheduleRefresh();
@@ -38,6 +41,7 @@
     const existing = document.getElementById(ACTION_ID);
 
     if (!videoId) {
+      clearDirectClipTimer();
       if (existing) {
         existing.remove();
       }
@@ -87,6 +91,7 @@
     wrapper.id = ACTION_ID;
     wrapper.dataset.videoId = videoId;
     wrapper.dataset.readerStatusRetryCount = '0';
+    wrapper.dataset.readerStatusReason = '';
 
     const button = document.createElement('button');
     button.id = BUTTON_ID;
@@ -97,6 +102,14 @@
     button.dataset.mode = 'checking';
     button.addEventListener('click', handlePrimaryClick);
 
+    const directClipButton = document.createElement('button');
+    directClipButton.id = DIRECT_CLIP_BUTTON_ID;
+    directClipButton.type = 'button';
+    directClipButton.textContent = '直接剪藏';
+    directClipButton.title = '跳过 Reader 状态检查并发送当前视频';
+    directClipButton.hidden = true;
+    directClipButton.addEventListener('click', handleSubmitClick);
+
     const reprocessButton = document.createElement('button');
     reprocessButton.id = REPROCESS_BUTTON_ID;
     reprocessButton.type = 'button';
@@ -106,6 +119,7 @@
     reprocessButton.addEventListener('click', handleSubmitClick);
 
     wrapper.appendChild(button);
+    wrapper.appendChild(directClipButton);
     wrapper.appendChild(reprocessButton);
     return wrapper;
   }
@@ -116,10 +130,12 @@
     }
 
     activeProcessId = null;
+    clearDirectClipTimer();
     readerStatusRequestSequence += 1;
     action.dataset.videoId = videoId;
     action.dataset.readerStatusVideoId = '';
     action.dataset.readerStatusRetryCount = '0';
+    action.dataset.readerStatusReason = '';
     setCheckingState(action);
   }
 
@@ -140,7 +156,11 @@
       const videoId = extractVideoId(location.href);
       if (action && videoId) {
         action.dataset.readerStatusRetryCount = '0';
-        ensureReaderStatus(action, videoId, true);
+        ensureReaderStatus(
+          action,
+          videoId,
+          action.dataset.readerStatusReason !== 'reader_index_warming'
+        );
       }
       return;
     }
@@ -166,7 +186,10 @@
 
     const requestSequence = ++readerStatusRequestSequence;
     action.dataset.readerStatusVideoId = videoId;
-    setCheckingState(action);
+    setCheckingState(action, Boolean(warmingRetry));
+    if (!warmingRetry) {
+      scheduleDirectClipFallback(action, videoId);
+    }
 
     try {
       const response = await sendMessage({
@@ -187,7 +210,7 @@
 
       if (!response || !response.success) {
         action.dataset.readerStatusRetryCount = '0';
-        setUnknownState(action);
+        setUnknownState(action, 'reader_status_lookup_failed');
         return;
       }
 
@@ -212,14 +235,14 @@
       }
 
       action.dataset.readerStatusRetryCount = '0';
-      setUnknownState(action);
+      setUnknownState(action, response.reason || 'reader_status_unknown');
     } catch (error) {
       if (
         requestSequence === readerStatusRequestSequence &&
         action.dataset.videoId === videoId
       ) {
         action.dataset.readerStatusRetryCount = '0';
-        setUnknownState(action);
+        setUnknownState(action, 'reader_status_request_failed');
       }
     }
   }
@@ -231,19 +254,71 @@
     }
 
     action.dataset.readerStatusRetryCount = String(retryCount + 1);
-    setCheckingState(action);
+    setCheckingState(action, true);
     setTimeout(() => {
-      if (action.dataset.videoId === videoId) {
+      const button = action.querySelector(`#${BUTTON_ID}`);
+      if (
+        action.dataset.videoId === videoId &&
+        button &&
+        button.dataset.mode === 'checking'
+      ) {
         ensureReaderStatus(action, videoId, false, true);
       }
     }, READER_STATUS_RETRY_INTERVAL_MS);
     return true;
   }
 
-  function setCheckingState(action) {
+  function scheduleDirectClipFallback(action, videoId) {
+    clearDirectClipTimer();
+    const directClipButton = action.querySelector(`#${DIRECT_CLIP_BUTTON_ID}`);
+    if (directClipButton) {
+      directClipButton.hidden = true;
+      directClipButton.disabled = false;
+    }
+    readerStatusDirectClipTimer = setTimeout(() => {
+      readerStatusDirectClipTimer = null;
+      const currentAction = currentActionForVideo(videoId);
+      const currentButton = currentAction && currentAction.querySelector(`#${BUTTON_ID}`);
+      const currentDirectClipButton = currentAction &&
+        currentAction.querySelector(`#${DIRECT_CLIP_BUTTON_ID}`);
+      if (
+        currentButton &&
+        currentButton.dataset.mode === 'checking' &&
+        currentDirectClipButton
+      ) {
+        currentDirectClipButton.hidden = false;
+      }
+    }, READER_STATUS_DIRECT_CLIP_DELAY_MS);
+  }
+
+  function clearDirectClipTimer() {
+    if (readerStatusDirectClipTimer !== null) {
+      clearTimeout(readerStatusDirectClipTimer);
+      readerStatusDirectClipTimer = null;
+    }
+  }
+
+  function hideDirectClipAction(action) {
+    const directClipButton = action.querySelector(`#${DIRECT_CLIP_BUTTON_ID}`);
+    if (directClipButton) {
+      directClipButton.hidden = true;
+      directClipButton.disabled = false;
+    }
+  }
+
+  function showDirectClipAction(action) {
+    const directClipButton = action.querySelector(`#${DIRECT_CLIP_BUTTON_ID}`);
+    if (directClipButton) {
+      directClipButton.hidden = false;
+      directClipButton.disabled = false;
+    }
+  }
+
+  function setCheckingState(action, preserveDirectClip) {
     const button = action.querySelector(`#${BUTTON_ID}`);
     const reprocessButton = action.querySelector(`#${REPROCESS_BUTTON_ID}`);
     action.dataset.readerUrl = '';
+    action.dataset.readerStatusReason = '';
     if (button) {
       button.disabled = true;
       button.dataset.mode = 'checking';
@@ -254,12 +329,18 @@
       reprocessButton.hidden = true;
       reprocessButton.disabled = false;
     }
+    if (!preserveDirectClip) {
+      hideDirectClipAction(action);
+    }
   }
 
   function setSavedState(action, readerUrl) {
+    clearDirectClipTimer();
     const button = action.querySelector(`#${BUTTON_ID}`);
     const reprocessButton = action.querySelector(`#${REPROCESS_BUTTON_ID}`);
     action.dataset.readerUrl = readerUrl || '';
+    action.dataset.readerStatusReason = '';
+    hideDirectClipAction(action);
     if (button) {
       button.disabled = false;
       button.dataset.mode = 'saved';
@@ -273,9 +354,12 @@
   }
 
   function setNotSavedState(action) {
+    clearDirectClipTimer();
     const button = action.querySelector(`#${BUTTON_ID}`);
     const reprocessButton = action.querySelector(`#${REPROCESS_BUTTON_ID}`);
     action.dataset.readerUrl = '';
+    action.dataset.readerStatusReason = '';
+    hideDirectClipAction(action);
     if (button) {
       button.disabled = false;
       button.dataset.mode = 'submit';
@@ -288,10 +372,13 @@
     }
   }
 
-  function setUnknownState(action) {
+  function setUnknownState(action, reason) {
+    clearDirectClipTimer();
     const button = action.querySelector(`#${BUTTON_ID}`);
     const reprocessButton = action.querySelector(`#${REPROCESS_BUTTON_ID}`);
     action.dataset.readerUrl = '';
+    action.dataset.readerStatusReason = reason || 'reader_status_unknown';
+    showDirectClipAction(action);
     if (button) {
       button.disabled = false;
       button.dataset.mode = 'unknown';
@@ -305,12 +392,18 @@
   }
 
   function setSubmittingState(action) {
+    clearDirectClipTimer();
     const button = action.querySelector(`#${BUTTON_ID}`);
+    const directClipButton = action.querySelector(`#${DIRECT_CLIP_BUTTON_ID}`);
     const reprocessButton = action.querySelector(`#${REPROCESS_BUTTON_ID}`);
     if (button) {
       button.disabled = true;
       button.dataset.mode = 'submitting';
       button.textContent = '发送中…';
+    }
+    if (directClipButton) {
+      directClipButton.hidden = true;
+      directClipButton.disabled = true;
     }
     if (reprocessButton) {
       reprocessButton.disabled = true;
@@ -326,6 +419,7 @@
       return;
     }
 
+    readerStatusRequestSequence += 1;
     setSubmittingState(action);
     showToast('正在发送到后台...', 'info');
 
@@ -534,6 +628,7 @@
       }
 
       #${BUTTON_ID},
+      #${DIRECT_CLIP_BUTTON_ID},
       #${REPROCESS_BUTTON_ID} {
         height: 36px;
         padding: 0 14px;
@@ -549,11 +644,13 @@
       }
 
       #${BUTTON_ID}:hover,
+      #${DIRECT_CLIP_BUTTON_ID}:hover,
       #${REPROCESS_BUTTON_ID}:hover {
         background: var(--yt-spec-button-chip-background-hover, rgba(0, 0, 0, 0.1));
       }
 
       #${BUTTON_ID}:disabled,
+      #${DIRECT_CLIP_BUTTON_ID}:disabled,
       #${REPROCESS_BUTTON_ID}:disabled {
         cursor: default;
         opacity: 0.7;
@@ -564,6 +661,7 @@
         color: #15803d;
       }
 
+      #${DIRECT_CLIP_BUTTON_ID},
       #${REPROCESS_BUTTON_ID} {
         height: 30px;
         padding: 0 10px;
@@ -573,6 +671,7 @@
         opacity: 0.78;
       }
 
+      #${DIRECT_CLIP_BUTTON_ID}[hidden],
       #${REPROCESS_BUTTON_ID}[hidden] {
         display: none;
       }
